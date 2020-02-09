@@ -1,6 +1,8 @@
 package ast
 
-import "mutant/token"
+import (
+	"mutant/token"
+)
 
 type ExpressionStatement struct {
 	Token      token.Token // first token of expression
@@ -13,6 +15,5 @@ func (es *ExpressionStatement) String() string {
 	if es.Expression != nil {
 		return es.Expression.String()
 	}
-
 	return ""
 }
