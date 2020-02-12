@@ -111,7 +111,7 @@ func (p *Parser) parseLetStatement() *ast.LetStatement {
 	//todo: skipping expressions until we find semicolon
 	// find a semicolon
 
-	if !p.curTokenIs(token.SEMICOLON) {
+	for !p.curTokenIs(token.SEMICOLON) {
 		p.nextToken()
 	}
 
@@ -125,6 +125,7 @@ func (p *Parser) parseIdentifier() ast.Expression {
 func (p *Parser) parseExpression(precedence int) ast.Expression {
 	prefix := p.prefixParseFns[p.curToken.Type]
 	if prefix == nil {
+		p.notPrefixParseFnError(p.curToken.Type)
 		return nil
 	}
 
@@ -180,4 +181,9 @@ func (p *Parser) registerPrefix(tokenType token.TokenType, fn prefixParseFn) {
 
 func (p *Parser) registerInfix(tokenType token.TokenType, fn infixParseFn) {
 	p.infixParseFns[tokenType] = fn
+}
+
+func (p *Parser) notPrefixParseFnError(t token.TokenType) {
+	msg := fmt.Sprintf("no prefix parse function for %s found", t)
+	p.errors = append(p.errors, msg)
 }
