@@ -19,6 +19,17 @@ const (
 	CALL
 )
 
+var precedences = map[token.TokenType]int{
+	token.EQUALITY:   EQUALS,
+	token.INEQUALITY: EQUALS,
+	token.LT:         LESSGREATER,
+	token.GT:         LESSGREATER,
+	token.PLUS:       SUM,
+	token.MINUS:      SUM,
+	token.FSLASH:     PRODUCT,
+	token.ASTERISK:   PRODUCT,
+}
+
 type (
 	prefixParseFn func() ast.Expression
 	infixParseFn  func(ast.Expression) ast.Expression
@@ -187,6 +198,20 @@ func (p *Parser) curTokenIs(tokenType token.TokenType) bool  { return p.curToken
 func (p *Parser) peekError(t token.TokenType) {
 	msg := fmt.Sprintf("expected next token to be %s, but got %s instead", t, p.peekToken.Type)
 	p.errors = append(p.errors, msg)
+}
+
+func (p *Parser) peekPrecedence() int {
+	if prec, ok := precedences[p.peekToken.Type]; ok {
+		return prec
+	}
+	return LOWEST
+}
+
+func (p *Parser) curPrecedence() int {
+	if prec, ok := precedences[p.curToken.Type]; ok {
+		return prec
+	}
+	return LOWEST
 }
 
 func (p *Parser) registerPrefix(tokenType token.TokenType, fn prefixParseFn) {
