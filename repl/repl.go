@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"mutant/lexer"
-	"mutant/token"
+	"mutant/parser"
 )
 
 // PROMPT is the constant for showing REPL prompt
@@ -14,18 +14,30 @@ const PROMPT = ">> "
 // Start function is the entrypoint of our repl
 func Start(in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
-	fmt.Printf("\n\n%s", PROMPT)
 	for {
+		fmt.Printf("\n\n%s", PROMPT)
 		scanned := scanner.Scan()
 		if !scanned {
 			return
 		}
+
 		line := scanner.Text()
 		l := lexer.New(line)
+		p := parser.New(l)
+		program := p.ParseProgram()
 
-		for tok := l.NextToken(); tok.Type != token.EOF; tok = l.NextToken() {
-			fmt.Printf("%+v\n", tok)
+		if len(p.Errors()) != 0 {
+			printParseErrors(out, p.Errors())
+			continue
 		}
-		fmt.Printf(PROMPT)
+
+		io.WriteString(out, program.String())
+		io.WriteString(out, "\n")
+	}
+}
+
+func printParseErrors(out io.Writer, msgs []string) {
+	for _, msg := range msgs {
+		io.WriteString(out, "\t"+msg+"\t")
 	}
 }
