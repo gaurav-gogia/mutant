@@ -7,38 +7,36 @@ import (
 )
 
 func TestLetStatements(t *testing.T) {
-	input :=
-		`
-			let x = 5;
-			let y = 10;
-			let foobar = 838383;
-		`
-
-	l := lexer.New(input)
-	p := New(l) // new parser
-
-	program := p.ParseProgram()
-	checkParserErrors(t, p)
-
-	if program == nil {
-		t.Fatalf("ParseProgram() returned nil")
-	}
-
-	if len(program.Statements) != 3 {
-		t.Fatalf("program.Statements does not contain 3 statements. Got = %d", len(program.Statements))
-	}
-
 	tests := []struct {
+		input              string
 		expectedIdentifier string
+		expectedValue      interface{}
 	}{
-		{"x"},
-		{"y"},
-		{"foobar"},
+		{"let x = 5;", "x", 5}, {"let y = true;", "y", true}, {"let foobar = y;", "foobar", "y"},
 	}
 
-	for i, tt := range tests {
-		stmt := program.Statements[i]
+	for _, tt := range tests {
+		l := lexer.New(tt.input)
+		p := New(l) // new parser
+
+		program := p.ParseProgram()
+		checkParserErrors(t, p)
+
+		if program == nil {
+			t.Fatalf("ParseProgram() returned nil")
+		}
+
+		if len(program.Statements) != 1 {
+			t.Fatalf("program.Statements does not contain 3 statements. Got = %d", len(program.Statements))
+		}
+
+		stmt := program.Statements[0]
 		if !testLetStmt(t, stmt, tt.expectedIdentifier) {
+			return
+		}
+
+		val := stmt.(*ast.LetStatement).Value
+		if !testLiteralExpression(t, val, tt.expectedValue) {
 			return
 		}
 	}
@@ -265,6 +263,9 @@ func TestOperatorPrecedenceParsing(t *testing.T) {
 		{"2 / (5 + 5)", "(2 / (5 + 5))"},
 		{"-(5 + 5)", "(-(5 + 5))"},
 		{"!(true == true)", "(!(true == true))"},
+		{"a + add(b * c) + d", "((a + add((b * c))) + d)"},
+		{"add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))", "add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)))"},
+		{"add(a + b + c * d / f + g)", "add((((a + b) + ((c * d) / f)) + g))"},
 	}
 
 	for _, tt := range tests {
@@ -453,7 +454,6 @@ func TestFunctionParameterParsing(t *testing.T) {
 	}
 }
 
-/*
 func TestCallExpressionParsing(t *testing.T) {
 	input := "add(1, 2 * 3, 4 + 5);"
 
@@ -545,4 +545,3 @@ func TestCallExpressionParameterParsing(t *testing.T) {
 		}
 	}
 }
-*/
