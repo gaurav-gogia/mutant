@@ -8,7 +8,12 @@ func TestEvalIntegerExpression(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected int64
-	}{{"5", 5}, {"10", 10}}
+	}{
+		{"5", 5},
+		{"10", 10},
+		{"-5", -5},
+		{"-10", -10},
+	}
 
 	for _, tt := range tests {
 		evaluated := testEval(tt.input)
