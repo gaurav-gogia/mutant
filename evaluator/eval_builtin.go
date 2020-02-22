@@ -96,9 +96,9 @@ var builtins = map[string]*object.BuiltIn{
 	"puts": &object.BuiltIn{
 		Fn: func(args ...object.Object) object.Object {
 			for _, arg := range args {
-				fmt.Println(arg.Inspect())
+				fmt.Printf(arg.Inspect())
 			}
-			return NULL
+			return &object.String{Value: ""}
 		},
 	},
 }
