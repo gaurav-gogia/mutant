@@ -29,6 +29,7 @@ const (
 	BANG       = "!"
 	EQUALITY   = "=="
 	INEQUALITY = "!="
+	COLON      = ":"
 
 	// Delimiters
 	COMMA     = ","
