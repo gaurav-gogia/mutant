@@ -1,6 +1,7 @@
 package evaluator
 
 import (
+	"fmt"
 	"mutant/object"
 )
 
@@ -90,6 +91,14 @@ var builtins = map[string]*object.BuiltIn{
 			newElements[length] = args[1]
 
 			return &object.Array{Elements: newElements}
+		},
+	},
+	"puts": &object.BuiltIn{
+		Fn: func(args ...object.Object) object.Object {
+			for _, arg := range args {
+				fmt.Println(arg.Inspect())
+			}
+			return NULL
 		},
 	},
 }
