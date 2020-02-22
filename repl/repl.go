@@ -6,6 +6,7 @@ import (
 	"io"
 	"mutant/evaluator"
 	"mutant/lexer"
+	"mutant/object"
 	"mutant/parser"
 )
 
@@ -32,7 +33,10 @@ const BANNER = BAN1 + BAN2 + BAN3 + BAN4 + BAN5
 // Start function is the entrypoint of our repl
 func Start(in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
+	env := object.NewEnvironment()
+
 	io.WriteString(out, BANNER)
+
 	for {
 		fmt.Printf("\n\n%s", PROMPT)
 		scanned := scanner.Scan()
@@ -50,7 +54,7 @@ func Start(in io.Reader, out io.Writer) {
 			continue
 		}
 
-		if evald := evaluator.Eval(program); evald != nil {
+		if evald := evaluator.Eval(program, env); evald != nil {
 			io.WriteString(out, evald.Inspect())
 			io.WriteString(out, "\n")
 		}
