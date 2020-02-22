@@ -34,6 +34,7 @@ const BANNER = BAN1 + BAN2 + BAN3 + BAN4 + BAN5
 func Start(in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
 	env := object.NewEnvironment()
+	macroEnv := object.NewEnvironment()
 
 	io.WriteString(out, BANNER)
 
@@ -54,8 +55,12 @@ func Start(in io.Reader, out io.Writer) {
 			continue
 		}
 
-		if evald := evaluator.Eval(program, env); evald != nil {
-			io.WriteString(out, evald.Inspect())
+		evaluator.DefineMacros(program, macroEnv)
+		expanded := evaluator.ExpandMacros(program, macroEnv)
+		evaluated := evaluator.Eval(expanded, env)
+
+		if evaluated != nil {
+			io.WriteString(out, evaluated.Inspect())
 			io.WriteString(out, "\n")
 		}
 	}
