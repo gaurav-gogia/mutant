@@ -73,6 +73,7 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerInfix(token.GT, p.parseInfixExpression)
 	p.registerInfix(token.LPAREN, p.parseCallExpression)
 	p.registerInfix(token.LSQUARE, p.parseIndexExpression)
+	p.registerPrefix(token.LBRACE, p.parseHashLiteral)
 
 	p.nextToken()
 	p.nextToken()
