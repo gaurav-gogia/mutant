@@ -60,7 +60,7 @@ func parse(input string) ast.Node {
 
 func testInstructions(expected []code.Instructions, actual code.Instructions) error {
 	concatted := flattenInstructions(expected)
-	if len(expected) != len(concatted) {
+	if len(actual) != len(concatted) {
 		return fmt.Errorf("\nwrong instructions length.\nwant = %q, got = %q", concatted, actual)
 	}
 
