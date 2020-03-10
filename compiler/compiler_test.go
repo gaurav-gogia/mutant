@@ -38,6 +38,36 @@ func TestIntegerArithmatic(t *testing.T) {
 				code.Make(code.OpPop),
 			},
 		},
+		{
+			input:             "1 - 2",
+			expectedConstants: []interface{}{1, 2},
+			expectedInstructions: []code.Instructions{
+				code.Make(code.OpConstant, 0),
+				code.Make(code.OpConstant, 1),
+				code.Make(code.OpSub),
+				code.Make(code.OpPop),
+			},
+		},
+		{
+			input:             "1 * 2",
+			expectedConstants: []interface{}{1, 2},
+			expectedInstructions: []code.Instructions{
+				code.Make(code.OpConstant, 0),
+				code.Make(code.OpConstant, 1),
+				code.Make(code.OpMul),
+				code.Make(code.OpPop),
+			},
+		},
+		{
+			input:             "2 / 1",
+			expectedConstants: []interface{}{2, 1},
+			expectedInstructions: []code.Instructions{
+				code.Make(code.OpConstant, 0),
+				code.Make(code.OpConstant, 1),
+				code.Make(code.OpDiv),
+				code.Make(code.OpPop),
+			},
+		},
 	}
 
 	runCompilerTests(t, tests)
@@ -73,12 +103,12 @@ func parse(input string) ast.Node {
 func testInstructions(expected []code.Instructions, actual code.Instructions) error {
 	concatted := flattenInstructions(expected)
 	if len(actual) != len(concatted) {
-		return fmt.Errorf("\nwrong instructions length.\nwant = %q, got = %q", concatted, actual)
+		return fmt.Errorf("\nwrong instructions length.\nwant = %q,\ngot = %q", concatted, actual)
 	}
 
 	for i, ins := range concatted {
 		if actual[i] != ins {
-			return fmt.Errorf("wrong instruction at %d, \ngot = %q, want = %q", i, concatted, actual)
+			return fmt.Errorf("\nwrong instruction at %d, \ngot  = %q,\nwant = %q", i, concatted, actual)
 		}
 	}
 
