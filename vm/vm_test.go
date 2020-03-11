@@ -15,7 +15,7 @@ type vmTestCase struct {
 	expected interface{}
 }
 
-func runVmTests(t *testing.T, tests []vmTestCase) {
+func runVMTests(t *testing.T, tests []vmTestCase) {
 	t.Helper()
 	for _, tt := range tests {
 		program := parse(tt.input)
@@ -97,7 +97,7 @@ func TestIntegerArithmatic(t *testing.T) {
 		{"5 + 2 * 10", 25},
 		{"5 * (2 + 10)", 60},
 	}
-	runVmTests(t, tests)
+	runVMTests(t, tests)
 }
 
 func TestBooleanExpressions(t *testing.T) {
@@ -122,5 +122,5 @@ func TestBooleanExpressions(t *testing.T) {
 		{"(1 > 2) == true", false},
 		{"(1 > 2) == false", true},
 	}
-	runVmTests(t, tests)
+	runVMTests(t, tests)
 }
