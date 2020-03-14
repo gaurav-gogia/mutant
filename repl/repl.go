@@ -13,30 +13,11 @@ import (
 // PROMPT is the constant for showing REPL prompt
 const PROMPT = ">> "
 
-const BAN1 = `
-                    __              __ 
-   ____ ___  __  __/ /_____ _____  / /_
-  / __ 
-  `
-
-const BAN2 = "`"
-const BAN3 = `__ \/ / / / __/ __ `
-const BAN4 = "`"
-const BAN5 = `/ __ \/ __/
- / / / / / / /_/ / /_/ /_/ / / / / /_  
-/_/ /_/ /_/\__,_/\__/\__,_/_/ /_/\__/  
-                                       
-`
-
-const BANNER = BAN1 + BAN2 + BAN3 + BAN4 + BAN5
-
 // Start function is the entrypoint of our repl
 func Start(in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
 	// env := object.NewEnvironment()
 	// macroEnv := object.NewEnvironment()
-
-	io.WriteString(out, BANNER)
 
 	for {
 		fmt.Printf("\n\n%s", PROMPT)
