@@ -115,16 +115,15 @@ func (c *Compiler) Compile(node ast.Node) error {
 			c.removeLastPop()
 		}
 
+		// emit bogus jump location
+		jumpPos := c.emit(code.OpJump, 9999)
+
+		afterConsequencePosition := len(c.instructions)
+		c.changeOperand(jumpFalsePosition, afterConsequencePosition)
+
 		if node.Alternative == nil {
-			afterConsequencePosition := len(c.instructions)
-			c.changeOperand(jumpFalsePosition, afterConsequencePosition)
+			c.emit(code.OpNull)
 		} else {
-			// emit bogus jump location
-			jumpPos := c.emit(code.OpJump, 9999)
-
-			afterConsequencePosition := len(c.instructions)
-			c.changeOperand(jumpFalsePosition, afterConsequencePosition)
-
 			if err := c.Compile(node.Alternative); err != nil {
 				return err
 			}
@@ -132,10 +131,10 @@ func (c *Compiler) Compile(node ast.Node) error {
 			if c.lastInstructionIsPop() {
 				c.removeLastPop()
 			}
-
-			afterAlternativePosition := len(c.instructions)
-			c.changeOperand(jumpPos, afterAlternativePosition)
 		}
+
+		afterAlternativePosition := len(c.instructions)
+		c.changeOperand(jumpPos, afterAlternativePosition)
 
 	case *ast.IntegerLiteral:
 		integer := &object.Integer{Value: node.Value}

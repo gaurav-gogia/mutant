@@ -25,6 +25,7 @@ const (
 	OpBang
 	OpJumpFalse
 	OpJump
+	OpNull
 )
 
 type Definition struct {
@@ -48,6 +49,7 @@ var definitions = map[Opcode]*Definition{
 	OpBang:      {"OpBang", []int{}},
 	OpJumpFalse: {"OpJumpFalse", []int{2}},
 	OpJump:      {"OpJump", []int{2}},
+	OpNull:      {"OpNull", []int{}},
 }
 
 func Lookup(op byte) (*Definition, error) {
