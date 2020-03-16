@@ -182,6 +182,51 @@ func TestBooleanExpressions(t *testing.T) {
 	runCompilerTests(t, tests)
 }
 
+func TestConditionals(t *testing.T) {
+	tests := []compilerTestCase{
+		{
+			input:             "if (true) { 10 }; 3333; ",
+			expectedConstants: []interface{}{10, 3333},
+			expectedInstructions: []code.Instructions{
+				// 0000
+				code.Make(code.OpTrue),
+				// 0001
+				code.Make(code.OpJumpFalse, 7),
+				// 0004
+				code.Make(code.OpConstant, 0),
+				// 0007
+				code.Make(code.OpPop),
+				// 0008
+				code.Make(code.OpConstant, 1),
+				// 0011
+				code.Make(code.OpPop)},
+		},
+		{
+			input:             "if (true) { 10 } else { 20 }; 3333; ",
+			expectedConstants: []interface{}{10, 20, 3333},
+			expectedInstructions: []code.Instructions{
+				// 0000
+				code.Make(code.OpTrue),
+				// 0001
+				code.Make(code.OpJumpFalse, 10),
+				// 0004
+				code.Make(code.OpConstant, 0),
+				// 0007
+				code.Make(code.OpJump, 13),
+				// 0010
+				code.Make(code.OpConstant, 1),
+				// 0013
+				code.Make(code.OpPop),
+				// 0014
+				code.Make(code.OpConstant, 2),
+				// 0017
+				code.Make(code.OpPop),
+			},
+		},
+	}
+	runCompilerTests(t, tests)
+}
+
 func runCompilerTests(t *testing.T, tests []compilerTestCase) {
 	t.Helper()
 	for _, tt := range tests {
@@ -212,7 +257,7 @@ func parse(input string) ast.Node {
 func testInstructions(expected []code.Instructions, actual code.Instructions) error {
 	concatted := flattenInstructions(expected)
 	if len(actual) != len(concatted) {
-		return fmt.Errorf("\nwrong instructions length.\nwant = %q,\ngot = %q", concatted, actual)
+		return fmt.Errorf("\nwrong instructions length.\nwant = \n%s, \ngot = \n%s", concatted.String(), actual.String())
 	}
 
 	for i, ins := range concatted {
