@@ -31,6 +31,9 @@ const (
 	OpArray
 	OpHash
 	OpIndex
+	OpCall
+	OpReturnValue
+	OpReturn
 )
 
 type Definition struct {
@@ -39,27 +42,30 @@ type Definition struct {
 }
 
 var definitions = map[Opcode]*Definition{
-	OpConstant:  {"OpConstant", []int{2}},
-	OpPop:       {"OpPop", []int{}},
-	OpAdd:       {"OpAdd", []int{}},
-	OpSub:       {"OpSub", []int{}},
-	OpMul:       {"OpMul", []int{}},
-	OpDiv:       {"OpDiv", []int{}},
-	OpTrue:      {"OpTrue", []int{}},
-	OpFalse:     {"OpFalse", []int{}},
-	OpEqual:     {"OpEqual", []int{}},
-	OpUnEqual:   {"OpUnEqual", []int{}},
-	OpGreater:   {"OpGreater", []int{}},
-	OpMinus:     {"OpMinus", []int{}},
-	OpBang:      {"OpBang", []int{}},
-	OpJumpFalse: {"OpJumpFalse", []int{2}},
-	OpJump:      {"OpJump", []int{2}},
-	OpNull:      {"OpNull", []int{}},
-	OpGetGlobal: {"OpGetGlobal", []int{2}},
-	OpSetGlobal: {"OpSetGlobal", []int{2}},
-	OpArray:     {"OpArray", []int{2}},
-	OpHash:      {"OpHash", []int{2}},
-	OpIndex:     {"OpIndex", []int{}},
+	OpConstant:    {"OpConstant", []int{2}},
+	OpPop:         {"OpPop", []int{}},
+	OpAdd:         {"OpAdd", []int{}},
+	OpSub:         {"OpSub", []int{}},
+	OpMul:         {"OpMul", []int{}},
+	OpDiv:         {"OpDiv", []int{}},
+	OpTrue:        {"OpTrue", []int{}},
+	OpFalse:       {"OpFalse", []int{}},
+	OpEqual:       {"OpEqual", []int{}},
+	OpUnEqual:     {"OpUnEqual", []int{}},
+	OpGreater:     {"OpGreater", []int{}},
+	OpMinus:       {"OpMinus", []int{}},
+	OpBang:        {"OpBang", []int{}},
+	OpJumpFalse:   {"OpJumpFalse", []int{2}},
+	OpJump:        {"OpJump", []int{2}},
+	OpNull:        {"OpNull", []int{}},
+	OpGetGlobal:   {"OpGetGlobal", []int{2}},
+	OpSetGlobal:   {"OpSetGlobal", []int{2}},
+	OpArray:       {"OpArray", []int{2}},
+	OpHash:        {"OpHash", []int{2}},
+	OpIndex:       {"OpIndex", []int{}},
+	OpCall:        {"Opcall", []int{}},
+	OpReturnValue: {"OpReturnValue", []int{}},
+	OpReturn:      {"OpReturn", []int{}},
 }
 
 func Lookup(op byte) (*Definition, error) {
