@@ -92,6 +92,13 @@ func (vm *VM) Run() error {
 			if err := vm.push(vm.globals[globalIndex]); err != nil {
 				return err
 			}
+		case code.OpArray:
+			numElements := int(code.ReadUint16(vm.instructions[ip+1:]))
+			ip += 2
+			array := vm.buildArray(vm.stackPointer-numElements, vm.stackPointer)
+			if err := vm.push(array); err != nil {
+				return err
+			}
 		case code.OpNull:
 			if err := vm.push(Null); err != nil {
 				return err
@@ -239,6 +246,14 @@ func (vm *VM) executeIntegerComparison(op code.Opcode, left, right object.Object
 	default:
 		return fmt.Errorf("unknown operator: %d", op)
 	}
+}
+
+func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
+	elements := make([]object.Object, endIndex-startIndex)
+	for i := startIndex; i < endIndex; i++ {
+		elements[i-startIndex] = vm.stack[i]
+	}
+	return &object.Array{Elements: elements}
 }
 
 func nativeBoolToBooleanObject(native bool) *object.Boolean {
