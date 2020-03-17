@@ -143,6 +143,13 @@ func (vm *VM) execBinaryOperation(op code.Opcode) error {
 		return vm.execBinaryIntegerOperation(op, left, right)
 	}
 
+	switch {
+	case rtype == object.INTEGER_OBJ && ltype == object.INTEGER_OBJ:
+		return vm.execBinaryIntegerOperation(op, left, right)
+	case rtype == object.STRING_OBJ && ltype == object.STRING_OBJ:
+		return vm.execBinaryStringOperation(op, left, right)
+	}
+
 	return fmt.Errorf("Unsupported types for binary operation: %s, %s", ltype, rtype)
 }
 
@@ -165,6 +172,17 @@ func (vm *VM) execBinaryIntegerOperation(op code.Opcode, left, right object.Obje
 	}
 
 	return vm.push(&object.Integer{Value: result})
+}
+
+func (vm *VM) execBinaryStringOperation(op code.Opcode, left, right object.Object) error {
+	rval := right.(*object.String).Value
+	lval := left.(*object.String).Value
+
+	if op != code.OpAdd {
+		return fmt.Errorf("Unknown string operator: %d", op)
+	}
+
+	return vm.push(&object.String{Value: lval + rval})
 }
 
 func (vm *VM) executeBangOperation() error {
