@@ -15,6 +15,7 @@ const (
 	HASH_OBJ         = "HASH"
 	QUOTE_OBJ        = "QUOTE"
 	MACRO_OBJ        = "MACRO"
+	COMPILED_FN_OBJ  = "COMPILED_FN_OBJ"
 )
 
 type Object interface {
