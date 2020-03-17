@@ -6,6 +6,7 @@ import (
 	"io"
 	"mutant/compiler"
 	"mutant/lexer"
+	"mutant/object"
 	"mutant/parser"
 	"mutant/vm"
 )
@@ -18,6 +19,10 @@ func Start(in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
 	// env := object.NewEnvironment()
 	// macroEnv := object.NewEnvironment()
+
+	constants := []object.Object{}
+	globals := make([]object.Object, vm.GlobalSize)
+	symbolTable := compiler.NewSymbolTable()
 
 	for {
 		fmt.Printf("\n\n%s", PROMPT)
@@ -36,13 +41,13 @@ func Start(in io.Reader, out io.Writer) {
 			continue
 		}
 
-		comp := compiler.New()
+		comp := compiler.NewWithState(symbolTable, constants)
 		if err := comp.Compile(program); err != nil {
 			printCompilerError(out, err.Error())
 			continue
 		}
 
-		machine := vm.New(comp.ByteCode())
+		machine := vm.NewWithGlobalStore(comp.ByteCode(), globals)
 		if err := machine.Run(); err != nil {
 			printMachineError(out, err.Error())
 			continue
@@ -55,21 +60,21 @@ func Start(in io.Reader, out io.Writer) {
 }
 
 func printParseErrors(out io.Writer, msgs []string) {
-	io.WriteString(out, "Mutation gone wrong 😕. Below error messages may help!\n\n")
-	io.WriteString(out, " parser errors:\n")
+	io.WriteString(out, "\nMutation gone wrong 😕. Below error messages may help!\n\n")
+	io.WriteString(out, "parser errors:")
 	for _, msg := range msgs {
-		io.WriteString(out, "\t"+msg+"\t\n")
+		io.WriteString(out, "\n\t"+msg+"\t\n")
 	}
 }
 
 func printCompilerError(out io.Writer, msg string) {
-	io.WriteString(out, "Bytes are small but confusing 😕. Below error messages may help!\n\n")
-	io.WriteString(out, " compiler error:\n")
-	io.WriteString(out, "\t"+msg+"\t\n")
+	io.WriteString(out, "\nBytes are small but confusing 😕. Below error messages may help!\n\n")
+	io.WriteString(out, "compiler error:")
+	io.WriteString(out, "\n\t"+msg+"\t\n")
 }
 
 func printMachineError(out io.Writer, msg string) {
-	io.WriteString(out, "Even machines aren't perfect 😕. Below error messages may help!\n\n")
-	io.WriteString(out, " vm error:\n")
-	io.WriteString(out, "\t"+msg+"\t\n")
+	io.WriteString(out, "\nEven machines aren't perfect 😕. Below error messages may help!\n\n")
+	io.WriteString(out, "vm error:")
+	io.WriteString(out, "\n\t"+msg+"\t\n")
 }
