@@ -145,7 +145,14 @@ func (c *Compiler) Compile(node ast.Node) error {
 
 		afterAlternativePosition := len(c.instructions)
 		c.changeOperand(jumpPos, afterAlternativePosition)
-
+	case *ast.IndexExpression:
+		if err := c.Compile(node.Left); err != nil {
+			return err
+		}
+		if err := c.Compile(node.Index); err != nil {
+			return err
+		}
+		c.emit(code.OpIndex)
 	case *ast.IntegerLiteral:
 		integer := &object.Integer{Value: node.Value}
 		c.emit(code.OpConstant, c.addConstant(integer))
