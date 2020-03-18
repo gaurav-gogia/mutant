@@ -270,3 +270,57 @@ func TestIndexExpressions(t *testing.T) {
 	}
 	runVMTests(t, tests)
 }
+
+func TestCallingFunctionsWithoutArgument(t *testing.T) {
+	tests := []vmTestCase{
+		{
+			input:    "let x = fn(){ 5 + 10; }; x();",
+			expected: 15,
+		},
+		{
+			input:    "let o = fn(){1;}; let t = fn(){2;}; o() + t();",
+			expected: 3,
+		},
+		{
+			input:    "let a = fn() { 1 }; let b = fn() { a() + 1 }; let c = fn() { b() + 1 }; c();",
+			expected: 3,
+		},
+	}
+	runVMTests(t, tests)
+}
+
+func TestCallingFunctionsWithReturn(t *testing.T) {
+	tests := []vmTestCase{
+		{
+			input:    "let x = fn(){ return 5 + 10; }; x();",
+			expected: 15,
+		},
+		{
+			input:    "let o = fn(){ return 1;}; let t = fn(){ return 2;}; o() + t();",
+			expected: 3,
+		},
+		{
+			input:    "let a = fn() { return 1; }; let b = fn() { return a() + 1; }; let c = fn() { return b() + 1; }; c();",
+			expected: 3,
+		},
+	}
+	runVMTests(t, tests)
+}
+
+func TestFunctionsWithoutReturnValue(t *testing.T) {
+	tests := []vmTestCase{
+		{input: ` let noReturn = fn() { }; noReturn(); `, expected: Null},
+		{input: ` let noReturn = fn() { }; let noReturnTwo = fn() { noReturn(); }; noReturn(); noReturnTwo(); `, expected: Null},
+	}
+	runVMTests(t, tests)
+}
+
+func TestFirstClassFunctions(t *testing.T) {
+	tests := []vmTestCase{
+		{
+			input:    "let returnsOne = fn() { 1; }; let returnsOneReturner = fn() { returnsOne; }; returnsOneReturner()(); ",
+			expected: 1,
+		},
+	}
+	runVMTests(t, tests)
+}
