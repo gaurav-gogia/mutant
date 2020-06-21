@@ -148,13 +148,11 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpCall:
-			fn, ok := vm.stack[vm.stackPointer-1].(*object.CompiledFunction)
-			if !ok {
-				return fmt.Errorf("calling non-function")
+			numArgs := code.ReadUint8(ins[ip+1:])
+			vm.currentFrame().ip++
+			if err := vm.callFunction(int(numArgs)); err != nil {
+				return err
 			}
-			frame := NewFrame(fn, vm.stackPointer)
-			vm.pushFrame(frame)
-			vm.stackPointer = frame.bp + fn.NumLocals
 		case code.OpReturnValue:
 			returnValue := vm.pop()
 			frame := vm.popFrame()
@@ -385,6 +383,20 @@ func (vm *VM) pushFrame(f *Frame) {
 func (vm *VM) popFrame() *Frame {
 	vm.frameIndex--
 	return vm.frames[vm.frameIndex]
+}
+
+func (vm *VM) callFunction(numArgs int) error {
+	fn, ok := vm.stack[vm.stackPointer-1-numArgs].(*object.CompiledFunction)
+	if !ok {
+		return fmt.Errorf("calling non-function")
+	}
+	if numArgs != fn.NumParams {
+		return fmt.Errorf("wrong number of arguments: want=%d, got=%d", fn.NumParams, numArgs)
+	}
+	frame := NewFrame(fn, vm.stackPointer-numArgs)
+	vm.pushFrame(frame)
+	vm.stackPointer = frame.bp + fn.NumLocals
+	return nil
 }
 
 func nativeBoolToBooleanObject(native bool) *object.Boolean {
