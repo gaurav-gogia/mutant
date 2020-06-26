@@ -56,6 +56,7 @@ func (vm *VM) Run() error {
 
 	for vm.currentFrame().ip < len(vm.currentFrame().Instructions())-1 {
 		vm.currentFrame().ip++
+
 		ip = vm.currentFrame().ip
 		ins = vm.currentFrame().Instructions()
 		op = code.Opcode(ins[ip])
@@ -64,6 +65,7 @@ func (vm *VM) Run() error {
 		case code.OpConstant:
 			constIndex := code.ReadUint16(ins[ip+1:])
 			vm.currentFrame().ip += 2
+
 			if err := vm.push(vm.constants[constIndex]); err != nil {
 				return err
 			}
@@ -85,6 +87,24 @@ func (vm *VM) Run() error {
 			}
 		case code.OpFalse:
 			if err := vm.push(False); err != nil {
+				return err
+			}
+		case code.OpArray:
+			numElements := int(code.ReadUint16(ins[ip+1:]))
+			vm.currentFrame().ip += 2
+			array := vm.buildArray(vm.stackPointer-numElements, vm.stackPointer)
+			if err := vm.push(array); err != nil {
+				return err
+			}
+		case code.OpHash:
+			numElements := int(code.ReadUint16(ins[ip+1:]))
+			vm.currentFrame().ip += 2
+			hash, err := vm.buildHash(vm.stackPointer-numElements, vm.stackPointer)
+			if err != nil {
+				return err
+			}
+			vm.stackPointer = vm.stackPointer - numElements
+			if err := vm.push(hash); err != nil {
 				return err
 			}
 		case code.OpEqual, code.OpUnEqual, code.OpGreater:
@@ -123,22 +143,11 @@ func (vm *VM) Run() error {
 			if err := vm.push(vm.stack[frame.bp+int(localIndex)]); err != nil {
 				return err
 			}
-		case code.OpArray:
-			numElements := int(code.ReadUint16(ins[ip+1:]))
-			vm.currentFrame().ip += 2
-			array := vm.buildArray(vm.stackPointer-numElements, vm.stackPointer)
-			if err := vm.push(array); err != nil {
-				return err
-			}
-		case code.OpHash:
-			numElements := int(code.ReadUint16(ins[ip+1:]))
-			vm.currentFrame().ip += 2
-			hash, err := vm.buildHash(vm.stackPointer-numElements, vm.stackPointer)
-			if err != nil {
-				return err
-			}
-			vm.stackPointer = vm.stackPointer - numElements
-			if err := vm.push(hash); err != nil {
+		case code.OpGetBuiltin:
+			builtinIndex := code.ReadUint8(ins[ip+1:])
+			vm.currentFrame().ip++
+			definition := object.Builtins[builtinIndex]
+			if err := vm.push(definition.Builtin); err != nil {
 				return err
 			}
 		case code.OpIndex:
@@ -150,7 +159,7 @@ func (vm *VM) Run() error {
 		case code.OpCall:
 			numArgs := code.ReadUint8(ins[ip+1:])
 			vm.currentFrame().ip++
-			if err := vm.callFunction(int(numArgs)); err != nil {
+			if err := vm.executeCall(int(numArgs)); err != nil {
 				return err
 			}
 		case code.OpReturnValue:
@@ -385,17 +394,47 @@ func (vm *VM) popFrame() *Frame {
 	return vm.frames[vm.frameIndex]
 }
 
-func (vm *VM) callFunction(numArgs int) error {
-	fn, ok := vm.stack[vm.stackPointer-1-numArgs].(*object.CompiledFunction)
-	if !ok {
-		return fmt.Errorf("calling non-function")
+func (vm *VM) executeCall(numArgs int) error {
+	var callee object.Object
+	if vm.stack[vm.stackPointer-1-numArgs].Type() == object.COMPILED_FN_OBJ || vm.stack[vm.stackPointer-1-numArgs].Type() == object.BUILTIN_OBJ {
+		callee = vm.stack[vm.stackPointer-1-numArgs]
+	} else {
+		callee = vm.stack[0]
 	}
+
+	switch calleeType := callee.(type) {
+	case *object.CompiledFunction:
+		return vm.callFunction(calleeType, numArgs)
+	case *object.BuiltIn:
+		return vm.callBuiltin(calleeType, numArgs)
+
+	default:
+		return fmt.Errorf("calling non-function and non-built-in")
+	}
+}
+
+func (vm *VM) callFunction(fn *object.CompiledFunction, numArgs int) error {
 	if numArgs != fn.NumParams {
-		return fmt.Errorf("wrong number of arguments: want=%d, got=%d", fn.NumParams, numArgs)
+		return fmt.Errorf("wrong number of arguments. want=%d, got=%d", fn.NumParams, numArgs)
 	}
 	frame := NewFrame(fn, vm.stackPointer-numArgs)
 	vm.pushFrame(frame)
 	vm.stackPointer = frame.bp + fn.NumLocals
+	return nil
+}
+
+func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
+	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
+	result := builtin.Fn(args...)
+
+	vm.stackPointer = vm.stackPointer - numArgs - 1
+
+	if result != nil {
+		vm.push(result)
+	} else {
+		vm.push(Null)
+	}
+
 	return nil
 }
 
