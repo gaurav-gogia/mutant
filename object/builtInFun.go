@@ -42,6 +42,37 @@ var Builtins = []struct {
 		},
 	},
 	{
+		Name: "gets",
+		Builtin: &BuiltIn{
+			Fn: func(args ...Object) Object {
+				if len(args) != 1 {
+					return newError("wrong number of arguments. got=%d, want=1", len(args))
+				}
+
+				if args[0].Type() == BOOLEAN_OBJ || args[0].Type() == INTEGER_OBJ || args[0].Type() == STRING_OBJ {
+					switch args[0].(type) {
+					case *Boolean:
+						var in bool
+						fmt.Scanln(&in)
+						return &Boolean{Value: in}
+					case *Integer:
+						var in int64
+						fmt.Scanln(&in)
+						return &Integer{Value: in}
+					case *String:
+						var in string
+						fmt.Scanln(&in)
+						return &String{Value: in}
+					default:
+						return nil
+					}
+				}
+
+				return newError("argument to `gets` must be BOOLEAN or INTEGER or STRING, got %s", args[0].Type())
+			},
+		},
+	},
+	{
 		Name: "first",
 		Builtin: &BuiltIn{
 			Fn: func(args ...Object) Object {
