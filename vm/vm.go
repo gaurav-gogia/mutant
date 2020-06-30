@@ -30,7 +30,8 @@ func New(bc *compiler.ByteCode) *VM {
 	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
 	frames := make([]*Frame, MaxFrames)
 
-	mainFrame := NewFrame(mainfn, 0)
+	mainClosure := &object.Closure{Fn: mainfn}
+	mainFrame := NewFrame(mainClosure, 0)
 	frames[0] = mainFrame
 
 	return &VM{
@@ -150,10 +151,29 @@ func (vm *VM) Run() error {
 			if err := vm.push(definition.Builtin); err != nil {
 				return err
 			}
+		case code.OpGetFree:
+			freeIndex := code.ReadUint8(ins[ip+1:])
+			vm.currentFrame().ip++
+			currentClosure := vm.currentFrame().cl
+			if err := vm.push(currentClosure.Free[freeIndex]); err != nil {
+				return err
+			}
 		case code.OpIndex:
 			index := vm.pop()
 			left := vm.pop()
 			if err := vm.execIndexOperation(left, index); err != nil {
+				return err
+			}
+		case code.OpClosure:
+			constIndex := code.ReadUint16(ins[ip+1:])
+			numFree := code.ReadUint8(ins[ip+3:])
+			vm.currentFrame().ip += 3
+			if err := vm.pushClosure(int(constIndex), int(numFree)); err != nil {
+				return err
+			}
+		case code.OpCurrentClosure:
+			currentClosure := vm.currentFrame().cl
+			if err := vm.push(currentClosure); err != nil {
 				return err
 			}
 		case code.OpCall:
@@ -196,6 +216,23 @@ func (vm *VM) StackTop() object.Object {
 
 func (vm *VM) LastPoppedStackElement() object.Object {
 	return vm.stack[vm.stackPointer]
+}
+
+func (vm *VM) pushClosure(constIndex, numFree int) error {
+	constant := vm.constants[constIndex]
+	fun, ok := constant.(*object.CompiledFunction)
+	if !ok {
+		return fmt.Errorf("not a function: %+v", constant)
+	}
+
+	free := make([]object.Object, numFree)
+	for i := 0; i < numFree; i++ {
+		free[i] = vm.stack[vm.stackPointer-numFree+i]
+	}
+	vm.stackPointer = vm.stackPointer - numFree
+
+	closure := &object.Closure{Fn: fun, Free: free}
+	return vm.push(closure)
 }
 
 func (vm *VM) push(obj object.Object) error {
@@ -396,15 +433,15 @@ func (vm *VM) popFrame() *Frame {
 
 func (vm *VM) executeCall(numArgs int) error {
 	var callee object.Object
-	if vm.stack[vm.stackPointer-1-numArgs].Type() == object.COMPILED_FN_OBJ || vm.stack[vm.stackPointer-1-numArgs].Type() == object.BUILTIN_OBJ {
+	if vm.stack[vm.stackPointer-1-numArgs].Type() == object.CLOSURE_OBJ || vm.stack[vm.stackPointer-1-numArgs].Type() == object.BUILTIN_OBJ {
 		callee = vm.stack[vm.stackPointer-1-numArgs]
 	} else {
 		callee = vm.stack[0]
 	}
 
 	switch calleeType := callee.(type) {
-	case *object.CompiledFunction:
-		return vm.callFunction(calleeType, numArgs)
+	case *object.Closure:
+		return vm.callClosure(calleeType, numArgs)
 	case *object.BuiltIn:
 		return vm.callBuiltin(calleeType, numArgs)
 
@@ -413,13 +450,14 @@ func (vm *VM) executeCall(numArgs int) error {
 	}
 }
 
-func (vm *VM) callFunction(fn *object.CompiledFunction, numArgs int) error {
-	if numArgs != fn.NumParams {
-		return fmt.Errorf("wrong number of arguments. want=%d, got=%d", fn.NumParams, numArgs)
+func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
+	if numArgs != cl.Fn.NumParams {
+		return fmt.Errorf("wrong number of arguments. want=%d, got=%d", cl.Fn.NumParams, numArgs)
 	}
-	frame := NewFrame(fn, vm.stackPointer-numArgs)
+
+	frame := NewFrame(cl, vm.stackPointer-numArgs)
 	vm.pushFrame(frame)
-	vm.stackPointer = frame.bp + fn.NumLocals
+	vm.stackPointer = frame.bp + cl.Fn.NumLocals
 	return nil
 }
 

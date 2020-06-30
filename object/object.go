@@ -16,6 +16,7 @@ const (
 	QUOTE_OBJ        = "QUOTE"
 	MACRO_OBJ        = "MACRO"
 	COMPILED_FN_OBJ  = "COMPILED_FN_OBJ"
+	CLOSURE_OBJ      = "CLOSURE"
 )
 
 type Object interface {

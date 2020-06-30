@@ -37,6 +37,9 @@ const (
 	OpReturnValue
 	OpReturn
 	OpGetBuiltin
+	OpClosure
+	OpGetFree
+	OpCurrentClosure
 )
 
 type Definition struct {
@@ -45,33 +48,36 @@ type Definition struct {
 }
 
 var definitions = map[Opcode]*Definition{
-	OpConstant:    {"OpConstant", []int{2}},
-	OpPop:         {"OpPop", []int{}},
-	OpAdd:         {"OpAdd", []int{}},
-	OpSub:         {"OpSub", []int{}},
-	OpMul:         {"OpMul", []int{}},
-	OpDiv:         {"OpDiv", []int{}},
-	OpTrue:        {"OpTrue", []int{}},
-	OpFalse:       {"OpFalse", []int{}},
-	OpEqual:       {"OpEqual", []int{}},
-	OpUnEqual:     {"OpUnEqual", []int{}},
-	OpGreater:     {"OpGreater", []int{}},
-	OpMinus:       {"OpMinus", []int{}},
-	OpBang:        {"OpBang", []int{}},
-	OpJumpFalse:   {"OpJumpFalse", []int{2}},
-	OpJump:        {"OpJump", []int{2}},
-	OpNull:        {"OpNull", []int{}},
-	OpGetGlobal:   {"OpGetGlobal", []int{2}},
-	OpSetGlobal:   {"OpSetGlobal", []int{2}},
-	OpGetLocal:    {"OpGetLocal", []int{1}},
-	OpSetLocal:    {"OpSetLocal", []int{1}},
-	OpArray:       {"OpArray", []int{2}},
-	OpHash:        {"OpHash", []int{2}},
-	OpIndex:       {"OpIndex", []int{}},
-	OpCall:        {"Opcall", []int{1}},
-	OpReturnValue: {"OpReturnValue", []int{}},
-	OpReturn:      {"OpReturn", []int{}},
-	OpGetBuiltin:  {"OpGetBuiltin", []int{1}},
+	OpConstant:       {"OpConstant", []int{2}},
+	OpPop:            {"OpPop", []int{}},
+	OpAdd:            {"OpAdd", []int{}},
+	OpSub:            {"OpSub", []int{}},
+	OpMul:            {"OpMul", []int{}},
+	OpDiv:            {"OpDiv", []int{}},
+	OpTrue:           {"OpTrue", []int{}},
+	OpFalse:          {"OpFalse", []int{}},
+	OpEqual:          {"OpEqual", []int{}},
+	OpUnEqual:        {"OpUnEqual", []int{}},
+	OpGreater:        {"OpGreater", []int{}},
+	OpMinus:          {"OpMinus", []int{}},
+	OpBang:           {"OpBang", []int{}},
+	OpJumpFalse:      {"OpJumpFalse", []int{2}},
+	OpJump:           {"OpJump", []int{2}},
+	OpNull:           {"OpNull", []int{}},
+	OpGetGlobal:      {"OpGetGlobal", []int{2}},
+	OpSetGlobal:      {"OpSetGlobal", []int{2}},
+	OpGetLocal:       {"OpGetLocal", []int{1}},
+	OpSetLocal:       {"OpSetLocal", []int{1}},
+	OpArray:          {"OpArray", []int{2}},
+	OpHash:           {"OpHash", []int{2}},
+	OpIndex:          {"OpIndex", []int{}},
+	OpCall:           {"Opcall", []int{1}},
+	OpReturnValue:    {"OpReturnValue", []int{}},
+	OpReturn:         {"OpReturn", []int{}},
+	OpGetBuiltin:     {"OpGetBuiltin", []int{1}},
+	OpClosure:        {"OpClosure", []int{2, 1}},
+	OpGetFree:        {"OpGetFree", []int{1}},
+	OpCurrentClosure: {"OpCurrentClosure", []int{}},
 }
 
 func Lookup(op byte) (*Definition, error) {
@@ -141,6 +147,8 @@ func (i Instructions) fmtInstruction(def *Definition, operands []int) string {
 		return def.Name
 	case 1:
 		return fmt.Sprintf("%s %d", def.Name, operands[0])
+	case 2:
+		return fmt.Sprintf("%s %d %d", def.Name, operands[0], operands[1])
 	}
 
 	return fmt.Sprintf("ERROR: unhandled operandCount for %s\n", def.Name)
