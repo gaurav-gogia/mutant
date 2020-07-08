@@ -1,6 +1,9 @@
 package object
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 type BuiltinFunction func(args ...Object) Object
 type BuiltIn struct{ Fn BuiltinFunction }
@@ -49,26 +52,54 @@ var Builtins = []struct {
 					return newError("wrong number of arguments. got=%d, want=1", len(args))
 				}
 
-				if args[0].Type() == BOOLEAN_OBJ || args[0].Type() == INTEGER_OBJ || args[0].Type() == STRING_OBJ {
-					switch args[0].(type) {
-					case *Boolean:
+				if args[0] == nil || (reflect.ValueOf(args[0]).Kind() == reflect.Ptr && reflect.ValueOf(args[0]).IsNil()) {
+					return newError("argument to function is nil :/")
+				}
+
+				if args[0].Type() == STRING_OBJ {
+					switch args[0].Inspect() {
+					case "boolean":
+						fallthrough
+					case "bool":
+						fallthrough
+					case "BOOL":
+						fallthrough
+					case "BOOLEAN":
 						var in bool
-						fmt.Scanln(&in)
+						if _, err := fmt.Scanln(&in); err != nil {
+							return newError("input does not match declared data type")
+						}
 						return &Boolean{Value: in}
-					case *Integer:
+					case "integer":
+						fallthrough
+					case "int":
+						fallthrough
+					case "INT":
+						fallthrough
+					case "INTEGER":
 						var in int64
-						fmt.Scanln(&in)
+						if _, err := fmt.Scanln(&in); err != nil {
+							return newError("input does not match declared data type")
+						}
 						return &Integer{Value: in}
-					case *String:
+					case "string":
+						fallthrough
+					case "str":
+						fallthrough
+					case "STR":
+						fallthrough
+					case "STRING":
 						var in string
-						fmt.Scanln(&in)
+						if _, err := fmt.Scanln(&in); err != nil {
+							return newError("input does not match declared data type")
+						}
 						return &String{Value: in}
 					default:
 						return nil
 					}
 				}
 
-				return newError("argument to `gets` must be BOOLEAN or INTEGER or STRING, got %s", args[0].Type())
+				return newError("argument to `gets` must be a string declaring data type for user input. Ex: BOOLEAN or INTEGER or STRING, got %s", args[0].Type())
 			},
 		},
 	},
