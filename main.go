@@ -1,32 +1,20 @@
 package main
 
 import (
-	"fmt"
-	"mutant/repl"
+	"mutant/cli"
 	"os"
-	"os/user"
+	"strings"
 )
 
-const banner = `
-=======================================
-                  _              _   
-                 | |            | |  
-  _ __ ___  _   _| |_ __ _ _ __ | |_ 
- | '_ ' _ \| | | | __/ _' | '_ \| __|
- | | | | | | |_| | || (_| | | | | |_ 
- |_| |_| |_|\__,_|\__\__,_|_| |_|\__|
-                                     
-                                     
-=======================================
-`
-
 func main() {
-	user, err := user.Current()
-	if err != nil {
-		panic(err)
+	if len(os.Args) == 1 {
+		cli.RunRepl()
+	} else if len(os.Args) == 2 {
+
+		if strings.HasSuffix(os.Args[1], "mut") {
+			cli.CompileCode(os.Args[1])
+		} else if strings.HasSuffix(os.Args[1], "mu") {
+			cli.RunCode(os.Args[1])
+		}
 	}
-	fmt.Println(banner)
-	fmt.Printf("Hello %s! Welcome to mutant, a programming language!\n", user.Username)
-	fmt.Printf("Please get started by using this REPL")
-	repl.Start(os.Stdin, os.Stdout)
 }
