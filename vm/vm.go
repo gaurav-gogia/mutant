@@ -375,9 +375,9 @@ func (vm *VM) executeComparison(op code.Opcode) error {
 
 	switch op {
 	case code.OpEqual:
-		return vm.push(nativeBoolToBooleanObject(right == left))
+		return vm.push(nativeBoolToBooleanObject(right.Inspect() == left.Inspect()))
 	case code.OpUnEqual:
-		return vm.push(nativeBoolToBooleanObject(right != left))
+		return vm.push(nativeBoolToBooleanObject(right.Inspect() != left.Inspect()))
 	default:
 		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
 	}
