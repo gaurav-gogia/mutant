@@ -5,17 +5,33 @@ import (
 	"fmt"
 	"io"
 	"mutant/compiler"
+	"mutant/errrs"
 	"mutant/lexer"
 	"mutant/object"
 	"mutant/parser"
 	"mutant/vm"
+	"os/user"
 )
+
+const banner = `
+=======================================
+                  _              _   
+                 | |            | |  
+  _ __ ___  _   _| |_ __ _ _ __ | |_ 
+ | '_ ' _ \| | | | __/ _' | '_ \| __|
+ | | | | | | |_| | || (_| | | | | |_ 
+ |_| |_| |_|\__,_|\__\__,_|_| |_|\__|
+                                     
+                                     
+=======================================
+`
 
 // PROMPT is the constant for showing REPL prompt
 const PROMPT = ">> "
 
 // Start function is the entrypoint of our repl
 func Start(in io.Reader, out io.Writer) {
+	welcome()
 	scanner := bufio.NewScanner(in)
 	// env := object.NewEnvironment()
 	// macroEnv := object.NewEnvironment()
@@ -40,19 +56,19 @@ func Start(in io.Reader, out io.Writer) {
 		program := p.ParseProgram()
 
 		if len(p.Errors()) != 0 {
-			printParseErrors(out, p.Errors())
+			errrs.PrintParseErrors(out, p.Errors())
 			continue
 		}
 
 		comp := compiler.NewWithState(symbolTable, constants)
 		if err := comp.Compile(program); err != nil {
-			printCompilerError(out, err.Error())
+			errrs.PrintCompilerError(out, err.Error())
 			continue
 		}
 
 		machine := vm.NewWithGlobalStore(comp.ByteCode(), globals)
 		if err := machine.Run(); err != nil {
-			printMachineError(out, err.Error())
+			errrs.PrintMachineError(out, err.Error())
 			continue
 		}
 
@@ -62,22 +78,13 @@ func Start(in io.Reader, out io.Writer) {
 	}
 }
 
-func printParseErrors(out io.Writer, msgs []string) {
-	io.WriteString(out, "\nMutation gone wrong 😕. Below error messages may help!\n\n")
-	io.WriteString(out, "parser errors:")
-	for _, msg := range msgs {
-		io.WriteString(out, "\n\t"+msg+"\t\n")
+func welcome() {
+	fmt.Println(banner)
+
+	user, err := user.Current()
+	if err != nil {
+		panic(err)
 	}
-}
-
-func printCompilerError(out io.Writer, msg string) {
-	io.WriteString(out, "\nBytes are small but confusing 😕. Below error messages may help!\n\n")
-	io.WriteString(out, "compiler error:")
-	io.WriteString(out, "\n\t"+msg+"\t\n")
-}
-
-func printMachineError(out io.Writer, msg string) {
-	io.WriteString(out, "\nEven machines aren't perfect 😕. Below error messages may help!\n\n")
-	io.WriteString(out, "vm error:")
-	io.WriteString(out, "\n\t"+msg+"\t\n")
+	fmt.Printf("Hello %s! Welcome to mutant, a programming language!\n", user.Name)
+	fmt.Printf("Please get started by using this REPL")
 }
