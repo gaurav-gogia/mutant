@@ -45,6 +45,17 @@ var Builtins = []struct {
 		},
 	},
 	{
+		Name: "putln",
+		Builtin: &BuiltIn{
+			Fn: func(args ...Object) Object {
+				for _, arg := range args {
+					fmt.Println(arg.Inspect())
+				}
+				return nil
+			},
+		},
+	},
+	{
 		Name: "gets",
 		Builtin: &BuiltIn{
 			Fn: func(args ...Object) Object {
