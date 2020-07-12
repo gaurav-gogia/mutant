@@ -386,6 +386,15 @@ func TestCallingFunctionsWithBindings(t *testing.T) {
 			input:    "let returnsOneReturner = fn() { let returnsOne = fn() { 1; }; returnsOne; }; returnsOneReturner()();",
 			expected: 1,
 		},
+		{
+			input: `
+						let globalSeed = 50;
+						let minusOne = fn() { let num = 50; return globalSeed == num; };
+						let minusTwo = fn() { let num = 50; return globalSeed == num; };
+						minusOne() == minusTwo();
+					`,
+			expected: true,
+		},
 	}
 	runVMTests(t, tests)
 }
@@ -412,6 +421,18 @@ func TestCallingFunctionsWithArgumentsAndBindings(t *testing.T) {
 					outer() + globalNum;
 				   `,
 			expected: 50,
+		},
+		{
+			input: `
+					let pass = "test"; 
+					let testpass = fn(a) {
+						return a == pass;
+					};	
+					
+					let ans = "test";
+					testpass(ans);
+				   `,
+			expected: true,
 		},
 	}
 	runVMTests(t, tests)
