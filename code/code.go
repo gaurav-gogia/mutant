@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"mutant/security"
 )
 
 type Instructions []byte
@@ -161,9 +162,9 @@ func ReadOperands(def *Definition, ins Instructions) ([]int, int) {
 	for i, width := range def.OperandWidths {
 		switch width {
 		case 1:
-			operands[i] = int(ReadUint8(ins[offset:]))
+			operands[i] = int(ReadUint8(ins[offset:], len(ins)))
 		case 2:
-			operands[i] = int(ReadUint16(ins[offset:]))
+			operands[i] = int(ReadUint16(ins[offset:], len(ins)))
 		}
 		offset += width
 	}
@@ -171,9 +172,15 @@ func ReadOperands(def *Definition, ins Instructions) ([]int, int) {
 	return operands, offset
 }
 
-func ReadUint16(ins Instructions) uint16 {
-	return binary.BigEndian.Uint16(ins)
+func ReadUint16(ins Instructions, length int) uint16 {
+	ins = security.XOR(ins, length)
+	index := binary.BigEndian.Uint16(ins)
+	ins = security.XOR(ins, length)
+	return index
 }
-func ReadUint8(ins Instructions) uint8 {
-	return uint8(ins[0])
+func ReadUint8(ins Instructions, length int) uint8 {
+	ins[0] = security.XOROne(ins[0], length)
+	index := uint8(ins[0])
+	ins[0] = security.XOROne(ins[0], length)
+	return index
 }

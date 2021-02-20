@@ -9,20 +9,21 @@ import (
 	"mutant/lexer"
 	"mutant/object"
 	"mutant/parser"
+	"mutant/security"
 	"mutant/vm"
 	"os/user"
 )
 
 const banner = `
 =======================================
-                  _              _   
-                 | |            | |  
-  _ __ ___  _   _| |_ __ _ _ __ | |_ 
+                  _              _
+                 | |            | |
+  _ __ ___  _   _| |_ __ _ _ __ | |_
  | '_ ' _ \| | | | __/ _' | '_ \| __|
- | | | | | | |_| | || (_| | | | | |_ 
+ | | | | | | |_| | || (_| | | | | |_
  |_| |_| |_|\__,_|\__\__,_|_| |_|\__|
-                                     
-                                     
+
+
 =======================================
 `
 
@@ -65,6 +66,8 @@ func Start(in io.Reader, out io.Writer) {
 			errrs.PrintCompilerError(out, err.Error())
 			continue
 		}
+
+		comp.ByteCode().Instructions = security.XOR(comp.ByteCode().Instructions, len(comp.ByteCode().Instructions))
 
 		machine := vm.NewWithGlobalStore(comp.ByteCode(), globals)
 		if err := machine.Run(); err != nil {

@@ -11,6 +11,7 @@ import (
 	"mutant/lexer"
 	"mutant/object"
 	"mutant/parser"
+	"mutant/security"
 )
 
 // Generate function takes a `string`, it's the path for the source code
@@ -61,7 +62,24 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 
 func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	var content bytes.Buffer
+	compByteCode.Instructions = security.XOR(compByteCode.Instructions, len(compByteCode.Instructions))
 
+	registerTypes()
+
+	enc := gob.NewEncoder(&content)
+	if err := enc.Encode(compByteCode); err != nil {
+		return nil, err
+	}
+
+	byteCode := content.Bytes()
+	encodedLen := base64.StdEncoding.EncodedLen(len(byteCode))
+	encodedByteCode := make([]byte, encodedLen)
+	base64.StdEncoding.Encode(encodedByteCode, byteCode)
+
+	return encodedByteCode, nil
+}
+
+func registerTypes() {
 	gob.Register(&object.Integer{})
 	gob.Register(&object.Boolean{})
 	gob.Register(&object.Null{})
@@ -76,16 +94,4 @@ func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	gob.Register(&object.Macro{})
 	gob.Register(&object.CompiledFunction{})
 	gob.Register(&object.Closure{})
-
-	enc := gob.NewEncoder(&content)
-	if err := enc.Encode(compByteCode); err != nil {
-		return nil, err
-	}
-
-	byteCode := content.Bytes()
-	encodedLen := base64.StdEncoding.EncodedLen(len(byteCode))
-	encodedByteCode := make([]byte, encodedLen)
-	base64.StdEncoding.Encode(encodedByteCode, byteCode)
-
-	return encodedByteCode, nil
 }
