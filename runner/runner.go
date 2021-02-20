@@ -36,6 +36,18 @@ func decode(data []byte) (*compiler.ByteCode, error) {
 
 	var bytecode *compiler.ByteCode
 
+	registerTypes()
+	reader := bytes.NewReader(decodedData)
+
+	dec := gob.NewDecoder(reader)
+	if err := dec.Decode(&bytecode); err != nil {
+		return nil, err
+	}
+
+	return bytecode, nil
+}
+
+func registerTypes() {
 	gob.Register(&object.Integer{})
 	gob.Register(&object.Boolean{})
 	gob.Register(&object.Null{})
@@ -50,13 +62,6 @@ func decode(data []byte) (*compiler.ByteCode, error) {
 	gob.Register(&object.Macro{})
 	gob.Register(&object.CompiledFunction{})
 	gob.Register(&object.Closure{})
-
-	dec := gob.NewDecoder(bytes.NewReader(decodedData))
-	if err := dec.Decode(&bytecode); err != nil {
-		return nil, err
-	}
-
-	return bytecode, nil
 }
 
 func runvm(bytecode *compiler.ByteCode) (error, errrs.ErrorType) {
