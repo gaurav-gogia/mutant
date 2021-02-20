@@ -17,6 +17,7 @@ const (
 	MACRO_OBJ        = "MACRO"
 	COMPILED_FN_OBJ  = "COMPILED_FN_OBJ"
 	CLOSURE_OBJ      = "CLOSURE"
+	ENCRYPTED_OBJ    = "ENCRYPTED"
 )
 
 type Object interface {
