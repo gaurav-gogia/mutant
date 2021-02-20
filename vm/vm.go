@@ -1,22 +1,34 @@
 package vm
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"mutant/code"
 	"mutant/compiler"
 	"mutant/object"
+	"mutant/security"
+	"strconv"
+	"strings"
 )
 
+// Constants for VM
 const (
 	StackSize  = 2048
 	GlobalSize = 65536
 	MaxFrames  = 4096
 )
 
+// True is the object version of golang native true
 var True = &object.Boolean{Value: true}
+
+// False is the object version of golang native false
 var False = &object.Boolean{Value: false}
+
+// Null is the object version of golang native null
 var Null = &object.Null{}
 
+// VM structure defines virtual machine
 type VM struct {
 	constants    []object.Object
 	stack        []object.Object
@@ -24,6 +36,7 @@ type VM struct {
 	globals      []object.Object
 	frames       []*Frame
 	frameIndex   int
+	inslen       int
 }
 
 func New(bc *compiler.ByteCode) *VM {
@@ -41,6 +54,7 @@ func New(bc *compiler.ByteCode) *VM {
 		globals:      make([]object.Object, GlobalSize),
 		frames:       frames,
 		frameIndex:   1,
+		inslen:       len(bc.Instructions),
 	}
 }
 
@@ -60,11 +74,12 @@ func (vm *VM) Run() error {
 
 		ip = vm.currentFrame().ip
 		ins = vm.currentFrame().Instructions()
+		ins[ip] = security.XOROne(ins[ip], vm.inslen)
 		op = code.Opcode(ins[ip])
 
 		switch op {
 		case code.OpConstant:
-			constIndex := code.ReadUint16(ins[ip+1:])
+			constIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip += 2
 
 			if err := vm.push(vm.constants[constIndex]); err != nil {
@@ -91,14 +106,14 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpArray:
-			numElements := int(code.ReadUint16(ins[ip+1:]))
+			numElements := int(code.ReadUint16(ins[ip+1:], vm.inslen))
 			vm.currentFrame().ip += 2
 			array := vm.buildArray(vm.stackPointer-numElements, vm.stackPointer)
 			if err := vm.push(array); err != nil {
 				return err
 			}
 		case code.OpHash:
-			numElements := int(code.ReadUint16(ins[ip+1:]))
+			numElements := int(code.ReadUint16(ins[ip+1:], vm.inslen))
 			vm.currentFrame().ip += 2
 			hash, err := vm.buildHash(vm.stackPointer-numElements, vm.stackPointer)
 			if err != nil {
@@ -113,46 +128,46 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpJump:
-			pos := int(code.ReadUint16(ins[ip+1:]))
+			pos := int(code.ReadUint16(ins[ip+1:], vm.inslen))
 			vm.currentFrame().ip = pos - 1
 		case code.OpJumpFalse:
-			pos := int(code.ReadUint16(ins[ip+1:]))
+			pos := int(code.ReadUint16(ins[ip+1:], vm.inslen))
 			vm.currentFrame().ip += 2
 			condition := vm.pop()
 			if !isTruthy(condition) {
 				vm.currentFrame().ip = pos - 1
 			}
 		case code.OpSetGlobal:
-			globalIndex := code.ReadUint16(ins[ip+1:])
+			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip += 2
 			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
-			globalIndex := code.ReadUint16(ins[ip+1:])
+			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip += 2
 			if err := vm.push(vm.globals[globalIndex]); err != nil {
 				return err
 			}
 		case code.OpSetLocal:
-			localIndex := code.ReadUint8(ins[ip+1:])
+			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			vm.stack[frame.bp+int(localIndex)] = vm.pop()
 		case code.OpGetLocal:
-			localIndex := code.ReadUint8(ins[ip+1:])
+			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			if err := vm.push(vm.stack[frame.bp+int(localIndex)]); err != nil {
 				return err
 			}
 		case code.OpGetBuiltin:
-			builtinIndex := code.ReadUint8(ins[ip+1:])
+			builtinIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			definition := object.Builtins[builtinIndex]
 			if err := vm.push(definition.Builtin); err != nil {
 				return err
 			}
 		case code.OpGetFree:
-			freeIndex := code.ReadUint8(ins[ip+1:])
+			freeIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			currentClosure := vm.currentFrame().cl
 			if err := vm.push(currentClosure.Free[freeIndex]); err != nil {
@@ -165,8 +180,8 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpClosure:
-			constIndex := code.ReadUint16(ins[ip+1:])
-			numFree := code.ReadUint8(ins[ip+3:])
+			constIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
+			numFree := code.ReadUint8(ins[ip+3:], vm.inslen)
 			vm.currentFrame().ip += 3
 			if err := vm.pushClosure(int(constIndex), int(numFree)); err != nil {
 				return err
@@ -177,7 +192,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpCall:
-			numArgs := code.ReadUint8(ins[ip+1:])
+			numArgs := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			if err := vm.executeCall(int(numArgs)); err != nil {
 				return err
@@ -240,6 +255,11 @@ func (vm *VM) push(obj object.Object) error {
 		return fmt.Errorf("stack overflow")
 	}
 
+	encObj, err := encryptObject(obj, vm.inslen)
+	if err == nil {
+		obj = encObj
+	}
+
 	vm.stack[vm.stackPointer] = obj
 	vm.stackPointer++
 
@@ -248,6 +268,11 @@ func (vm *VM) push(obj object.Object) error {
 
 func (vm *VM) pop() object.Object {
 	obj := vm.stack[vm.stackPointer-1]
+	newObj, err := decryptObject(obj, vm.inslen)
+	if err == nil {
+		obj = newObj
+		vm.stack[vm.stackPointer-1] = newObj
+	}
 	vm.stackPointer--
 	return obj
 }
@@ -463,6 +488,12 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 
 func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
 	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
+	for i := range args {
+		dec, err := decryptObject(args[i], vm.inslen)
+		if err == nil {
+			args[i] = dec
+		}
+	}
 	result := builtin.Fn(args...)
 
 	vm.stackPointer = vm.stackPointer - numArgs - 1
@@ -492,4 +523,77 @@ func isTruthy(obj object.Object) bool {
 	default:
 		return true
 	}
+}
+
+func encryptObject(obj object.Object, length int) (object.Object, error) {
+	var encObj object.Object
+	var err error
+
+	switch obj.Type() {
+	case object.INTEGER_OBJ:
+		val := obj.(*object.Integer).Value
+		bite := make([]byte, 8)
+		binary.LittleEndian.PutUint64(bite, uint64(val))
+		bite = security.XOR(bite, length)
+
+		encObj = &object.Encrypted{
+			EncType: object.INTEGER_OBJ,
+			Value:   bite,
+		}
+
+	case object.STRING_OBJ:
+		val := obj.(*object.String).Value
+		bite := security.XOR([]byte(val), length)
+
+		encObj = &object.Encrypted{
+			EncType: object.STRING_OBJ,
+			Value:   bite,
+		}
+
+	case object.BOOLEAN_OBJ:
+		val := obj.(*object.Boolean).Value
+		str := strconv.FormatBool(val)
+		bite := security.XOR([]byte(str), length)
+
+		encObj = &object.Encrypted{
+			EncType: object.BOOLEAN_OBJ,
+			Value:   bite,
+		}
+
+	default:
+		err = errors.New("wrong obj type")
+	}
+
+	return encObj, err
+}
+
+func decryptObject(obj object.Object, length int) (object.Object, error) {
+	var decObj object.Object
+	var err error
+
+	if obj.Type() == object.ENCRYPTED_OBJ {
+		bite := obj.(*object.Encrypted).Value
+		bite = security.XOR(bite, length)
+
+		switch obj.(*object.Encrypted).EncType {
+		case object.INTEGER_OBJ:
+			val := binary.LittleEndian.Uint64(bite)
+			decObj = &object.Integer{Value: int64(val)}
+
+		case object.STRING_OBJ:
+			decObj = &object.String{Value: string(bite)}
+
+		case object.BOOLEAN_OBJ:
+			str := strings.ToLower(string(bite))
+			if str == "true" {
+				decObj = True
+			}
+			decObj = False
+		}
+
+		return decObj, nil
+	}
+
+	err = errors.New("wrong obj type")
+	return obj, err
 }
