@@ -427,6 +427,10 @@ func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
 	elements := make([]object.Object, endIndex-startIndex)
 	for i := startIndex; i < endIndex; i++ {
 		elements[i-startIndex] = vm.stack[i]
+		element, err := decryptObject(elements[i-startIndex], vm.inslen)
+		if err == nil {
+			elements[i-startIndex] = element
+		}
 	}
 	return &object.Array{Elements: elements}
 }
@@ -436,6 +440,17 @@ func (vm *VM) buildHash(startIndex, endIndex int) (object.Object, error) {
 	for i := startIndex; i < endIndex; i += 2 {
 		key := vm.stack[i]
 		value := vm.stack[i+1]
+
+		hkey, err := decryptObject(key, vm.inslen)
+		if err == nil {
+			key = hkey
+		}
+
+		hvalue, err := decryptObject(value, vm.inslen)
+		if err == nil {
+			value = hvalue
+		}
+
 		pair := object.HashPair{Key: key, Value: value}
 		hashKey, ok := key.(object.Hashable)
 		if !ok {
