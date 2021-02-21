@@ -587,8 +587,9 @@ func decryptObject(obj object.Object, length int) (object.Object, error) {
 			str := strings.ToLower(string(bite))
 			if str == "true" {
 				decObj = True
+			} else {
+				decObj = False
 			}
-			decObj = False
 		}
 
 		return decObj, nil
