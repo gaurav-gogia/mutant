@@ -9,9 +9,9 @@ import (
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/lexer"
+	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
-	"mutant/security"
 )
 
 // Generate function takes a `string`, it's the path for the source code
@@ -62,7 +62,8 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 
 func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	var content bytes.Buffer
-	compByteCode.Instructions = security.XOR(compByteCode.Instructions, len(compByteCode.Instructions))
+
+	compByteCode = mutil.EncryptByteCode(compByteCode)
 
 	registerTypes()
 
@@ -94,4 +95,5 @@ func registerTypes() {
 	gob.Register(&object.Macro{})
 	gob.Register(&object.CompiledFunction{})
 	gob.Register(&object.Closure{})
+	gob.Register(&object.Encrypted{})
 }

@@ -1,32 +1,14 @@
 package vm
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"mutant/code"
 	"mutant/compiler"
+	"mutant/global"
+	"mutant/mutil"
 	"mutant/object"
 	"mutant/security"
-	"strconv"
-	"strings"
 )
-
-// Constants for VM
-const (
-	StackSize  = 2048
-	GlobalSize = 65536
-	MaxFrames  = 4096
-)
-
-// True is the object version of golang native true
-var True = &object.Boolean{Value: true}
-
-// False is the object version of golang native false
-var False = &object.Boolean{Value: false}
-
-// Null is the object version of golang native null
-var Null = &object.Null{}
 
 // VM structure defines virtual machine
 type VM struct {
@@ -41,7 +23,7 @@ type VM struct {
 
 func New(bc *compiler.ByteCode) *VM {
 	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
-	frames := make([]*Frame, MaxFrames)
+	frames := make([]*Frame, global.MaxFrames)
 
 	mainClosure := &object.Closure{Fn: mainfn}
 	mainFrame := NewFrame(mainClosure, 0)
@@ -49,9 +31,9 @@ func New(bc *compiler.ByteCode) *VM {
 
 	return &VM{
 		constants:    bc.Constants,
-		stack:        make([]object.Object, StackSize),
+		stack:        make([]object.Object, global.StackSize),
 		stackPointer: 0,
-		globals:      make([]object.Object, GlobalSize),
+		globals:      make([]object.Object, global.GlobalSize),
 		frames:       frames,
 		frameIndex:   1,
 		inslen:       len(bc.Instructions),
@@ -76,6 +58,7 @@ func (vm *VM) Run() error {
 		ins = vm.currentFrame().Instructions()
 		ins[ip] = security.XOROne(ins[ip], vm.inslen)
 		op = code.Opcode(ins[ip])
+		ins[ip] = security.XOROne(ins[ip], vm.inslen)
 
 		switch op {
 		case code.OpConstant:
@@ -98,11 +81,11 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpTrue:
-			if err := vm.push(True); err != nil {
+			if err := vm.push(global.True); err != nil {
 				return err
 			}
 		case code.OpFalse:
-			if err := vm.push(False); err != nil {
+			if err := vm.push(global.False); err != nil {
 				return err
 			}
 		case code.OpArray:
@@ -207,11 +190,11 @@ func (vm *VM) Run() error {
 		case code.OpReturn:
 			frame := vm.popFrame()
 			vm.stackPointer = frame.bp - 1
-			if err := vm.push(Null); err != nil {
+			if err := vm.push(global.Null); err != nil {
 				return err
 			}
 		case code.OpNull:
-			if err := vm.push(Null); err != nil {
+			if err := vm.push(global.Null); err != nil {
 				return err
 			}
 		case code.OpPop:
@@ -230,7 +213,11 @@ func (vm *VM) StackTop() object.Object {
 }
 
 func (vm *VM) LastPoppedStackElement() object.Object {
-	return vm.stack[vm.stackPointer]
+	obj := vm.stack[vm.stackPointer]
+	if decObj, err := mutil.DecryptObject(obj, vm.inslen); err == nil {
+		obj = decObj
+	}
+	return obj
 }
 
 func (vm *VM) pushClosure(constIndex, numFree int) error {
@@ -251,12 +238,11 @@ func (vm *VM) pushClosure(constIndex, numFree int) error {
 }
 
 func (vm *VM) push(obj object.Object) error {
-	if vm.stackPointer >= StackSize {
+	if vm.stackPointer >= global.StackSize {
 		return fmt.Errorf("stack overflow")
 	}
 
-	encObj, err := encryptObject(obj, vm.inslen)
-	if err == nil {
+	if encObj, err := mutil.EncryptObject(obj, vm.inslen); err == nil {
 		obj = encObj
 	}
 
@@ -268,11 +254,10 @@ func (vm *VM) push(obj object.Object) error {
 
 func (vm *VM) pop() object.Object {
 	obj := vm.stack[vm.stackPointer-1]
-	newObj, err := decryptObject(obj, vm.inslen)
-	if err == nil {
+	if newObj, err := mutil.DecryptObject(obj, vm.inslen); err == nil {
 		obj = newObj
-		vm.stack[vm.stackPointer-1] = newObj
 	}
+
 	vm.stackPointer--
 	return obj
 }
@@ -346,7 +331,7 @@ func (vm *VM) execArrayIndex(array, index object.Object) error {
 	i := index.(*object.Integer).Value
 	max := int64(len(arrayObj.Elements) - 1)
 	if i < 0 || i > max {
-		return vm.push(Null)
+		return vm.push(global.Null)
 	}
 	return vm.push(arrayObj.Elements[i])
 }
@@ -361,7 +346,7 @@ func (vm *VM) execHashIndex(hash, index object.Object) error {
 
 	pair, ok := hashObj.Pairs[key.HashKey()]
 	if !ok {
-		return vm.push(Null)
+		return vm.push(global.Null)
 	}
 
 	return vm.push(pair.Value)
@@ -369,15 +354,16 @@ func (vm *VM) execHashIndex(hash, index object.Object) error {
 
 func (vm *VM) executeBangOperation() error {
 	operand := vm.pop()
+
 	switch operand {
-	case True:
-		return vm.push(False)
-	case False:
-		return vm.push(True)
-	case Null:
-		return vm.push(True)
+	case global.True:
+		return vm.push(global.False)
+	case global.False:
+		return vm.push(global.True)
+	case global.Null:
+		return vm.push(global.True)
 	default:
-		return vm.push(False)
+		return vm.push(global.False)
 	}
 }
 
@@ -427,7 +413,7 @@ func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
 	elements := make([]object.Object, endIndex-startIndex)
 	for i := startIndex; i < endIndex; i++ {
 		elements[i-startIndex] = vm.stack[i]
-		element, err := decryptObject(elements[i-startIndex], vm.inslen)
+		element, err := mutil.DecryptObject(elements[i-startIndex], vm.inslen)
 		if err == nil {
 			elements[i-startIndex] = element
 		}
@@ -441,12 +427,12 @@ func (vm *VM) buildHash(startIndex, endIndex int) (object.Object, error) {
 		key := vm.stack[i]
 		value := vm.stack[i+1]
 
-		hkey, err := decryptObject(key, vm.inslen)
+		hkey, err := mutil.DecryptObject(key, vm.inslen)
 		if err == nil {
 			key = hkey
 		}
 
-		hvalue, err := decryptObject(value, vm.inslen)
+		hvalue, err := mutil.DecryptObject(value, vm.inslen)
 		if err == nil {
 			value = hvalue
 		}
@@ -504,7 +490,7 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
 	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
 	for i := range args {
-		dec, err := decryptObject(args[i], vm.inslen)
+		dec, err := mutil.DecryptObject(args[i], vm.inslen)
 		if err == nil {
 			args[i] = dec
 		}
@@ -516,7 +502,7 @@ func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
 	if result != nil {
 		vm.push(result)
 	} else {
-		vm.push(Null)
+		vm.push(global.Null)
 	}
 
 	return nil
@@ -524,9 +510,9 @@ func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
 
 func nativeBoolToBooleanObject(native bool) *object.Boolean {
 	if native {
-		return True
+		return global.True
 	}
-	return False
+	return global.False
 }
 
 func isTruthy(obj object.Object) bool {
@@ -538,78 +524,4 @@ func isTruthy(obj object.Object) bool {
 	default:
 		return true
 	}
-}
-
-func encryptObject(obj object.Object, length int) (object.Object, error) {
-	var encObj object.Object
-	var err error
-
-	switch obj.Type() {
-	case object.INTEGER_OBJ:
-		val := obj.(*object.Integer).Value
-		bite := make([]byte, 8)
-		binary.LittleEndian.PutUint64(bite, uint64(val))
-		bite = security.XOR(bite, length)
-
-		encObj = &object.Encrypted{
-			EncType: object.INTEGER_OBJ,
-			Value:   bite,
-		}
-
-	case object.STRING_OBJ:
-		val := obj.(*object.String).Value
-		bite := security.XOR([]byte(val), length)
-
-		encObj = &object.Encrypted{
-			EncType: object.STRING_OBJ,
-			Value:   bite,
-		}
-
-	case object.BOOLEAN_OBJ:
-		val := obj.(*object.Boolean).Value
-		str := strconv.FormatBool(val)
-		bite := security.XOR([]byte(str), length)
-
-		encObj = &object.Encrypted{
-			EncType: object.BOOLEAN_OBJ,
-			Value:   bite,
-		}
-
-	default:
-		err = errors.New("wrong obj type")
-	}
-
-	return encObj, err
-}
-
-func decryptObject(obj object.Object, length int) (object.Object, error) {
-	var decObj object.Object
-	var err error
-
-	if obj.Type() == object.ENCRYPTED_OBJ {
-		bite := obj.(*object.Encrypted).Value
-		bite = security.XOR(bite, length)
-
-		switch obj.(*object.Encrypted).EncType {
-		case object.INTEGER_OBJ:
-			val := binary.LittleEndian.Uint64(bite)
-			decObj = &object.Integer{Value: int64(val)}
-
-		case object.STRING_OBJ:
-			decObj = &object.String{Value: string(bite)}
-
-		case object.BOOLEAN_OBJ:
-			str := strings.ToLower(string(bite))
-			if str == "true" {
-				decObj = True
-			} else {
-				decObj = False
-			}
-		}
-
-		return decObj, nil
-	}
-
-	err = errors.New("wrong obj type")
-	return obj, err
 }

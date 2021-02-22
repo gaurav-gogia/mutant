@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"mutant/ast"
 	"mutant/compiler"
+	"mutant/global"
 	"mutant/lexer"
+	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
 	"testing"
@@ -25,7 +27,9 @@ func runVMTests(t *testing.T, tests []vmTestCase) {
 			t.Fatalf("compiler error: %s", err)
 		}
 
-		for i, constant := range comp.ByteCode().Constants {
+		byteCode := comp.ByteCode()
+
+		for i, constant := range byteCode.Constants {
 			fmt.Printf("CONSTANT %d %p (%T):\n", i, constant, constant)
 			switch constant := constant.(type) {
 			case *object.CompiledFunction:
@@ -36,6 +40,8 @@ func runVMTests(t *testing.T, tests []vmTestCase) {
 
 			fmt.Println()
 		}
+
+		byteCode = mutil.EncryptByteCode(byteCode)
 
 		vm := New(comp.ByteCode())
 		if err := vm.Run(); err != nil {
@@ -144,7 +150,7 @@ func testExpectedObject(t *testing.T, expected interface{}, actual object.Object
 			}
 		}
 	case *object.Null:
-		if actual != Null {
+		if actual != global.Null {
 			t.Errorf("object is not Null: %T (%+v)", actual, actual)
 		}
 	case *object.Error:
@@ -222,8 +228,8 @@ func TestConditionals(t *testing.T) {
 		{"if (1 < 2) { 10 }", 10},
 		{"if (1 < 2) { 10 } else { 20 }", 10},
 		{"if (1 > 2) { 10 } else { 20 }", 20},
-		{"if (1 > 2) { 10 }", Null},
-		{"if (false) { 10 }", Null},
+		{"if (1 > 2) { 10 }", global.Null},
+		{"if (false) { 10 }", global.Null},
 		{"if ((if (false) { 10 })) { 10 } else { 20 }", 20},
 	}
 	runVMTests(t, tests)
@@ -282,13 +288,13 @@ func TestIndexExpressions(t *testing.T) {
 		{"[1, 2, 3][1]", 2},
 		{"[1, 2, 3][0 + 2]", 3},
 		{"[[1, 1, 1]][0][0]", 1},
-		{"[][0]", Null},
-		{"[1, 2, 3][99]", Null},
-		{"[1][-1]", Null},
+		{"[][0]", global.Null},
+		{"[1, 2, 3][99]", global.Null},
+		{"[1][-1]", global.Null},
 		{"{1: 1, 2: 2}[1]", 1},
 		{"{1: 1, 2: 2}[2]", 2},
-		{"{1: 1}[0]", Null},
-		{"{}[0]", Null},
+		{"{1: 1}[0]", global.Null},
+		{"{}[0]", global.Null},
 	}
 	runVMTests(t, tests)
 }
@@ -331,8 +337,8 @@ func TestCallingFunctionsWithReturn(t *testing.T) {
 
 func TestFunctionsWithoutReturnValue(t *testing.T) {
 	tests := []vmTestCase{
-		{input: ` let noReturn = fn() { }; noReturn(); `, expected: Null},
-		{input: ` let noReturn = fn() { }; let noReturnTwo = fn() { noReturn(); }; noReturn(); noReturnTwo(); `, expected: Null},
+		{input: ` let noReturn = fn() { }; noReturn(); `, expected: global.Null},
+		{input: ` let noReturn = fn() { }; let noReturnTwo = fn() { noReturn(); }; noReturn(); noReturnTwo(); `, expected: global.Null},
 	}
 	runVMTests(t, tests)
 }
@@ -375,7 +381,7 @@ func TestCallingFunctionsWithBindings(t *testing.T) {
 		},
 		{
 			input: `
-						let globalSeed = 50; 
+						let globalSeed = 50;
 						let minusOne = fn() { let num = 1; return globalSeed - num; };
 						let minusTwo = fn() { let num = 2; return globalSeed - num; };
 						minusOne() + minusTwo();
@@ -408,12 +414,12 @@ func TestCallingFunctionsWithArgumentsAndBindings(t *testing.T) {
 		{input: "let sum = fn(a, b) { let c = a + b; c; }; let outer = fn() { sum(1, 2) + sum(3, 4); }; outer();", expected: 10},
 		{
 			input: `
-					let globalNum = 10; 
+					let globalNum = 10;
 					let sum = fn(a, b) {
 						let c = a + b;
 						c + globalNum;
-					};	
-					
+					};
+
 					let outer = fn() {
 						sum(1, 2) + sum(3, 4) + globalNum;
 					};
@@ -424,11 +430,11 @@ func TestCallingFunctionsWithArgumentsAndBindings(t *testing.T) {
 		},
 		{
 			input: `
-					let pass = "test"; 
+					let pass = "test";
 					let testpass = fn(a) {
 						return a == pass;
-					};	
-					
+					};
+
 					let ans = "test";
 					testpass(ans);
 				   `,
@@ -453,7 +459,10 @@ func TestCallingFunctionsWithWrongArguments(t *testing.T) {
 			t.Fatalf("compiler error: %s", err)
 		}
 
-		vm := New(comp.ByteCode())
+		byteCode := comp.ByteCode()
+		byteCode = mutil.EncryptByteCode(byteCode)
+
+		vm := New(byteCode)
 
 		if err := vm.Run(); err == nil {
 			t.Fatalf("expected VM error but resulted in none.")
@@ -473,17 +482,19 @@ func TestBuiltinFunctions(t *testing.T) {
 		{`len(1)`, &object.Error{Message: "argument to `len` not supported, got INTEGER"}},
 		{`len("one", "two")`, &object.Error{Message: "wrong number of arguments. got=2, want=1"}},
 		{`len([])`, 0},
-		{`puts("hello", "world!")`, Null},
+		{`puts("hello", "world!")`, global.Null},
 		{`first([1, 2, 3])`, 1},
-		{`first([])`, Null},
+		{`first([])`, global.Null},
 		{`first(1)`, &object.Error{Message: "argument to `first` must be ARRAY, got INTEGER"}},
 		{`last([1, 2, 3])`, 3},
-		{`last([])`, Null},
+		{`last([])`, global.Null},
 		{`last(1)`, &object.Error{Message: "argument to `last` must be ARRAY, got INTEGER"}},
 		{`rest([1, 2, 3])`, []int{2, 3}},
-		{`rest([])`, Null},
+		{`rest([])`, global.Null},
 		{`push([], 1)`, []int{1}},
 		{`push(1, 1)`, &object.Error{Message: "argument to `push` must be ARRAY, got=INTEGER"}},
+		{`puts("four")`, global.Null},
+		{`putln("four")`, global.Null},
 	}
 	runVMTests(t, tests)
 }
@@ -495,22 +506,22 @@ func TestClosures(t *testing.T) {
 		{input: "let newAdder = fn(a, b) { let c = a + b; fn(d) { c + d }; }; let adder = newAdder(1, 2); adder(8);", expected: 11},
 		{
 			input: `
-					let newAdderOuter = fn(a, b) { let c = a + b; fn(d) { let e = d + c; fn(f) { e + f; }; }; }; 
+					let newAdderOuter = fn(a, b) { let c = a + b; fn(d) { let e = d + c; fn(f) { e + f; }; }; };
 					let newAdderInner = newAdderOuter(1, 2); let adder = newAdderInner(3); adder(8);
 				`,
 			expected: 14,
 		},
 		{
-			input: ` 
-						let a = 1; let newAdderOuter = fn(b) { fn(c) { fn(d) { a + b + c + d }; }; }; 
-						let newAdderInner = newAdderOuter(2); let adder = newAdderInner(3); adder(8); 
+			input: `
+						let a = 1; let newAdderOuter = fn(b) { fn(c) { fn(d) { a + b + c + d }; }; };
+						let newAdderInner = newAdderOuter(2); let adder = newAdderInner(3); adder(8);
 					`,
 			expected: 14,
 		},
 		{
-			input: ` 
-						let newClosure = fn(a, b) { let one = fn() { a; }; 
-						let two = fn() { b; }; fn() { one() + two(); }; }; 
+			input: `
+						let newClosure = fn(a, b) { let one = fn() { a; };
+						let two = fn() { b; }; fn() { one() + two(); }; };
 						let closure = newClosure(9, 90); closure();
 					`,
 			expected: 99,
@@ -525,26 +536,26 @@ func TestRecursiveFunctions(t *testing.T) {
 		{input: "let countDown = fn(x) { if (x == 0) { return 0; } else { countDown(x - 1); } }; countDown(1);", expected: 0},
 		{
 			input: `
-					let countDown = fn(x) { if (x == 0) { return 0; } else { countDown(x - 1); } }; 
-					let wrapper = fn() { countDown(1);}; wrapper(); 
+					let countDown = fn(x) { if (x == 0) { return 0; } else { countDown(x - 1); } };
+					let wrapper = fn() { countDown(1);}; wrapper();
 				`,
 			expected: 0,
 		},
 		{
 			input: `
-					let wrapper = fn() { 
-						
-						let countDown = fn(x) { 
-							if (x == 0) { 
-								return 0; 
-							} else { 
-								countDown(x - 1); 
-							} 
-						}; 
-						
-						countDown(1); 
-					}; 
-					
+					let wrapper = fn() {
+
+						let countDown = fn(x) {
+							if (x == 0) {
+								return 0;
+							} else {
+								countDown(x - 1);
+							}
+						};
+
+						countDown(1);
+					};
+
 					wrapper();
 					`,
 			expected: 0,

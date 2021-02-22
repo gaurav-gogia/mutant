@@ -6,10 +6,11 @@ import (
 	"io"
 	"mutant/compiler"
 	"mutant/errrs"
+	"mutant/global"
 	"mutant/lexer"
+	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
-	"mutant/security"
 	"mutant/vm"
 	"os/user"
 )
@@ -38,7 +39,7 @@ func Start(in io.Reader, out io.Writer) {
 	// macroEnv := object.NewEnvironment()
 
 	constants := []object.Object{}
-	globals := make([]object.Object, vm.GlobalSize)
+	globals := make([]object.Object, global.GlobalSize)
 	symbolTable := compiler.NewSymbolTable()
 	for i, v := range object.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
@@ -67,9 +68,10 @@ func Start(in io.Reader, out io.Writer) {
 			continue
 		}
 
-		comp.ByteCode().Instructions = security.XOR(comp.ByteCode().Instructions, len(comp.ByteCode().Instructions))
+		byteCode := comp.ByteCode()
+		byteCode = mutil.EncryptByteCode(byteCode)
 
-		machine := vm.NewWithGlobalStore(comp.ByteCode(), globals)
+		machine := vm.NewWithGlobalStore(byteCode, globals)
 		if err := machine.Run(); err != nil {
 			errrs.PrintMachineError(out, err.Error())
 			continue

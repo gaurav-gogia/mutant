@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"mutant/compiler"
 	"mutant/errrs"
+	"mutant/global"
 	"mutant/object"
 	"mutant/vm"
 	"os"
@@ -62,10 +63,11 @@ func registerTypes() {
 	gob.Register(&object.Macro{})
 	gob.Register(&object.CompiledFunction{})
 	gob.Register(&object.Closure{})
+	gob.Register(&object.Encrypted{})
 }
 
 func runvm(bytecode *compiler.ByteCode) (error, errrs.ErrorType) {
-	globals := make([]object.Object, vm.GlobalSize)
+	globals := make([]object.Object, global.GlobalSize)
 	machine := vm.NewWithGlobalStore(bytecode, globals)
 
 	if err := machine.Run(); err != nil {
