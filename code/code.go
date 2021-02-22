@@ -120,6 +120,7 @@ func Make(op Opcode, operands ...int) []byte {
 	return inst
 }
 
+// String function is only used for internal code/compiler testing purposes
 func (ins Instructions) String() string {
 	var out bytes.Buffer
 	i := 0
@@ -155,6 +156,7 @@ func (i Instructions) fmtInstruction(def *Definition, operands []int) string {
 	return fmt.Sprintf("ERROR: unhandled operandCount for %s\n", def.Name)
 }
 
+// ReadOperands function is only used for internal code/compiler testing purposes
 func ReadOperands(def *Definition, ins Instructions) ([]int, int) {
 	var offset int
 	operands := make([]int, len(def.OperandWidths))
@@ -162,9 +164,9 @@ func ReadOperands(def *Definition, ins Instructions) ([]int, int) {
 	for i, width := range def.OperandWidths {
 		switch width {
 		case 1:
-			operands[i] = int(ReadUint8(ins[offset:], len(ins)))
+			operands[i] = int(uint8(ins[0]))
 		case 2:
-			operands[i] = int(ReadUint16(ins[offset:], len(ins)))
+			operands[i] = int(binary.BigEndian.Uint16(ins))
 		}
 		offset += width
 	}

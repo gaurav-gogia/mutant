@@ -1,6 +1,7 @@
 package code
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -53,6 +54,8 @@ func TestInstructionsString(t *testing.T) {
 		concatted = append(concatted, ins...)
 	}
 
+	fmt.Println(concatted.String())
+
 	if concatted.String() != expected {
 		t.Errorf("instructions wrongly formatted.\nwant=%q\ngot=%q", expected, concatted.String())
 	}
@@ -77,6 +80,7 @@ func TestReadOperands(t *testing.T) {
 		}
 
 		operandsRead, n := ReadOperands(def, instruction[1:])
+
 		if n != tt.bytesRead {
 			t.Fatalf("n wrong. want = %d, got = %d", tt.bytesRead, n)
 		}
