@@ -319,6 +319,8 @@ func (vm *VM) execIndexOperation(left, index object.Object) error {
 	switch {
 	case left.Type() == object.ARRAY_OBJ && index.Type() == object.INTEGER_OBJ:
 		return vm.execArrayIndex(left, index)
+	case left.Type() == object.STRING_OBJ && index.Type() == object.INTEGER_OBJ:
+		return vm.execStringIndex(left, index)
 	case left.Type() == object.HASH_OBJ:
 		return vm.execHashIndex(left, index)
 	default:
@@ -326,12 +328,28 @@ func (vm *VM) execIndexOperation(left, index object.Object) error {
 	}
 }
 
+func (vm *VM) execStringIndex(str, index object.Object) error {
+	strVal := str.(*object.String).Value
+	i := index.(*object.Integer).Value
+	max := int64(len(strVal) - 1)
+	if i > max {
+		return vm.push(global.Null)
+	} else if i < 0 {
+		strObj := &object.String{Value: string(strVal[max+i+1])}
+		return vm.push(strObj)
+	}
+	strObj := &object.String{Value: string(strVal[i])}
+	return vm.push(strObj)
+}
+
 func (vm *VM) execArrayIndex(array, index object.Object) error {
 	arrayObj := array.(*object.Array)
 	i := index.(*object.Integer).Value
 	max := int64(len(arrayObj.Elements) - 1)
-	if i < 0 || i > max {
+	if i > max {
 		return vm.push(global.Null)
+	} else if i < 0 {
+		return vm.push(arrayObj.Elements[max+i+1])
 	}
 	return vm.push(arrayObj.Elements[i])
 }
