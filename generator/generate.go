@@ -2,7 +2,6 @@ package generator
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/gob"
 	"fmt"
 	"io/ioutil"
@@ -12,6 +11,7 @@ import (
 	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
+	"mutant/security"
 )
 
 // Generate function takes a `string`, it's the path for the source code
@@ -66,18 +66,23 @@ func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	compByteCode = mutil.EncryptByteCode(compByteCode)
 
 	registerTypes()
-
 	enc := gob.NewEncoder(&content)
 	if err := enc.Encode(compByteCode); err != nil {
 		return nil, err
 	}
 
 	byteCode := content.Bytes()
-	encodedLen := base64.StdEncoding.EncodedLen(len(byteCode))
-	encodedByteCode := make([]byte, encodedLen)
-	base64.StdEncoding.Encode(encodedByteCode, byteCode)
+	return encryptCode(byteCode)
+}
 
-	return encodedByteCode, nil
+func encryptCode(b64ByteCode []byte) ([]byte, error) {
+	xorByteCode := security.XOR(b64ByteCode, len(b64ByteCode))
+	encodedByteCode, err := security.AESEncrypt(xorByteCode)
+	if err != nil {
+		return nil, err
+	}
+	signedCode := security.SignCode(encodedByteCode)
+	return signedCode, nil
 }
 
 func registerTypes() {
