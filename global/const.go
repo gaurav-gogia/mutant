@@ -2,7 +2,7 @@ package global
 
 // Constants for VM
 const (
-	StackSize  = 2048
-	GlobalSize = 65536
-	MaxFrames  = 4096
+	StackSize  = 2048 * 10
+	GlobalSize = 65536 * 10
+	MaxFrames  = 2048 * 10
 )
