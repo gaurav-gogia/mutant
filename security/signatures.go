@@ -1,14 +1,16 @@
 package security
 
 import (
-	"crypto/sha256"
+	"crypto/md5"
+	"encoding/hex"
 	"strings"
 )
 
 func SignCode(encodedString string) []byte {
 	var signedCode string
-	integrity := sha256.New().Sum([]byte(encodedString))
-	signedCode = (HEADER + SEPERATOR) + (encodedString + SEPERATOR) + (string(integrity) + SEPERATOR) + (FOOTER)
+	integrity := md5.New().Sum([]byte(encodedString))
+	integString := hex.EncodeToString(integrity)
+	signedCode = (HEADER + SEPERATOR) + (encodedString + SEPERATOR) + (integString + SEPERATOR) + (FOOTER)
 	return []byte(signedCode)
 }
 
@@ -20,8 +22,9 @@ func VerifyCode(signedCode []byte) error {
 		return ErrWrongSignature
 	}
 
-	integrity := sha256.New().Sum([]byte(values[1]))
-	if string(integrity) != values[2] {
+	integrity := md5.New().Sum([]byte(values[1]))
+	integString := hex.EncodeToString(integrity)
+	if integString != values[2] {
 		return ErrWrongSignature
 	}
 
