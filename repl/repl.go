@@ -12,7 +12,11 @@ import (
 	"mutant/object"
 	"mutant/parser"
 	"mutant/vm"
+	"os"
+	"os/exec"
 	"os/user"
+	"runtime"
+	"strings"
 )
 
 const banner = `
@@ -53,6 +57,10 @@ func Start(in io.Reader, out io.Writer) {
 		}
 
 		line := scanner.Text()
+		if vanity(line, out) {
+			continue
+		}
+
 		l := lexer.New(line)
 		p := parser.New(l)
 		program := p.ParseProgram()
@@ -92,4 +100,38 @@ func welcome() {
 	}
 	fmt.Printf("Hello %s! Welcome to mutant, a programming language!\n", user.Name)
 	fmt.Printf("Please get started by using this REPL")
+}
+
+func vanity(line string, out io.Writer) bool {
+	if line == "" {
+		return true
+	}
+
+	if strings.Contains(line, "clear") || strings.Contains(line, "cls") {
+		clear := make(map[string]func())
+		clear["linux"] = func() {
+			cmd := exec.Command("clear")
+			cmd.Stdout = os.Stdout
+			cmd.Run()
+		}
+		clear["darwin"] = func() {
+			cmd := exec.Command("clear")
+			cmd.Stdout = os.Stdout
+			cmd.Run()
+		}
+		clear["windows"] = func() {
+			cmd := exec.Command("cmd", "/c", "cls")
+			cmd.Stdout = os.Stdout
+			cmd.Run()
+		}
+
+		if value, ok := clear[runtime.GOOS]; ok {
+			value()
+		} else {
+			io.WriteString(out, "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
+		}
+		return true
+	}
+
+	return false
 }
