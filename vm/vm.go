@@ -123,13 +123,7 @@ func (vm *VM) Run() error {
 		case code.OpSetGlobal:
 			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip += 2
-			obj := vm.pop()
-			encObj, err := mutil.EncryptObject(obj, vm.inslen)
-			if err != nil {
-				vm.globals[globalIndex] = obj
-			} else {
-				vm.globals[globalIndex] = encObj
-			}
+			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
 			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip += 2
@@ -140,13 +134,7 @@ func (vm *VM) Run() error {
 			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
-			obj := vm.pop()
-			encObj, err := mutil.EncryptObject(obj, vm.inslen)
-			if err != nil {
-				vm.stack[frame.bp+int(localIndex)] = obj
-			} else {
-				vm.stack[frame.bp+int(localIndex)] = encObj
-			}
+			vm.stack[frame.bp+int(localIndex)] = vm.pop()
 		case code.OpGetLocal:
 			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
 			vm.currentFrame().ip++
