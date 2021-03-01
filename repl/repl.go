@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
-	"strings"
 )
 
 const banner = `
@@ -107,7 +106,7 @@ func vanity(line string, out io.Writer) bool {
 		return true
 	}
 
-	if strings.Contains(line, "clear") || strings.Contains(line, "cls") {
+	if line == "clear" || line == "cls" {
 		clear := make(map[string]func())
 		clear["linux"] = func() {
 			cmd := exec.Command("clear")
