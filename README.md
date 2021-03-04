@@ -1,21 +1,17 @@
-# mutant
+# The mutant Programming Language
+mutant is an open source programming language whose aim is to provide an accessible, secure system for programming & security research.
 
-# main
-define all cli commands
+# Key features of mutant
+1. KISS: The language is simple enough to be learnt in under an hour
+2. Compile time & Runtime Security: Encrypted byte code, instructions, constants ensure security on disk and in memory
+3. Cross Platform: MVM (Mutant Virtual Machine) makes sure that the language works on **YOUR** machine
 
-# generator
-generate compiled file and write on disk
+## Installing mutant from source
+Pre-Installation: Download & Install [GoLang](https://golang.org/)
 
-# runner
-will only run mut files
-generate all compiled code and run, does not write compiled file on disk
-
-# security
-called by generator post
-- gets all the bytecode
-adds internal security
-returns secure data to generator
-
-- gets binary data of third party binary
-adds external security
-returns secure data to generator
+### Linux, macOS, Windows, *BSD, Solaris, WSL, Android, Raspbian
+```bash
+git clone https://github.com/gaurav-gogia/mutant
+cd mutant
+go install
+```
