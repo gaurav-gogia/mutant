@@ -1,6 +1,10 @@
 # The mutant Programming Language
 mutant is an open source programming language whose aim is to provide an accessible, secure system for programming & security research.
 
+<p align='center'>
+  <img src='./logo.png' />
+</p>
+
 # Key features of mutant
 1. KISS: The language is simple enough to be learnt in under an hour
 2. Compile time & Runtime Security: Encrypted byte code ensures security on disk and in memory
