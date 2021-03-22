@@ -2,7 +2,7 @@
 mutant is an open source programming language whose aim is to provide an accessible, secure system for programming & security research.
 
 <p align='center'>
-  <img src='./logo.png' />
+  <img src='./logo.jpeg' />
 </p>
 
 # Key features of mutant
