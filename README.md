@@ -6,12 +6,19 @@ mutant is an open source programming language whose aim is to provide an accessi
 2. Compile time & Runtime Security: Encrypted byte code ensures security on disk and in memory
 3. Cross Platform: MVM (Mutant Virtual Machine) makes sure that the language works on **YOUR** machine
 
-## Installing mutant from source
+## Download & Install
+
+### Binary Distributions
+Official binaries are available in this repository's release section
+
+### Installing mutant from source
 Pre-Installation: Download & Install [GoLang](https://golang.org/)
 
-### Linux, macOS, Windows, *BSD, Solaris, WSL, Android, Raspbian
 ```bash
 git clone https://github.com/gaurav-gogia/mutant
 cd mutant
 go install
 ```
+
+## Documentaiton
+For all things mutant, please visit the official website ^.^
