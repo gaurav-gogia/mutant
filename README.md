@@ -2,7 +2,7 @@
   <img src='./logo.jpeg' />
 </p>
 
-# The mutant Programming Language
+# The [mutant](https://mudocs.netlify.app) Programming Language
 mutant is an open source programming language whose aim is to provide an accessible, secure system for programming & security research.
 
 # Key features of mutant
@@ -25,4 +25,4 @@ go install
 ```
 
 ## Documentaiton
-For all things mutant, please visit the official website ^.^
+For all things mutant, please visit the [official website](https://mudocs.netlify.app) ^.^
