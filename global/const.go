@@ -6,6 +6,6 @@ const (
 	GlobalSize = 65536 * 10
 	MaxFrames  = 2048 * 10
 
-	MutantSourceFileExtention           = ".mut"
+	MutantSourceCodeFileExtention       = ".mut"
 	MutantByteCodeCompiledFileExtension = ".mu"
 )
