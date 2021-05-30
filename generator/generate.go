@@ -31,6 +31,8 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 		if err := writeBinary(dstpath, goos, goarch, bytecode); err != nil {
 			return err, errrs.ERROR, nil
 		}
+
+		return nil, "", nil
 	}
 
 	if err := ioutil.WriteFile(dstpath+global.MutantByteCodeCompiledFileExtension, bytecode, 0644); err != nil {
