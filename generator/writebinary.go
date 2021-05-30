@@ -47,6 +47,11 @@ func writeBinary(dstPath, goos, goarch string, bytecode []byte) error {
 	replacement[len(bytecode)] = '#'
 
 	replaced := re.ReplaceAllLiteral(format, replacement)
+
+	if goos == WINDOWS {
+		dstPath += ".exe"
+	}
+
 	return ioutil.WriteFile(dstPath, replaced, 0755)
 }
 
