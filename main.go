@@ -7,6 +7,7 @@ import (
 	"mutant/cli"
 	"mutant/global"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -41,8 +42,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Println(src, goos, goarch)
-
+		fmt.Println("Compiling Release Build....")
 		cli.CompileCode(src, goos, goarch, true)
 		return
 	}
@@ -70,7 +70,12 @@ func prepareRelease(args []string) (string, string, string, error) {
 			return "", "", "", errors.New("incorrect file extension, this program only works for mutant source code files")
 		}
 
-		return src, goos, goarch, nil
+		absSrc, err := filepath.Abs(src)
+		if err != nil {
+			return "", "", "", err
+		}
+
+		return absSrc, goos, goarch, nil
 	}
 
 	return "", "", "", errors.New("could not parse values")
