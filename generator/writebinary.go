@@ -21,7 +21,7 @@ const (
 	ARM   = "arm"
 )
 
-func writeBinary(dstPath, goos, goarch string, bytecode []byte) error {
+func writeBinary(dstpath, goos, goarch string, bytecode []byte) error {
 	format, err := getBinaryFormat(goos, goarch)
 	if err != nil {
 		return err
@@ -47,12 +47,7 @@ func writeBinary(dstPath, goos, goarch string, bytecode []byte) error {
 	replacement[len(bytecode)] = '#'
 
 	replaced := re.ReplaceAllLiteral(format, replacement)
-
-	if goos == WINDOWS {
-		dstPath += ".exe"
-	}
-
-	return ioutil.WriteFile(dstPath, replaced, 0755)
+	return ioutil.WriteFile(dstpath, replaced, 0755)
 }
 
 func getBinaryFormat(goos, goarch string) ([]byte, error) {

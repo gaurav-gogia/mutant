@@ -28,6 +28,11 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 	}
 
 	if release {
+
+		if goos == WINDOWS {
+			dstpath += global.WindowsPE32ExecutableExtension
+		}
+
 		if err := writeBinary(dstpath, goos, goarch, bytecode); err != nil {
 			return err, errrs.ERROR, nil
 		}
