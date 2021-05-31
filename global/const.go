@@ -8,4 +8,5 @@ const (
 
 	MutantSourceCodeFileExtention       = ".mut"
 	MutantByteCodeCompiledFileExtension = ".mu"
+	WindowsPE32ExecutableExtension      = ".exe"
 )
