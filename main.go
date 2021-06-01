@@ -40,7 +40,7 @@ func main() {
 			fmt.Println("\t\tShow version information.")
 			fmt.Println()
 
-			fmt.Println("\t<mutant FILENAME>.mut")
+			fmt.Println("\tmutant <FILENAME>.mut")
 			fmt.Println("\t\tCompile mutant source code into mutant bytecode.")
 			fmt.Println()
 
