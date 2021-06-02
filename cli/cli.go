@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mutant/errrs"
 	"mutant/generator"
+	"mutant/global"
 	"mutant/repl"
 	"mutant/runner"
 	"os"
@@ -26,16 +27,16 @@ func RunRepl() {
 	repl.Start(os.Stdin, os.Stdout)
 }
 
-func CompileCode(src string) {
+func CompileCode(src, goos, goarch string, release bool) {
 	start := time.Now()
 	srcpath, err := filepath.Abs(src)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	dstpath := strings.TrimSuffix(srcpath, "t")
+	dstpath := strings.TrimSuffix(srcpath, global.MutantSourceCodeFileExtention)
 
-	if err, errtype, errors := generator.Generate(srcpath, dstpath); err != nil {
+	if err, errtype, errors := generator.Generate(srcpath, dstpath, goos, goarch, release); err != nil {
 		switch errtype {
 		case errrs.ERROR:
 			fmt.Println(err)

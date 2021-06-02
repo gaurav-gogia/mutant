@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"mutant/compiler"
 	"mutant/errrs"
+	"mutant/global"
 	"mutant/lexer"
 	"mutant/mutil"
 	"mutant/object"
@@ -15,7 +16,7 @@ import (
 )
 
 // Generate function takes a `string`, it's the path for the source code
-func Generate(srcpath, dstpath string) (error, errrs.ErrorType, []string) {
+func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs.ErrorType, []string) {
 	data, err := ioutil.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
@@ -25,7 +26,21 @@ func Generate(srcpath, dstpath string) (error, errrs.ErrorType, []string) {
 	if err != nil {
 		return err, errtype, errors
 	}
-	if err := ioutil.WriteFile(dstpath, bytecode, 0644); err != nil {
+
+	if release {
+
+		if goos == WINDOWS {
+			dstpath += global.WindowsPE32ExecutableExtension
+		}
+
+		if err := writeBinary(dstpath, goos, goarch, bytecode); err != nil {
+			return err, errrs.ERROR, nil
+		}
+
+		return nil, "", nil
+	}
+
+	if err := ioutil.WriteFile(dstpath+global.MutantByteCodeCompiledFileExtension, bytecode, 0644); err != nil {
 		return err, errrs.ERROR, nil
 	}
 
