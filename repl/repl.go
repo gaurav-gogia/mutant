@@ -91,7 +91,7 @@ func Start(in io.Reader, out io.Writer) {
 }
 
 func welcome() {
-	fmt.Println(banner)
+	fmt.Print(banner)
 
 	user, err := user.Current()
 	if err != nil {
@@ -132,5 +132,16 @@ func vanity(line string, out io.Writer) bool {
 		return true
 	}
 
+	if line == "exit" {
+		GracefulExit()
+	}
+
 	return false
+}
+
+func GracefulExit() {
+	fmt.Printf("\n\n")
+	fmt.Println("---- Leaving for a byte? I'll see you later! ----")
+	fmt.Printf("\n\n")
+	os.Exit(0)
 }
