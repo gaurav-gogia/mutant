@@ -19,10 +19,7 @@ func RunRepl() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		<-c
-		fmt.Printf("\n\n")
-		fmt.Println("---- Leaving for a byte? I'll see you later! ----")
-		fmt.Printf("\n\n")
-		os.Exit(0)
+		repl.GracefulExit()
 	}()
 	repl.Start(os.Stdin, os.Stdout)
 }
