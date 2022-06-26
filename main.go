@@ -58,7 +58,7 @@ func main() {
 		}
 
 		if os.Args[1] == "-v" || os.Args[1] == "--version" {
-			fmt.Println("Version: 2.0.0")
+			fmt.Println("Version: 2.0.1")
 			return
 		}
 
