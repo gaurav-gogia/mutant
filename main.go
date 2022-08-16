@@ -58,7 +58,7 @@ func main() {
 		}
 
 		if os.Args[1] == "-v" || os.Args[1] == "--version" {
-			fmt.Println("Version: 2.0.1")
+			fmt.Println("Version: 2.1.0_beta")
 			return
 		}
 
@@ -71,7 +71,6 @@ func main() {
 			cli.RunCode(os.Args[1])
 			return
 		}
-
 	}
 
 	if len(os.Args) >= 2 && os.Args[1] == RELEASECMD {
@@ -96,7 +95,7 @@ func prepareRelease(args []string) (string, string, string, error) {
 	releasecmd.StringVar(&goos, "os", runtime.GOOS, "Use thie flag to specify target OS for cross-compilation by using -os flag")
 	releasecmd.StringVar(&goarch, "arch", runtime.GOARCH, "Use thie flag to specify target Architecture for cross-compilation by using -arch flag")
 
-	if err := releasecmd.Parse(os.Args[2:]); err != nil {
+	if err := releasecmd.Parse(args[2:]); err != nil {
 		return "", "", "", err
 	}
 

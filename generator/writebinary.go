@@ -3,13 +3,13 @@ package generator
 import (
 	"encoding/base64"
 	"errors"
-	"io/ioutil"
 	"mutant/binformat"
+	"os"
 	"regexp"
 )
 
 const (
-	EXPRESSION = `(\|)(\#)(\|)(.+)(\|)(\#)(\|)`
+	EXPRESSION = `(\|\#\|)(.+)(\|\#\|)`
 	DARWIN     = "darwin"
 	LINUX      = "linux"
 	WINDOWS    = "windows"
@@ -47,7 +47,7 @@ func writeBinary(dstpath, goos, goarch string, bytecode []byte) error {
 	replacement[len(bytecode)] = '#'
 
 	replaced := re.ReplaceAllLiteral(format, replacement)
-	return ioutil.WriteFile(dstpath, replaced, 0755)
+	return os.WriteFile(dstpath, replaced, 0755)
 }
 
 func getBinaryFormat(goos, goarch string) ([]byte, error) {
