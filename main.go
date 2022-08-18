@@ -16,7 +16,7 @@ const RELEASECMD = "release"
 
 func main() {
 	if len(os.Args) == 1 {
-		cli.RunRepl()
+		cli.RunRepl(false)
 		return
 	}
 
@@ -30,6 +30,10 @@ func main() {
 
 			fmt.Println("\tmutant")
 			fmt.Println("\t\tRun mutant in REPL mode.")
+			fmt.Println()
+
+			fmt.Println("\tmutant -em, --enableMacros")
+			fmt.Println("\t\tRun mutant in REPL mode with experimental macros support.")
 			fmt.Println()
 
 			fmt.Println("\tmutant -h, --help")
@@ -54,6 +58,11 @@ func main() {
 			fmt.Println("\t\tPossible values for -os: darwin | linux | windows.")
 			fmt.Println("\t\tPossible values for -arch: amd64 | arm64 | arm | 386 | x86. (386 & x86 have same meaning here)")
 
+			return
+		}
+
+		if os.Args[1] == "-em" || os.Args[1] == "enableMacros" {
+			cli.RunRepl(true)
 			return
 		}
 
