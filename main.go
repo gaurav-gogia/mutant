@@ -12,11 +12,14 @@ import (
 	"strings"
 )
 
-const RELEASECMD = "release"
+const (
+	RELEASECMD = "release"
+	VERSION    = "Version: 2.1.0_dev"
+)
 
 func main() {
 	if len(os.Args) == 1 {
-		cli.RunRepl(false)
+		cli.RunRepl(VERSION, false)
 		return
 	}
 
@@ -62,12 +65,12 @@ func main() {
 		}
 
 		if os.Args[1] == "-em" || os.Args[1] == "enableMacros" {
-			cli.RunRepl(true)
+			cli.RunRepl(VERSION, true)
 			return
 		}
 
 		if os.Args[1] == "-v" || os.Args[1] == "--version" {
-			fmt.Println("Version: 2.1.0_beta")
+			fmt.Println(VERSION)
 			return
 		}
 

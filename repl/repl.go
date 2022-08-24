@@ -37,8 +37,8 @@ const banner = `
 const PROMPT = ">> "
 
 // Start function is the entrypoint of our repl
-func Start(in io.Reader, out io.Writer, enableMacros bool) {
-	welcome(enableMacros)
+func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
+	welcome(version, enableMacros)
 	scanner := bufio.NewScanner(in)
 	env := object.NewEnvironment()
 	macroEnv := object.NewEnvironment()
@@ -103,7 +103,7 @@ func Start(in io.Reader, out io.Writer, enableMacros bool) {
 	}
 }
 
-func welcome(enableMacros bool) {
+func welcome(version string, enableMacros bool) {
 	fmt.Print(banner)
 
 	user, err := user.Current()
@@ -112,7 +112,7 @@ func welcome(enableMacros bool) {
 	}
 	fmt.Printf("Hello %s! Welcome to mutant, a programming language!\n", user.Name)
 
-	fmt.Println("Running with Process ID: ", os.Getpid())
+	fmt.Printf("Running %s with Process ID: %d\n", version, os.Getpid())
 	if enableMacros {
 		fmt.Println("Runing Mutant REPL in experimental mode. Macros are enabled.")
 	}
