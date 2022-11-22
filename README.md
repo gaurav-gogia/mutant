@@ -25,5 +25,9 @@ cd mutant
 go install
 ```
 
+## Featured In
+- [Gopherlabs Conference 2021 by CloudNativeFolks](https://youtu.be/rhSwwGSt90c?t=2223)
+- [Nullcon Goa Sep 2022](https://nullcon.net/goa-2022/pushing-security-left-by-mutating-byte-code)
+
 ## Documentaiton
 For all things mutant, please visit the [official website](https://mudocs.netlify.app) ^.^
