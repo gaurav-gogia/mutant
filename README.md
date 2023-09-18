@@ -30,7 +30,7 @@ go install
 - [Nullcon Goa Sep 2022](https://nullcon.net/goa-2022/pushing-security-left-by-mutating-byte-code)
 - [Nullcon Goa Sep 2022 YouTube Video](https://youtu.be/ivrM8rytaKY)
 - [DEFCON AppSec Village 1st Place Winning Entry](https://eval.blog/research/breaking-the-mutant-languages-encryption/)
-- [Hackadat - This Week in Security](https://hackaday.com/2023/08/18/this-week-in-security-tunnelcrack-mutant-and-not-discord/)
+- [Hackaday - This Week in Security](https://hackaday.com/2023/08/18/this-week-in-security-tunnelcrack-mutant-and-not-discord/)
 
 ## Documentaiton
 For all things mutant, please visit the [official website](https://mudocs.netlify.app) ^.^
