@@ -8,7 +8,7 @@ import (
 // Lexer is the data structure for our lexer
 // It performs lexical analysis and tokenizes code
 type Lexer struct {
-	input        string
+	input        []rune
 	position     int // current character index
 	readPosition int // next character index
 	ch           rune
@@ -17,7 +17,7 @@ type Lexer struct {
 // New function initializes our lexer, takes input as a string
 // that input is the source code
 func New(input string) *Lexer {
-	l := &Lexer{input: input}
+	l := &Lexer{input: []rune(input)}
 	l.readRune()
 	return l
 }
@@ -86,7 +86,7 @@ func (l *Lexer) NextToken() token.Token {
 		tok.Type = token.STRING
 		tok.Literal = l.readString()
 	default:
-		if unicode.IsLetter(l.ch) {
+		if isChatacter(l.ch) {
 			tok.Literal = l.readIdentifier()
 			tok.Type = token.LookupIdent(tok.Literal)
 			return tok
@@ -101,6 +101,14 @@ func (l *Lexer) NextToken() token.Token {
 	l.readRune()
 
 	return tok
+}
+
+func isChatacter(ch rune) bool {
+	return isDevnagri(ch) || unicode.IsLetter(ch)
+}
+
+func isDevnagri(ch rune) bool {
+	return (ch >= 2304 && ch <= 2431)
 }
 
 func (l *Lexer) readRune() {
@@ -122,7 +130,7 @@ func (l *Lexer) readString() string {
 			break
 		}
 	}
-	return l.input[position:l.position]
+	return string(l.input[position:l.position])
 }
 
 func newToken(tokenType token.TokenType, ch rune) token.Token {
@@ -136,10 +144,10 @@ func newToken(tokenType token.TokenType, ch rune) token.Token {
 
 func (l *Lexer) readIdentifier() string {
 	position := l.position
-	for unicode.IsLetter(l.ch) || unicode.IsDigit(l.ch) || l.ch == '_' {
+	for isChatacter(l.ch) || unicode.IsDigit(l.ch) || l.ch == '_' {
 		l.readRune()
 	}
-	return l.input[position:l.position]
+	return string(l.input[position:l.position])
 }
 
 func (l *Lexer) readNumber() string {
@@ -147,7 +155,7 @@ func (l *Lexer) readNumber() string {
 	for unicode.IsDigit(l.ch) {
 		l.readRune()
 	}
-	return l.input[position:l.position]
+	return string(l.input[position:l.position])
 }
 
 func (l *Lexer) skipWhiteSpace() {

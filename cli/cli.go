@@ -14,14 +14,14 @@ import (
 	"time"
 )
 
-func RunRepl() {
+func RunRepl(version string, enableMacros bool) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		<-c
 		repl.GracefulExit()
 	}()
-	repl.Start(os.Stdin, os.Stdout)
+	repl.Start(os.Stdin, os.Stdout, version, enableMacros)
 }
 
 func CompileCode(src, goos, goarch string, release bool) {

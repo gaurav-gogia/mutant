@@ -20,10 +20,11 @@ func EncryptByteCode(byteCode *compiler.ByteCode) *compiler.ByteCode {
 			ins := byteCode.Constants[i].(*object.CompiledFunction).Instructions
 			ins = security.XOR(ins, insLen)
 			byteCode.Constants[i].(*object.CompiledFunction).Instructions = ins
-		} else {
-			if encConst, err := EncryptObject(byteCode.Constants[i], insLen); err == nil {
-				byteCode.Constants[i] = encConst
-			}
+			continue
+		}
+
+		if encConst, err := EncryptObject(byteCode.Constants[i], insLen); err == nil {
+			byteCode.Constants[i] = encConst
 		}
 	}
 

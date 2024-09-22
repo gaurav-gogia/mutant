@@ -12,11 +12,14 @@ import (
 	"strings"
 )
 
-const RELEASECMD = "release"
+const (
+	RELEASECMD = "release"
+	VERSION    = "Version: 2.1.0_dev"
+)
 
 func main() {
 	if len(os.Args) == 1 {
-		cli.RunRepl()
+		cli.RunRepl(VERSION, false)
 		return
 	}
 
@@ -30,6 +33,10 @@ func main() {
 
 			fmt.Println("\tmutant")
 			fmt.Println("\t\tRun mutant in REPL mode.")
+			fmt.Println()
+
+			fmt.Println("\tmutant -em, --enableMacros")
+			fmt.Println("\t\tRun mutant in REPL mode with experimental macros support.")
 			fmt.Println()
 
 			fmt.Println("\tmutant -h, --help")
@@ -57,8 +64,13 @@ func main() {
 			return
 		}
 
+		if os.Args[1] == "-em" || os.Args[1] == "enableMacros" {
+			cli.RunRepl(VERSION, true)
+			return
+		}
+
 		if os.Args[1] == "-v" || os.Args[1] == "--version" {
-			fmt.Println("Version: 2.0.1")
+			fmt.Println(VERSION)
 			return
 		}
 
@@ -71,7 +83,6 @@ func main() {
 			cli.RunCode(os.Args[1])
 			return
 		}
-
 	}
 
 	if len(os.Args) >= 2 && os.Args[1] == RELEASECMD {
@@ -96,7 +107,7 @@ func prepareRelease(args []string) (string, string, string, error) {
 	releasecmd.StringVar(&goos, "os", runtime.GOOS, "Use thie flag to specify target OS for cross-compilation by using -os flag")
 	releasecmd.StringVar(&goarch, "arch", runtime.GOARCH, "Use thie flag to specify target Architecture for cross-compilation by using -arch flag")
 
-	if err := releasecmd.Parse(os.Args[2:]); err != nil {
+	if err := releasecmd.Parse(args[2:]); err != nil {
 		return "", "", "", err
 	}
 

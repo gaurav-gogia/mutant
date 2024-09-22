@@ -6,6 +6,7 @@ import (
 	"io"
 	"mutant/compiler"
 	"mutant/errrs"
+	"mutant/evaluator"
 	"mutant/global"
 	"mutant/lexer"
 	"mutant/mutil"
@@ -16,6 +17,7 @@ import (
 	"os/exec"
 	"os/user"
 	"runtime"
+	"strings"
 )
 
 const banner = `
@@ -35,11 +37,11 @@ const banner = `
 const PROMPT = ">> "
 
 // Start function is the entrypoint of our repl
-func Start(in io.Reader, out io.Writer) {
-	welcome()
+func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
+	welcome(version, enableMacros)
 	scanner := bufio.NewScanner(in)
-	// env := object.NewEnvironment()
-	// macroEnv := object.NewEnvironment()
+	env := object.NewEnvironment()
+	macroEnv := object.NewEnvironment()
 
 	constants := []object.Object{}
 	globals := make([]object.Object, global.GlobalSize)
@@ -56,16 +58,27 @@ func Start(in io.Reader, out io.Writer) {
 		}
 
 		line := scanner.Text()
-		if vanity(line, out) {
+		if vanity(line, out, enableMacros) {
 			continue
 		}
 
 		l := lexer.New(line)
 		p := parser.New(l)
 		program := p.ParseProgram()
-
 		if len(p.Errors()) != 0 {
 			errrs.PrintParseErrors(out, p.Errors())
+			continue
+		}
+
+		if enableMacros {
+			evaluator.DefineMacros(program, macroEnv)
+			expanded := evaluator.ExpandMacros(program, macroEnv)
+			evaluated := evaluator.Eval(expanded, env)
+			if evaluated == nil {
+				continue
+			}
+			io.WriteString(out, evaluated.Inspect())
+			io.WriteString(out, "\n")
 			continue
 		}
 
@@ -90,7 +103,7 @@ func Start(in io.Reader, out io.Writer) {
 	}
 }
 
-func welcome() {
+func welcome(version string, enableMacros bool) {
 	fmt.Print(banner)
 
 	user, err := user.Current()
@@ -98,10 +111,16 @@ func welcome() {
 		panic(err)
 	}
 	fmt.Printf("Hello %s! Welcome to mutant, a programming language!\n", user.Name)
+
+	fmt.Printf("Running %s with Process ID: %d\n", version, os.Getpid())
+	if enableMacros {
+		fmt.Println("Runing Mutant REPL in experimental mode. Macros are enabled.")
+	}
+
 	fmt.Printf("Please get started by using this REPL")
 }
 
-func vanity(line string, out io.Writer) bool {
+func vanity(line string, out io.Writer, enableMacros bool) bool {
 	if line == "" {
 		return true
 	}
@@ -136,7 +155,23 @@ func vanity(line string, out io.Writer) bool {
 		GracefulExit()
 	}
 
+	if enableMacros {
+		return false
+	}
+
+	if macroCheck(line) {
+		io.WriteString(out, "Macros are experimental features. To enable them, please use `-em or --enableMacros` CLI arguments while running Mutant REPL.")
+		return true
+	}
+
 	return false
+}
+
+func macroCheck(line string) bool {
+	lowerLine := strings.ToLower(line)
+	return strings.Contains(lowerLine, "macro") ||
+		strings.Contains(lowerLine, "quote") ||
+		strings.Contains(lowerLine, "unquote")
 }
 
 func GracefulExit() {

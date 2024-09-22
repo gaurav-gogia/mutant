@@ -13,6 +13,7 @@ import (
 	"mutant/object"
 	"mutant/parser"
 	"mutant/security"
+	"os"
 )
 
 // Generate function takes a `string`, it's the path for the source code
@@ -28,7 +29,6 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 	}
 
 	if release {
-
 		if goos == WINDOWS {
 			dstpath += global.WindowsPE32ExecutableExtension
 		}
@@ -40,7 +40,7 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 		return nil, "", nil
 	}
 
-	if err := ioutil.WriteFile(dstpath+global.MutantByteCodeCompiledFileExtension, bytecode, 0644); err != nil {
+	if err := os.WriteFile(dstpath+global.MutantByteCodeCompiledFileExtension, bytecode, 0644); err != nil {
 		return err, errrs.ERROR, nil
 	}
 
