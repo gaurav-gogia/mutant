@@ -50,19 +50,31 @@ func (vm *VM) Run() error {
 	var ip int
 	var ins code.Instructions
 	var op code.Opcode
+	var err error
 
 	for vm.currentFrame().ip < len(vm.currentFrame().Instructions())-1 {
 		vm.currentFrame().ip++
 
 		ip = vm.currentFrame().ip
 		ins = vm.currentFrame().Instructions()
-		ins[ip] = security.XOROne(ins[ip], vm.inslen)
+
+		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen))
+		if err != nil {
+			return err
+		}
+
 		op = code.Opcode(ins[ip])
-		ins[ip] = security.XOROne(ins[ip], vm.inslen)
+		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen))
+		if err != nil {
+			return err
+		}
 
 		switch op {
 		case code.OpConstant:
-			constIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip += 2
 
 			if err := vm.push(vm.constants[constIndex]); err != nil {
@@ -89,14 +101,22 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpArray:
-			numElements := int(code.ReadUint16(ins[ip+1:], vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
+			numElements := int(res)
 			vm.currentFrame().ip += 2
 			array := vm.buildArray(vm.stackPointer-numElements, vm.stackPointer)
 			if err := vm.push(array); err != nil {
 				return err
 			}
 		case code.OpHash:
-			numElements := int(code.ReadUint16(ins[ip+1:], vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
+			numElements := int(res)
 			vm.currentFrame().ip += 2
 			hash, err := vm.buildHash(vm.stackPointer-numElements, vm.stackPointer)
 			if err != nil {
@@ -111,27 +131,44 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpJump:
-			pos := int(code.ReadUint16(ins[ip+1:], vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
+			pos := int(res)
 			vm.currentFrame().ip = pos - 1
 		case code.OpJumpFalse:
-			pos := int(code.ReadUint16(ins[ip+1:], vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
+			pos := int(res)
 			vm.currentFrame().ip += 2
 			condition := vm.pop()
 			if !isTruthy(condition) {
 				vm.currentFrame().ip = pos - 1
 			}
 		case code.OpSetGlobal:
-			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip += 2
 			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
-			globalIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip += 2
 			if err := vm.push(vm.globals[globalIndex]); err != nil {
 				return err
 			}
 		case code.OpSetLocal:
-			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			obj := vm.pop()
@@ -142,21 +179,30 @@ func (vm *VM) Run() error {
 				vm.stack[frame.bp+int(localIndex)] = encObj
 			}
 		case code.OpGetLocal:
-			localIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			if err := vm.push(vm.stack[frame.bp+int(localIndex)]); err != nil {
 				return err
 			}
 		case code.OpGetBuiltin:
-			builtinIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
+			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip++
 			definition := object.Builtins[builtinIndex]
 			if err := vm.push(definition.Builtin); err != nil {
 				return err
 			}
 		case code.OpGetFree:
-			freeIndex := code.ReadUint8(ins[ip+1:], vm.inslen)
+			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip++
 			currentClosure := vm.currentFrame().cl
 			if err := vm.push(currentClosure.Free[freeIndex]); err != nil {
@@ -169,8 +215,14 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpClosure:
-			constIndex := code.ReadUint16(ins[ip+1:], vm.inslen)
-			numFree := code.ReadUint8(ins[ip+3:], vm.inslen)
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
+			numFree, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip += 3
 			if err := vm.pushClosure(int(constIndex), int(numFree)); err != nil {
 				return err
@@ -181,7 +233,10 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpCall:
-			numArgs := code.ReadUint8(ins[ip+1:], vm.inslen)
+			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			if err != nil {
+				return err
+			}
 			vm.currentFrame().ip++
 			if err := vm.executeCall(int(numArgs)); err != nil {
 				return err

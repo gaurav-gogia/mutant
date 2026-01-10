@@ -17,13 +17,27 @@ import (
 )
 
 // Generate function takes a `string`, it's the path for the source code
-func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs.ErrorType, []string) {
+// password: optional password for encryption (empty string for deterministic encryption)
+// privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
+func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
 	data, err := ioutil.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
 	}
 
-	bytecode, err, errtype, errors := compile(data)
+	// Generate signing key if not provided
+	if privateKey == nil {
+		keyPair, err := security.GenerateKeyPair()
+		if err != nil {
+			return err, errrs.ERROR, nil
+		}
+		privateKey = keyPair.PrivateKey
+
+		// In production, you'd want to save/reuse keys
+		// For now, we generate a new key each time
+	}
+
+	bytecode, err, errtype, errors := compile(data, password, privateKey)
 	if err != nil {
 		return err, errtype, errors
 	}
@@ -47,7 +61,7 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 	return nil, "", nil
 }
 
-func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
+func compile(data []byte, password string, privateKey []byte) ([]byte, error, errrs.ErrorType, []string) {
 	constants := []object.Object{}
 	symbolTable := compiler.NewSymbolTable()
 	for i, v := range object.Builtins {
@@ -67,7 +81,7 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 		return nil, err, errrs.COMPILER_ERROR, nil
 	}
 
-	encodedByteCode, err := encode(comp.ByteCode())
+	encodedByteCode, err := encode(comp.ByteCode(), data, password, privateKey)
 	if err != nil {
 		return nil, err, errrs.ERROR, nil
 	}
@@ -75,7 +89,7 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 	return encodedByteCode, nil, "", nil
 }
 
-func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
+func encode(compByteCode *compiler.ByteCode, sourceCode []byte, password string, privateKey []byte) ([]byte, error) {
 	var content bytes.Buffer
 
 	compByteCode = mutil.EncryptByteCode(compByteCode)
@@ -87,16 +101,35 @@ func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	}
 
 	byteCode := content.Bytes()
-	return encryptCode(byteCode)
+	return encryptCode(byteCode, sourceCode, password, privateKey)
 }
 
-func encryptCode(b64ByteCode []byte) ([]byte, error) {
-	xorByteCode := security.XOR(b64ByteCode, len(b64ByteCode))
-	encodedByteCode, err := security.AESEncrypt(xorByteCode)
+func encryptCode(b64ByteCode []byte, sourceCode []byte, password string, privateKey []byte) ([]byte, error) {
+	// Apply secure XOR (replaces insecure math/rand-based XOR)
+	xorByteCode, err := security.SecureXOREncrypt(b64ByteCode)
 	if err != nil {
 		return nil, err
 	}
-	signedCode := security.SignCode(encodedByteCode)
+
+	// Encrypt using new secure method (no key storage)
+	var encodedByteCode string
+	if password != "" {
+		// Password-based encryption
+		encodedByteCode, err = security.AESEncryptWithPassword(xorByteCode, password)
+	} else {
+		// Deterministic encryption (derives key from source code hash)
+		encodedByteCode, err = security.AESEncrypt(xorByteCode, sourceCode)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Sign with Ed25519 (replaces insecure MD5)
+	signedCode, err := security.SignCode(encodedByteCode, privateKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return signedCode, nil
 }
 

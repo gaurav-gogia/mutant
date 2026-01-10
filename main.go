@@ -75,58 +75,59 @@ func main() {
 		}
 
 		if strings.HasSuffix(os.Args[1], global.MutantSourceCodeFileExtention) {
-			cli.CompileCode(os.Args[1], "", "", false)
+			cli.CompileCode(os.Args[1], "", "", false, "")
 			return
 		}
 
 		if strings.HasSuffix(os.Args[1], global.MutantByteCodeCompiledFileExtension) {
-			cli.RunCode(os.Args[1])
+			cli.RunCode(os.Args[1], "")
 			return
 		}
 	}
 
 	if len(os.Args) >= 2 && os.Args[1] == RELEASECMD {
-		src, goos, goarch, err := prepareRelease(os.Args)
+		src, goos, goarch, password, err := prepareRelease(os.Args)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
 		fmt.Println("Compiling Release Build....")
-		cli.CompileCode(src, goos, goarch, true)
+		cli.CompileCode(src, goos, goarch, true, password)
 		return
 	}
 }
 
-func prepareRelease(args []string) (string, string, string, error) {
-	var goos, goarch, src string
+func prepareRelease(args []string) (string, string, string, string, error) {
+	var goos, goarch, src, password string
 
 	releasecmd := flag.NewFlagSet(RELEASECMD, flag.ExitOnError)
 
 	releasecmd.StringVar(&src, "src", "", "Mutant Source Code File Path by using -src flag")
 	releasecmd.StringVar(&goos, "os", runtime.GOOS, "Use thie flag to specify target OS for cross-compilation by using -os flag")
 	releasecmd.StringVar(&goarch, "arch", runtime.GOARCH, "Use thie flag to specify target Architecture for cross-compilation by using -arch flag")
+	releasecmd.StringVar(&password, "password", "", "Optional password for encryption (leave empty for deterministic encryption)")
 
 	if err := releasecmd.Parse(args[2:]); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 
 	if releasecmd.Parsed() {
 		if src == "" {
-			return "", "", "", errors.New("mutant source code file path is required, please use -src flag")
+			return "", "", "", "", errors.New("mutant source code file path is required, please use -src flag")
 		}
 
 		if !strings.HasSuffix(src, global.MutantSourceCodeFileExtention) {
-			return "", "", "", errors.New("incorrect file extension, this program only works for mutant source code files")
+			return "", "", "", "", errors.New("incorrect file extension, this program only works for mutant source code files")
 		}
 
 		absSrc, err := filepath.Abs(src)
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 
-		return absSrc, goos, goarch, nil
+		return absSrc, goos, goarch, password, nil
 	}
 
-	return "", "", "", errors.New("could not parse values")
+	return "", "", "", "", errors.New("could not parse values")
 }

@@ -14,7 +14,7 @@ import (
 	"os"
 )
 
-func Run(srcpath string) (error, errrs.ErrorType) {
+func Run(srcpath string, password string) (error, errrs.ErrorType) {
 	signedCode, err := ioutil.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR
@@ -24,7 +24,7 @@ func Run(srcpath string) (error, errrs.ErrorType) {
 		return err, errrs.ERROR
 	}
 
-	bytecode, err := decode(signedCode)
+	bytecode, err := decode(signedCode, password)
 	if err != nil {
 		return err, errrs.ERROR
 	}
@@ -32,8 +32,8 @@ func Run(srcpath string) (error, errrs.ErrorType) {
 	return runvm(bytecode)
 }
 
-func decode(data []byte) (*compiler.ByteCode, error) {
-	decodedData, err := decryptCode(data)
+func decode(data []byte, password string) (*compiler.ByteCode, error) {
+	decodedData, err := decryptCode(data, password)
 	if err != nil {
 		return nil, err
 	}
@@ -49,13 +49,32 @@ func decode(data []byte) (*compiler.ByteCode, error) {
 	return bytecode, nil
 }
 
-func decryptCode(signedCode []byte) ([]byte, error) {
-	encryptedCode := security.GetEncryptedCode(signedCode)
-	decryptedData, err := security.AESDecrypt(encryptedCode)
+func decryptCode(signedCode []byte, password string) ([]byte, error) {
+	encryptedMetadata := security.GetEncryptedCode(signedCode)
+
+	// Decrypt using the new secure method
+	var xorEncryptedData []byte
+	var err error
+
+	if password != "" {
+		// Password-based decryption
+		xorEncryptedData, err = security.AESDecryptWithPassword(encryptedMetadata, password)
+	} else {
+		// For deterministic decryption, we'd need the source code hash
+		// This is a limitation - for now, we require password for standalone executables
+		return nil, security.ErrPasswordRequired
+	}
+
 	if err != nil {
 		return nil, err
 	}
-	decodedData := security.XOR(decryptedData, len(decryptedData))
+
+	// Decrypt the XOR layer (key is embedded in the data)
+	decodedData, err := security.SecureXORDecrypt(xorEncryptedData)
+	if err != nil {
+		return nil, err
+	}
+
 	return decodedData, nil
 }
 

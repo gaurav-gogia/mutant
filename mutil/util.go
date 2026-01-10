@@ -12,14 +12,19 @@ import (
 )
 
 func EncryptByteCode(byteCode *compiler.ByteCode) *compiler.ByteCode {
-	byteCode.Instructions = security.XOR(byteCode.Instructions, len(byteCode.Instructions))
 	insLen := len(byteCode.Instructions)
+	xored, err := security.SecureXOR(byteCode.Instructions, int64(insLen))
+	if err == nil {
+		byteCode.Instructions = xored
+	}
 
 	for i := range byteCode.Constants {
 		if byteCode.Constants[i].Type() == object.COMPILED_FN_OBJ {
 			ins := byteCode.Constants[i].(*object.CompiledFunction).Instructions
-			ins = security.XOR(ins, insLen)
-			byteCode.Constants[i].(*object.CompiledFunction).Instructions = ins
+			xored, err := security.SecureXOR(ins, int64(insLen))
+			if err == nil {
+				byteCode.Constants[i].(*object.CompiledFunction).Instructions = xored
+			}
 			continue
 		}
 
@@ -40,30 +45,39 @@ func EncryptObject(obj object.Object, length int) (object.Object, error) {
 		val := obj.(*object.Integer).Value
 		bite := make([]byte, 8)
 		binary.LittleEndian.PutUint64(bite, uint64(val))
-		bite = security.XOR(bite, length)
+		xored, err := security.SecureXOR(bite, int64(length))
+		if err != nil {
+			return nil, err
+		}
 
 		encObj = &object.Encrypted{
 			EncType: object.INTEGER_OBJ,
-			Value:   bite,
+			Value:   xored,
 		}
 
 	case object.STRING_OBJ:
 		val := obj.(*object.String).Value
-		bite := security.XOR([]byte(val), length)
+		xored, err := security.SecureXOR([]byte(val), int64(length))
+		if err != nil {
+			return nil, err
+		}
 
 		encObj = &object.Encrypted{
 			EncType: object.STRING_OBJ,
-			Value:   bite,
+			Value:   xored,
 		}
 
 	case object.BOOLEAN_OBJ:
 		val := obj.(*object.Boolean).Value
 		str := strconv.FormatBool(val)
-		bite := security.XOR([]byte(str), length)
+		xored, err := security.SecureXOR([]byte(str), int64(length))
+		if err != nil {
+			return nil, err
+		}
 
 		encObj = &object.Encrypted{
 			EncType: object.BOOLEAN_OBJ,
-			Value:   bite,
+			Value:   xored,
 		}
 
 	default:
@@ -81,18 +95,21 @@ func DecryptObject(obj object.Object, length int) (object.Object, error) {
 		biteVal := decObj.(*object.Encrypted).Value
 		bite := make([]byte, len(biteVal))
 		copy(bite, biteVal)
-		bite = security.XOR(bite, length)
+		xored, err := security.SecureXOR(bite, int64(length))
+		if err != nil {
+			return nil, err
+		}
 
 		switch decObj.(*object.Encrypted).EncType {
 		case object.INTEGER_OBJ:
-			val := binary.LittleEndian.Uint64(bite)
+			val := binary.LittleEndian.Uint64(xored)
 			decObj = &object.Integer{Value: int64(val)}
 
 		case object.STRING_OBJ:
-			decObj = &object.String{Value: string(bite)}
+			decObj = &object.String{Value: string(xored)}
 
 		case object.BOOLEAN_OBJ:
-			str := strings.ToLower(string(bite))
+			str := strings.ToLower(string(xored))
 			if str == "true" {
 				decObj = global.True
 			} else {

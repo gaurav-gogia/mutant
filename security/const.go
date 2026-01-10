@@ -10,5 +10,17 @@ const (
 	SEPERATOR = "|"
 )
 
-// ErrWrongSignature error is returned if signature doesn't match
-var ErrWrongSignature = errors.New("Wrong signature, compromised or wrong file")
+// Error definitions
+var (
+	// ErrWrongSignature error is returned if signature doesn't match
+	ErrWrongSignature = errors.New("wrong signature, compromised or wrong file")
+
+	// ErrPasswordRequired error is returned when password is needed but not provided
+	ErrPasswordRequired = errors.New("password required for decryption")
+
+	// ErrInvalidMetadata error is returned when encryption metadata is malformed
+	ErrInvalidMetadata = errors.New("invalid encryption metadata")
+
+	// ErrDebuggerDetected error is returned when a debugger is detected
+	ErrDebuggerDetected = errors.New("debugger detected, execution halted for security")
+)
