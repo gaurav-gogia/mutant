@@ -24,56 +24,9 @@ type EncryptionMetadata struct {
 	Parallelism    uint8  // Argon2id parallelism (if UsePasswordKDF=true)
 }
 
-// AESEncrypt encrypts data using deterministic key derivation
-// NEVER stores the encryption key - only stores metadata needed to reconstruct it
-func AESEncrypt(data []byte, sourceCode []byte) (string, error) {
-	// Hash the source code for deterministic key derivation
-	sourceHash := HashSourceCode(sourceCode)
-
-	// Generate a secure random salt
-	salt, err := GenerateSalt()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate salt: %w", err)
-	}
-
-	// Derive key using HKDF (deterministic)
-	key, _, err := DeriveKeyDeterministic(sourceHash, "")
-	if err != nil {
-		return "", fmt.Errorf("failed to derive key: %w", err)
-	}
-	defer SecureZero(key) // Zero the key from memory when done	// Encrypt the data
-	c, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-
-	gcm, err := cipher.NewGCM(c)
-	if err != nil {
-		return "", err
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(cryptoRand.Reader, nonce); err != nil {
-		return "", err
-	}
-
-	ciphertext := gcm.Seal(nonce, nonce, data, []byte(ENCSIG))
-
-	// Create metadata (WITHOUT storing the key)
-	metadata := EncryptionMetadata{
-		Ciphertext:     base64.StdEncoding.EncodeToString(ciphertext),
-		Salt:           hex.EncodeToString(salt),
-		SourceCodeHash: hex.EncodeToString(sourceHash),
-		UsePasswordKDF: false,
-	}
-
-	// Serialize metadata
-	return serializeMetadata(metadata), nil
-}
-
-// AESEncryptWithPassword encrypts data using password-based key derivation
+// AESEncrypt encrypts data using password-based key derivation
 // NEVER stores the encryption key - only stores KDF parameters
-func AESEncryptWithPassword(data []byte, password string) (string, error) {
+func AESEncrypt(data []byte, password string) (string, error) {
 	// Generate a secure random salt
 	salt, err := GenerateSalt()
 	if err != nil {
@@ -117,43 +70,9 @@ func AESEncryptWithPassword(data []byte, password string) (string, error) {
 	return serializeMetadata(metadata), nil
 }
 
-// AESDecrypt decrypts data using deterministic key derivation
-// Reconstructs the key from metadata - key is NEVER stored
-func AESDecrypt(encodedMetadata string, sourceCode []byte) ([]byte, error) {
-	// Deserialize metadata
-	metadata, err := deserializeMetadata(encodedMetadata)
-	if err != nil {
-		return nil, err
-	}
-
-	if metadata.UsePasswordKDF {
-		return nil, errors.New("this data was encrypted with a password, use AESDecryptWithPassword instead")
-	}
-
-	// Reconstruct the key using the same deterministic process
-	sourceHash, err := hex.DecodeString(metadata.SourceCodeHash)
-	if err != nil {
-		return nil, fmt.Errorf("invalid source hash: %w", err)
-	}
-
-	_, err = hex.DecodeString(metadata.Salt)
-	if err != nil {
-		return nil, fmt.Errorf("invalid salt: %w", err)
-	}
-
-	key, _, err := DeriveKeyDeterministic(sourceHash, "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key: %w", err)
-	}
-	defer SecureZero(key) // Zero the key from memory when done
-
-	// Decrypt the data
-	return decryptWithKey(key, metadata.Ciphertext)
-}
-
-// AESDecryptWithPassword decrypts data using password-based key derivation
+// AESDecrypt decrypts data using password-based key derivation
 // Reconstructs the key from password and metadata - key is NEVER stored
-func AESDecryptWithPassword(encodedMetadata string, password string) ([]byte, error) {
+func AESDecrypt(encodedMetadata string, password string) ([]byte, error) {
 	// Deserialize metadata
 	metadata, err := deserializeMetadata(encodedMetadata)
 	if err != nil {

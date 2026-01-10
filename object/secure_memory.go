@@ -18,7 +18,7 @@ type SecureGlobal struct {
 
 // NewSecureGlobal creates an encrypted global object
 func NewSecureGlobal(obj Object, seed int64) (*SecureGlobal, error) {
-	encrypted, err := encryptObjectSecure(obj, seed)
+	encrypted, err := encryptObjectSecure(obj, seed, "")
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +34,7 @@ func NewSecureGlobal(obj Object, seed int64) (*SecureGlobal, error) {
 // Get decrypts and returns the object
 func (sg *SecureGlobal) Get() (Object, error) {
 	sg.lastAccess = time.Now()
-	return decryptObjectSecure(sg.encryptedValue, sg.objectType, sg.seed)
+	return decryptObjectSecure(sg.encryptedValue, sg.objectType, sg.seed, "")
 }
 
 // Set encrypts and updates the object
@@ -43,7 +43,7 @@ func (sg *SecureGlobal) Set(obj Object) error {
 		return errors.New("type mismatch")
 	}
 
-	encrypted, err := encryptObjectSecure(obj, sg.seed)
+	encrypted, err := encryptObjectSecure(obj, sg.seed, "")
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (sg *SecureGlobal) Clear() {
 }
 
 // encryptObjectSecure encrypts an object using secure methods
-func encryptObjectSecure(obj Object, seed int64) ([]byte, error) {
+func encryptObjectSecure(obj Object, seed int64, password string) ([]byte, error) {
 	var data []byte
 
 	switch obj.Type() {
@@ -83,8 +83,8 @@ func encryptObjectSecure(obj Object, seed int64) ([]byte, error) {
 		return nil, errors.New("unsupported object type for encryption")
 	}
 
-	// Use secure XOR
-	encrypted, err := security.SecureXOR(data, seed)
+	// Use secure XOR with password
+	encrypted, err := security.SecureXOR(data, seed, password)
 	if err != nil {
 		return nil, err
 	}
@@ -93,9 +93,9 @@ func encryptObjectSecure(obj Object, seed int64) ([]byte, error) {
 }
 
 // decryptObjectSecure decrypts an object using secure methods
-func decryptObjectSecure(encrypted []byte, objType ObjectType, seed int64) (Object, error) {
-	// Decrypt using secure XOR
-	data, err := security.SecureXOR(encrypted, seed)
+func decryptObjectSecure(encrypted []byte, objType ObjectType, seed int64, password string) (Object, error) {
+	// Decrypt using secure XOR with password
+	data, err := security.SecureXOR(encrypted, seed, password)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (ss *SecureStack) Get(index int) (Object, error) {
 
 	// If it's encrypted, decrypt it
 	if enc, ok := obj.(*Encrypted); ok {
-		return decryptObjectSecure(enc.Value, enc.EncType, ss.seed)
+		return decryptObjectSecure(enc.Value, enc.EncType, ss.seed, "")
 	}
 
 	return obj, nil
@@ -197,7 +197,7 @@ func (ss *SecureStack) AutoProtect() {
 
 		// Encrypt if not accessed recently
 		if now.Sub(ss.lastAccess[i]) > ss.encryptAfter {
-			encrypted, err := encryptObjectSecure(ss.data[i], ss.seed)
+			encrypted, err := encryptObjectSecure(ss.data[i], ss.seed, "")
 			if err == nil {
 				// Clear the original object
 				ss.clearObject(ss.data[i])
@@ -256,7 +256,7 @@ func NewSecureConstantPool(constants []Object, cacheSize int, seed int64) (*Secu
 	types := make([]ObjectType, len(constants))
 
 	for i, obj := range constants {
-		enc, err := encryptObjectSecure(obj, seed)
+		enc, err := encryptObjectSecure(obj, seed, "")
 		if err != nil {
 			// For objects that can't be encrypted, store nil
 			encrypted[i] = nil
@@ -296,7 +296,7 @@ func (scp *SecureConstantPool) Get(index int) (Object, error) {
 	}
 
 	// Decrypt
-	obj, err := decryptObjectSecure(scp.encrypted[index], scp.types[index], scp.seed)
+	obj, err := decryptObjectSecure(scp.encrypted[index], scp.types[index], scp.seed, "")
 	if err != nil {
 		return nil, err
 	}

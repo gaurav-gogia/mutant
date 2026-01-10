@@ -20,6 +20,7 @@ type VM struct {
 	frames       []*Frame
 	frameIndex   int
 	inslen       int
+	password     string // password for instruction decryption
 }
 
 func New(bc *compiler.ByteCode) *VM {
@@ -38,11 +39,24 @@ func New(bc *compiler.ByteCode) *VM {
 		frames:       frames,
 		frameIndex:   1,
 		inslen:       len(bc.Instructions),
+		password:     "",
 	}
+}
+
+func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
+	vm := New(bc)
+	vm.password = password
+	return vm
 }
 
 func NewWithGlobalStore(bc *compiler.ByteCode, globals []object.Object) *VM {
 	vm := New(bc)
+	vm.globals = globals
+	return vm
+}
+
+func NewWithPasswordAndGlobalStore(bc *compiler.ByteCode, password string, globals []object.Object) *VM {
+	vm := NewWithPassword(bc, password)
 	vm.globals = globals
 	return vm
 }
@@ -59,12 +73,12 @@ func (vm *VM) Run() error {
 		ip = vm.currentFrame().ip
 		ins = vm.currentFrame().Instructions()
 
-		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen))
+		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen), vm.password)
 		if err != nil {
 			return err
 		}
 		op = code.Opcode(ins[ip])
-		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen))
+		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen), vm.password)
 		if err != nil {
 			return err
 		}
@@ -74,7 +88,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpConstant: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -107,7 +121,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpArray: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -121,7 +135,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpHash: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -143,7 +157,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpJump: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -153,7 +167,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpJumpFalse: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -167,7 +181,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpSetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -177,7 +191,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpGetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -189,14 +203,14 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpSetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			obj := vm.pop()
-			encObj, err := mutil.EncryptObject(obj, vm.inslen)
+			encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password)
 			if err != nil {
 				vm.stack[frame.bp+int(localIndex)] = obj
 			} else {
@@ -206,7 +220,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -219,7 +233,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetBuiltin: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -232,7 +246,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetFree: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -251,11 +265,11 @@ func (vm *VM) Run() error {
 			if ip+3 >= len(ins) {
 				return fmt.Errorf("OpClosure: not enough bytes for operands at ip=%d, len=%d", ip, len(ins))
 			}
-			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
-			numFree, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen))
+			numFree, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -272,7 +286,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpCall: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
+			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
 			if err != nil {
 				return err
 			}
@@ -314,7 +328,7 @@ func (vm *VM) StackTop() object.Object {
 
 func (vm *VM) LastPoppedStackElement() object.Object {
 	obj := vm.stack[vm.stackPointer]
-	if decObj, err := mutil.DecryptObject(obj, vm.inslen); err == nil {
+	if decObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password); err == nil {
 		obj = decObj
 	}
 	return obj
@@ -342,7 +356,7 @@ func (vm *VM) push(obj object.Object) error {
 		return fmt.Errorf("stack overflow")
 	}
 
-	if encObj, err := mutil.EncryptObject(obj, vm.inslen); err == nil {
+	if encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password); err == nil {
 		obj = encObj
 	}
 
@@ -354,7 +368,7 @@ func (vm *VM) push(obj object.Object) error {
 
 func (vm *VM) pop() object.Object {
 	obj := vm.stack[vm.stackPointer-1]
-	if newObj, err := mutil.DecryptObject(obj, vm.inslen); err == nil {
+	if newObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password); err == nil {
 		obj = newObj
 	}
 
@@ -531,7 +545,7 @@ func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
 	elements := make([]object.Object, endIndex-startIndex)
 	for i := startIndex; i < endIndex; i++ {
 		elements[i-startIndex] = vm.stack[i]
-		element, err := mutil.DecryptObject(elements[i-startIndex], vm.inslen)
+		element, err := mutil.DecryptObject(elements[i-startIndex], vm.inslen, vm.password)
 		if err == nil {
 			elements[i-startIndex] = element
 		}
@@ -545,12 +559,12 @@ func (vm *VM) buildHash(startIndex, endIndex int) (object.Object, error) {
 		key := vm.stack[i]
 		value := vm.stack[i+1]
 
-		hkey, err := mutil.DecryptObject(key, vm.inslen)
+		hkey, err := mutil.DecryptObject(key, vm.inslen, vm.password)
 		if err == nil {
 			key = hkey
 		}
 
-		hvalue, err := mutil.DecryptObject(value, vm.inslen)
+		hvalue, err := mutil.DecryptObject(value, vm.inslen, vm.password)
 		if err == nil {
 			value = hvalue
 		}
@@ -608,7 +622,7 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 func (vm *VM) callBuiltin(builtin *builtin.BuiltIn, numArgs int) error {
 	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
 	for i := range args {
-		dec, err := mutil.DecryptObject(args[i], vm.inslen)
+		dec, err := mutil.DecryptObject(args[i], vm.inslen, vm.password)
 		if err == nil {
 			args[i] = dec
 		}

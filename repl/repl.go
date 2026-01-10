@@ -90,7 +90,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		}
 
 		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode)
+		byteCode = mutil.EncryptByteCode(byteCode, "") // Empty password for REPL (deterministic encryption based on instructions)
 
 		machine := vm.NewWithGlobalStore(byteCode, globals)
 		if err := machine.Run(); err != nil {

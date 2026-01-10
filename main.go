@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"mutant/cli"
 	"mutant/global"
+	"mutant/mutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,12 +87,14 @@ func main() {
 		}
 
 		if strings.HasSuffix(os.Args[1], global.MutantSourceCodeFileExtention) {
-			cli.CompileCode(os.Args[1], "", "", false, "")
+			pwd := mutil.GetPwd()
+			cli.CompileCode(os.Args[1], "", "", false, pwd)
 			return
 		}
 
 		if strings.HasSuffix(os.Args[1], global.MutantByteCodeCompiledFileExtension) {
-			cli.RunCode(os.Args[1], "")
+			pwd := mutil.GetPwd()
+			cli.RunCode(os.Args[1], pwd)
 			return
 		}
 	}

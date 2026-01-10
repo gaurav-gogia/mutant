@@ -29,7 +29,7 @@ func Run(srcpath string, password string) (error, errrs.ErrorType) {
 		return err, errrs.ERROR
 	}
 
-	return runvm(bytecode)
+	return runvm(bytecode, password)
 }
 
 func decode(data []byte, password string) (*compiler.ByteCode, error) {
@@ -56,15 +56,7 @@ func decryptCode(signedCode []byte, password string) ([]byte, error) {
 	var xorEncryptedData []byte
 	var err error
 
-	if password != "" {
-		// Password-based decryption
-		xorEncryptedData, err = security.AESDecryptWithPassword(encryptedMetadata, password)
-	} else {
-		// For deterministic decryption, we'd need the source code hash
-		// This is a limitation - for now, we require password for standalone executables
-		return nil, security.ErrPasswordRequired
-	}
-
+	xorEncryptedData, err = security.AESDecrypt(encryptedMetadata, password)
 	if err != nil {
 		return nil, err
 	}
@@ -78,9 +70,9 @@ func decryptCode(signedCode []byte, password string) ([]byte, error) {
 	return decodedData, nil
 }
 
-func runvm(bytecode *compiler.ByteCode) (error, errrs.ErrorType) {
+func runvm(bytecode *compiler.ByteCode, password string) (error, errrs.ErrorType) {
 	globals := make([]object.Object, global.GlobalSize)
-	machine := vm.NewWithGlobalStore(bytecode, globals)
+	machine := vm.NewWithPasswordAndGlobalStore(bytecode, password, globals)
 
 	if err := machine.Run(); err != nil {
 		return err, errrs.VM_ERROR

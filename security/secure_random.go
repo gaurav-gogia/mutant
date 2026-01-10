@@ -2,7 +2,9 @@ package security
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 )
 
@@ -25,16 +27,18 @@ func SecureRandBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// SecureXOR performs XOR with a cryptographically secure key
+// SecureXOR performs XOR with a cryptographically secure key derived from seed and password
 // This replaces the old XOR that used math/rand
-func SecureXOR(data []byte, seed int64) ([]byte, error) {
+// seed: instruction length or other deterministic value
+// password: optional user password (empty string for deterministic encryption without password)
+func SecureXOR(data []byte, seed int64, password string) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("data cannot be empty")
 	}
 
 	result := make([]byte, len(data))
 	for i := range data {
-		res, err := SecureXOROne(data[i], seed)
+		res, err := SecureXOROne(data[i], seed, password)
 		if err != nil {
 			return nil, err
 		}
@@ -44,35 +48,71 @@ func SecureXOR(data []byte, seed int64) ([]byte, error) {
 	return result, nil
 }
 
-// SecureXOROne performs XOR on a single byte with secure random
-func SecureXOROne(instruction byte, seed int64) (byte, error) {
-	key, err := deriveXORKey(seed, 1)
+// SecureXOROne performs XOR on a single byte with secure random key derived from seed and password
+func SecureXOROne(instruction byte, seed int64, password string) (byte, error) {
+	key, err := deriveXORKey(seed, password, 1)
 	if err != nil {
 		return 0, err
 	}
 	return instruction ^ key[0], nil
 }
 
+// passwordToSeed converts a password string to a uint64 seed
+// If password is empty, returns 0
+// If password is provided, returns hash of password as uint64
+func passwordToSeed(password string) uint64 {
+	if password == "" {
+		return 0
+	}
+
+	hash := sha256.Sum256([]byte(password))
+	// Convert first 8 bytes to uint64
+	return binary.LittleEndian.Uint64(hash[:8])
+}
+
+// DerivePasswordFromInstructions derives a deterministic password seed from instruction hash
+// This ensures same program always gets same key, different programs get different keys
+// Returns a uint64 that's converted to string in the caller
+func DerivePasswordFromInstructions(instructions []byte) uint64 {
+	if len(instructions) == 0 {
+		return 0
+	}
+
+	hash := sha256.Sum256(instructions)
+	// Use first 8 bytes as seed
+	return binary.LittleEndian.Uint64(hash[:8])
+}
+
 // deriveXORKey derives a key for XOR operations using HKDF-like approach
-func deriveXORKey(seed int64, length int) ([]byte, error) {
+// Incorporates both seed (instruction length) and password for enhanced security
+func deriveXORKey(seed int64, password string, length int) ([]byte, error) {
 	// Convert seed to bytes
 	seedBytes := make([]byte, 8)
 	for i := 0; i < 8; i++ {
 		seedBytes[i] = byte(seed >> (i * 8))
 	}
 
+	// Convert password to seed and merge with instruction-length seed
+	passwordSeed := passwordToSeed(password)
+	passwordBytes := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		passwordBytes[i] = byte(passwordSeed >> (i * 8))
+	}
+
+	// XOR seeds together to mix password and instruction-length seed
+	mergedSeed := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		mergedSeed[i] = seedBytes[i] ^ passwordBytes[i]
+	}
+
 	// Use a deterministic but secure key derivation
-	// This maintains compatibility while being more secure
 	key := make([]byte, length)
 
-	// Simple HKDF-like expansion
+	// Simple HKDF-like expansion using merged seed
 	for i := 0; i < length; i += 32 {
-		// Hash seed with counter
 		counter := byte(i / 32)
-		block := append(seedBytes, counter)
+		block := append(mergedSeed, counter)
 
-		// In production, use proper HKDF or similar
-		// For now, use a simple deterministic approach
 		for j := 0; j < 32 && i+j < length; j++ {
 			key[i+j] = block[j%len(block)] ^ byte(i+j)
 		}

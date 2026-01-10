@@ -81,7 +81,7 @@ func compile(data []byte, password string, privateKey []byte) ([]byte, error, er
 		return nil, err, errrs.COMPILER_ERROR, nil
 	}
 
-	encodedByteCode, err := encode(comp.ByteCode(), data, password, privateKey)
+	encodedByteCode, err := encode(comp.ByteCode(), password, privateKey)
 	if err != nil {
 		return nil, err, errrs.ERROR, nil
 	}
@@ -89,10 +89,10 @@ func compile(data []byte, password string, privateKey []byte) ([]byte, error, er
 	return encodedByteCode, nil, "", nil
 }
 
-func encode(compByteCode *compiler.ByteCode, sourceCode []byte, password string, privateKey []byte) ([]byte, error) {
+func encode(compByteCode *compiler.ByteCode, password string, privateKey []byte) ([]byte, error) {
 	var content bytes.Buffer
 
-	compByteCode = mutil.EncryptByteCode(compByteCode)
+	compByteCode = mutil.EncryptByteCode(compByteCode, password)
 
 	registerTypes()
 	enc := gob.NewEncoder(&content)
@@ -101,10 +101,10 @@ func encode(compByteCode *compiler.ByteCode, sourceCode []byte, password string,
 	}
 
 	byteCode := content.Bytes()
-	return encryptCode(byteCode, sourceCode, password, privateKey)
+	return encryptCode(byteCode, password, privateKey)
 }
 
-func encryptCode(b64ByteCode []byte, sourceCode []byte, password string, privateKey []byte) ([]byte, error) {
+func encryptCode(b64ByteCode []byte, password string, privateKey []byte) ([]byte, error) {
 	// Apply secure XOR (replaces insecure math/rand-based XOR)
 	xorByteCode, err := security.SecureXOREncrypt(b64ByteCode)
 	if err != nil {
@@ -113,13 +113,7 @@ func encryptCode(b64ByteCode []byte, sourceCode []byte, password string, private
 
 	// Encrypt using new secure method (no key storage)
 	var encodedByteCode string
-	if password != "" {
-		// Password-based encryption
-		encodedByteCode, err = security.AESEncryptWithPassword(xorByteCode, password)
-	} else {
-		// Deterministic encryption (derives key from source code hash)
-		encodedByteCode, err = security.AESEncrypt(xorByteCode, sourceCode)
-	}
+	encodedByteCode, err = security.AESEncrypt(xorByteCode, password)
 	if err != nil {
 		return nil, err
 	}
