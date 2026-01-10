@@ -139,28 +139,16 @@ func GetPwd() string {
 	// Use HKDF (HMAC-based Key Derivation Function) - RFC 5869
 	// This generates a deterministic password from fixed context
 
-	// Master secret - fixed entropy source
 	masterSecret := []byte("mutant-lang-security-kdf-v1-deterministic-key")
-
-	// Context info - includes program name and version for uniqueness
 	contextInfo := []byte("mutant-instruction-encryption-key")
-
-	// Salt - deterministic and fixed (could include compile-time info for variation)
 	salt := []byte("mutant-hkdf-salt-v1")
 
-	// Create HKDF reader with SHA-256
-	// SHA-256 produces 32-byte hash, we'll use first 24 bytes as password (192 bits of entropy)
 	hkdfReader := hkdf.New(sha512.New, masterSecret, salt, contextInfo)
 
-	// Generate 24 bytes for a strong password (192 bits)
 	derivedKey := make([]byte, 64)
 	_, err := hkdfReader.Read(derivedKey)
 	if err != nil {
-		// Fallback to hardcoded password if HKDF fails (should never happen in practice)
 		return "mutant-default-security-key-v1"
 	}
-
-	// Convert to hex string for consistent string representation
-	// 24 bytes = 48 hex characters
 	return hex.EncodeToString(derivedKey)
 }
