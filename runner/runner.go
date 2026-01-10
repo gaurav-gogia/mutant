@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"io"
-	"io/ioutil"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/global"
@@ -15,7 +14,7 @@ import (
 )
 
 func Run(srcpath string, password string) (error, errrs.ErrorType) {
-	signedCode, err := ioutil.ReadFile(srcpath)
+	signedCode, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR
 	}
