@@ -1,14 +1,14 @@
 package evaluator
 
 import (
-	"mutant/object"
+	"mutant/builtin"
 )
 
-var builtins = map[string]*object.BuiltIn{
-	"len":   object.GetBuiltinByName("len"),
-	"first": object.GetBuiltinByName("first"),
-	"last":  object.GetBuiltinByName("last"),
-	"rest":  object.GetBuiltinByName("rest"),
-	"push":  object.GetBuiltinByName("push"),
-	"puts":  object.GetBuiltinByName("puts"),
+var builtins = map[string]*builtin.BuiltIn{
+	"len":   builtin.GetBuiltinByName("len"),
+	"first": builtin.GetBuiltinByName("first"),
+	"last":  builtin.GetBuiltinByName("last"),
+	"rest":  builtin.GetBuiltinByName("rest"),
+	"push":  builtin.GetBuiltinByName("push"),
+	"puts":  builtin.GetBuiltinByName("puts"),
 }
