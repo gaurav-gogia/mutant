@@ -8,7 +8,7 @@ import (
 
 // Simple test program to demonstrate anti-debugging features
 func main() {
-	fmt.Println("=== Mutant Security Feature Test ===\n")
+	fmt.Printf("=== Mutant Security Feature Test ===\n\n")
 
 	// Test 1: Basic Debugger Detection
 	fmt.Println("1. Testing basic debugger detection...")

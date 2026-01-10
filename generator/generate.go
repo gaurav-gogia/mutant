@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
-	"io/ioutil"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/global"
@@ -20,7 +19,7 @@ import (
 // password: optional password for encryption (empty string for deterministic encryption)
 // privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
 func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
-	data, err := ioutil.ReadFile(srcpath)
+	data, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
 	}

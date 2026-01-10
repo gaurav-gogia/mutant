@@ -32,17 +32,13 @@ func SecureXOR(data []byte, seed int64) ([]byte, error) {
 		return nil, errors.New("data cannot be empty")
 	}
 
-	// Generate secure random key based on seed
-	// Note: For deterministic behavior, we still use the seed
-	// but apply HKDF to make it cryptographically sound
-	key, err := deriveXORKey(seed, len(data))
-	if err != nil {
-		return nil, err
-	}
-
 	result := make([]byte, len(data))
 	for i := range data {
-		result[i] = data[i] ^ key[i%len(key)]
+		res, err := SecureXOROne(data[i], seed)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = res
 	}
 
 	return result, nil
