@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"mutant/builtin"
 	"mutant/code"
 	"mutant/compiler"
 	"mutant/global"
@@ -223,7 +224,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 			vm.currentFrame().ip++
-			definition := object.Builtins[builtinIndex]
+			definition := builtin.Builtins[builtinIndex]
 			if err := vm.push(definition.Builtin); err != nil {
 				return err
 			}
@@ -585,7 +586,7 @@ func (vm *VM) executeCall(numArgs int) error {
 	switch calleeType := callee.(type) {
 	case *object.Closure:
 		return vm.callClosure(calleeType, numArgs)
-	case *object.BuiltIn:
+	case *builtin.BuiltIn:
 		return vm.callBuiltin(calleeType, numArgs)
 
 	default:
@@ -604,7 +605,7 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 	return nil
 }
 
-func (vm *VM) callBuiltin(builtin *object.BuiltIn, numArgs int) error {
+func (vm *VM) callBuiltin(builtin *builtin.BuiltIn, numArgs int) error {
 	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
 	for i := range args {
 		dec, err := mutil.DecryptObject(args[i], vm.inslen)

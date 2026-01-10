@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"mutant/builtin"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/evaluator"
@@ -46,7 +47,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 	constants := []object.Object{}
 	globals := make([]object.Object, global.GlobalSize)
 	symbolTable := compiler.NewSymbolTable()
-	for i, v := range object.Builtins {
+	for i, v := range builtin.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
 	}
 
