@@ -62,7 +62,6 @@ func (vm *VM) Run() error {
 		if err != nil {
 			return err
 		}
-
 		op = code.Opcode(ins[ip])
 		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen))
 		if err != nil {
@@ -71,6 +70,9 @@ func (vm *VM) Run() error {
 
 		switch op {
 		case code.OpConstant:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpConstant: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -101,6 +103,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpArray:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpArray: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -112,6 +117,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpHash:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpHash: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -131,6 +139,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpJump:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpJump: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -138,6 +149,9 @@ func (vm *VM) Run() error {
 			pos := int(res)
 			vm.currentFrame().ip = pos - 1
 		case code.OpJumpFalse:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpJumpFalse: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -149,6 +163,9 @@ func (vm *VM) Run() error {
 				vm.currentFrame().ip = pos - 1
 			}
 		case code.OpSetGlobal:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpSetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -156,6 +173,9 @@ func (vm *VM) Run() error {
 			vm.currentFrame().ip += 2
 			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpGetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -165,6 +185,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpSetLocal:
+			if ip+1 >= len(ins) {
+				return fmt.Errorf("OpSetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -179,6 +202,9 @@ func (vm *VM) Run() error {
 				vm.stack[frame.bp+int(localIndex)] = encObj
 			}
 		case code.OpGetLocal:
+			if ip+1 >= len(ins) {
+				return fmt.Errorf("OpGetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -189,6 +215,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpGetBuiltin:
+			if ip+1 >= len(ins) {
+				return fmt.Errorf("OpGetBuiltin: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -199,6 +228,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpGetFree:
+			if ip+1 >= len(ins) {
+				return fmt.Errorf("OpGetFree: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -215,6 +247,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpClosure:
+			if ip+3 >= len(ins) {
+				return fmt.Errorf("OpClosure: not enough bytes for operands at ip=%d, len=%d", ip, len(ins))
+			}
 			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err
@@ -233,6 +268,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpCall:
+			if ip+1 >= len(ins) {
+				return fmt.Errorf("OpCall: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
 			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen))
 			if err != nil {
 				return err

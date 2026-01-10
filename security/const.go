@@ -4,10 +4,11 @@ import "errors"
 
 // Header and footer constant strings for file identification
 const (
-	HEADER    = "MUT"
-	FOOTER    = "ANT"
-	ENCSIG    = "MUTANT"
-	SEPERATOR = "|"
+	HEADER          = "MUT"
+	FOOTER          = "ANT"
+	ENCSIG          = "MUTANT"
+	SEPERATOR       = "|"
+	OUTER_SEPERATOR = "|-|"
 )
 
 // Error definitions

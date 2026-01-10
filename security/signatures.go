@@ -22,17 +22,17 @@ func SignCode(encodedString string, privateKey []byte) ([]byte, error) {
 
 	// Format: HEADER|DATA|SIGNATURE|PUBKEY|FOOTER
 	signedCode := fmt.Sprintf("%s%s%s%s%s%s%s%s%s",
-		HEADER, SEPERATOR,
-		encodedString, SEPERATOR,
-		signatureHex, SEPERATOR,
-		publicKeyHex, SEPERATOR,
+		HEADER, OUTER_SEPERATOR,
+		encodedString, OUTER_SEPERATOR,
+		signatureHex, OUTER_SEPERATOR,
+		publicKeyHex, OUTER_SEPERATOR,
 		FOOTER)
 
 	return []byte(signedCode), nil
 } // VerifyCode verifies bytecode Ed25519 signature
 func VerifyCode(signedCode []byte) error {
 	signedCodeString := string(signedCode)
-	parts := strings.Split(signedCodeString, SEPERATOR)
+	parts := strings.Split(signedCodeString, OUTER_SEPERATOR)
 
 	if len(parts) < 5 {
 		return ErrWrongSignature
@@ -43,14 +43,14 @@ func VerifyCode(signedCode []byte) error {
 		return ErrWrongSignature
 	}
 
-	if parts[4] != FOOTER {
+	if parts[len(parts)-1] != FOOTER {
 		return ErrWrongSignature
 	}
 
 	// Extract components
 	encodedData := parts[1]
-	signatureHex := parts[2]
-	publicKeyHex := parts[3]
+	signatureHex := parts[len(parts)-3]
+	publicKeyHex := parts[len(parts)-2]
 
 	// Decode signature and public key
 	signatureBytes, err := hex.DecodeString(signatureHex)
@@ -82,7 +82,7 @@ func VerifyCode(signedCode []byte) error {
 // GetEncryptedCode extracts the encrypted bytecode from signed code
 func GetEncryptedCode(signedCode []byte) string {
 	signedCodeString := string(signedCode)
-	parts := strings.Split(signedCodeString, SEPERATOR)
+	parts := strings.Split(signedCodeString, OUTER_SEPERATOR)
 	if len(parts) < 2 {
 		return ""
 	}

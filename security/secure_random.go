@@ -48,25 +48,6 @@ func SecureXOR(data []byte, seed int64) ([]byte, error) {
 	return result, nil
 }
 
-// SecureXORInPlace performs XOR in-place (modifies the input)
-// This is needed for VM instruction decryption to avoid breaking instruction pointers
-func SecureXORInPlace(data []byte, seed int64) error {
-	if len(data) == 0 {
-		return errors.New("data cannot be empty")
-	}
-
-	key, err := deriveXORKey(seed, len(data))
-	if err != nil {
-		return err
-	}
-
-	for i := range data {
-		data[i] ^= key[i%len(key)]
-	}
-
-	return nil
-}
-
 // SecureXOROne performs XOR on a single byte with secure random
 func SecureXOROne(instruction byte, seed int64) (byte, error) {
 	key, err := deriveXORKey(seed, 1)

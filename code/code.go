@@ -179,14 +179,14 @@ func ReadUint16(ins Instructions, length int64) (uint16, error) {
 		return 0, fmt.Errorf("instruction slice too short for uint16")
 	}
 
-	err := security.SecureXORInPlace(ins[:2], length)
+	ins, err := security.SecureXOR(ins, length)
 	if err != nil {
 		return 0, err
 	}
 
 	index := binary.BigEndian.Uint16(ins)
 
-	err = security.SecureXORInPlace(ins[:2], length)
+	ins, err = security.SecureXOR(ins, length)
 	if err != nil {
 		return 0, err
 	}
