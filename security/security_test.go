@@ -2,26 +2,7 @@ package security
 
 import (
 	"testing"
-	"time"
 )
-
-// TestIsDebuggerPresent tests basic debugger detection
-func TestIsDebuggerPresent(t *testing.T) {
-	// This should return false when running normally
-	isDebugger := IsDebuggerPresent()
-
-	t.Logf("Debugger detected: %v", isDebugger)
-
-	// Note: Will be true if running under debugger
-	// This is expected behavior
-}
-
-// TestDetectDebuggerAdvanced tests advanced detection
-func TestDetectDebuggerAdvanced(t *testing.T) {
-	isDebugger := DetectDebuggerAdvanced()
-
-	t.Logf("Advanced debugger detection: %v", isDebugger)
-}
 
 // TestSecureCompare tests constant-time comparison
 func TestSecureCompare(t *testing.T) {
@@ -95,40 +76,5 @@ func BenchmarkSecureCompare(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		SecureCompare(a, c)
-	}
-}
-
-// BenchmarkTimingAttackDetection benchmarks timing-based debugger detection
-func BenchmarkTimingAttackDetection(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		detectTimingAnomaly()
-	}
-}
-
-// TestTimingConsistency ensures timing detection is consistent
-func TestTimingConsistency(t *testing.T) {
-	// Run timing test multiple times
-	results := make([]bool, 10)
-
-	for i := 0; i < 10; i++ {
-		results[i] = detectTimingAnomaly()
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Count detections
-	detections := 0
-	for _, r := range results {
-		if r {
-			detections++
-		}
-	}
-
-	t.Logf("Timing anomalies detected: %d/10", detections)
-
-	// Should be consistent (all false or all true, not mixed)
-	// Allow some variance due to system load
-	if detections > 0 && detections < 10 {
-		t.Logf("Warning: Inconsistent timing detection (system under load?)")
 	}
 }
