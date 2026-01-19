@@ -4,6 +4,19 @@ import (
 	"testing"
 )
 
+// TestIsDebuggerPresent tests basic debugger detection
+func TestIsDebuggerPresent(t *testing.T) {
+	// This test simply calls the function and logs the result
+	// It should return false when running normally (not under a debugger)
+	result := IsDebuggerPresent()
+
+	t.Logf("IsDebuggerPresent() returned: %v", result)
+
+	// We don't assert a specific value because it depends on test environment
+	// If running under a debugger (e.g., delve), it should be true
+	// If running normally, it should be false
+}
+
 // TestSecureCompare tests constant-time comparison
 func TestSecureCompare(t *testing.T) {
 	a := []byte("password123")
