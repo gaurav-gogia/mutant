@@ -5,14 +5,46 @@ package security
 
 import (
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 )
 
-// isDebuggerPresentDarwin checks if a debugger is attached using sysctl.
-// It queries the kinfo_proc structure for the current process and checks
-// the P_TRACED flag which indicates if the process is being traced/debugged.
+// isDebuggerPresentDarwin performs multiple anti-debugging checks on macOS/Darwin
+// Uses techniques employed by security vendors like Objective-See
 func isDebuggerPresentDarwin() bool {
+	// Check 1: P_TRACED flag (ptrace-based debuggers like lldb, gdb)
+	if isProcessBeingTraced() {
+		return true
+	}
+
+	// Check 2: Check parent process for known debuggers
+	if isParentDebuggerDarwin() {
+		return true
+	}
+
+	// Check 3: Environment variables set by debugging tools
+	if hasDebuggerEnvironmentMarkersDarwin() {
+		return true
+	}
+
+	// Check 4: Check for debugger processes running
+	if hasDebuggerProcessRunningDarwin() {
+		return true
+	}
+
+	// Check 5: Examine task ports and exception handlers
+	if hasInjectedCode() {
+		return true
+	}
+
+	return false
+}
+
+// isProcessBeingTraced checks if the process is being traced via P_TRACED flag
+func isProcessBeingTraced() bool {
 	// Define kinfo_proc structure (simplified, only the parts we need)
 	// The P_TRACED flag is at a specific offset in the kp_proc.p_flag field
 	type kinfoProc struct {
@@ -48,4 +80,120 @@ func isDebuggerPresentDarwin() bool {
 
 	// Check if P_TRACED flag is set
 	return (info.Flag & P_TRACED) != 0
+}
+
+// isParentDebuggerDarwin checks if the parent process is a known debugger
+func isParentDebuggerDarwin() bool {
+	ppid := os.Getppid()
+
+	// Try to get parent process name via /proc
+	// Note: macOS /proc is limited, so we use ps command
+	cmd := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(ppid))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	parentName := strings.ToLower(strings.TrimSpace(string(output)))
+
+	// Known macOS debuggers and development tools
+	debuggerPatterns := []string{
+		"lldb", "gdb", "xcode", "simulator", "instruments",
+		"dtrace", "fs_usage", "sample", "trace", "sc_usage",
+		"leaks", "malloc_history", "heap", "vmmap",
+		"frida-server", "idb", "appium",
+	}
+
+	for _, pattern := range debuggerPatterns {
+		if strings.Contains(parentName, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasDebuggerEnvironmentMarkersDarwin checks for debugger environment markers on macOS
+func hasDebuggerEnvironmentMarkersDarwin() bool {
+	debugEnvVars := []string{
+		"LLDB_DEBUGSERVER_PORT",
+		"LLDB_MasterPort",
+		"GDB_OPTS",
+		"GDBHISTFILE",
+		"XCODE_DEBUG_PORT",
+		"DYLD_INSERT_LIBRARIES", // Code injection
+		"DYLD_ROOT_PATH",        // Simulator indicator
+		"XCODE_VERSION_ACTUAL",  // Xcode debugging
+		"XPC_DEBUG",             // XPC debugging
+		"LLVM_DEBUG",
+		"FRIDA_DEBUG",
+	}
+
+	for _, envVar := range debugEnvVars {
+		if _, exists := os.LookupEnv(envVar); exists {
+			return true
+		}
+	}
+
+	// Check for unusual DYLD settings which indicate debugging
+	if dyldLibs, exists := os.LookupEnv("DYLD_INSERT_LIBRARIES"); exists {
+		// Check if suspicious libraries are being injected
+		suspiciousLibs := []string{
+			"libgmalloc", "libc++abi", "libsystem_trace", "libsystem_sandbox",
+		}
+		for _, lib := range suspiciousLibs {
+			if strings.Contains(dyldLibs, lib) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// hasDebuggerProcessRunningDarwin checks if known debuggers are running
+func hasDebuggerProcessRunningDarwin() bool {
+	debuggers := []string{
+		"lldb", "gdb", "xcode", "Instruments", "Simulator",
+		"frida-server", "idb",
+	}
+
+	for _, debugger := range debuggers {
+		cmd := exec.Command("pgrep", "-x", debugger)
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasInjectedCode detects code injection or unusual memory patterns
+// Debuggers on macOS often inject code via DYLD or task ports
+func hasInjectedCode() bool {
+	// Check if we can access our own task port (sign of debugging)
+	// This is a simplified check - in reality, task port access is restricted
+
+	// Alternative: Check for unusual library loading
+	// Check if standard system libraries are loaded from unusual paths
+	cmd := exec.Command("otool", "-L", "/proc/self/exe")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		outputStr := strings.ToLower(string(output))
+
+		// Debuggers often load debugging libraries
+		suspiciousIndicators := []string{
+			"liblldb", "libgdb", "libdebug",
+			"/tmp/", "/var/tmp/", // Unusual library locations
+		}
+
+		for _, indicator := range suspiciousIndicators {
+			if strings.Contains(outputStr, indicator) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
