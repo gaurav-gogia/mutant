@@ -192,32 +192,8 @@ func hasDebuggerFileDescriptors() bool {
 				if strings.Contains(target, "socket:") ||
 					strings.Contains(target, "anon_inode:") ||
 					strings.Contains(target, "eventpoll") {
-					// Additional check: see if it's connected to debugger ports
-					if hasDebuggerPortPatterns(target) {
-						return true
-					}
 				}
 			}
-		}
-	}
-
-	return false
-}
-
-// hasDebuggerPortPatterns checks for known debugger communication patterns
-func hasDebuggerPortPatterns(target string) bool {
-	debuggerPorts := []string{
-		":5005",  // Java Debug Wire Protocol
-		":1234",  // Common node debugger
-		":9229",  // Node.js inspect
-		":9222",  // Chrome DevTools
-		":9333",  // Frida default
-		":23946", // Android Studio debugger
-	}
-
-	for _, port := range debuggerPorts {
-		if strings.Contains(target, port) {
-			return true
 		}
 	}
 
