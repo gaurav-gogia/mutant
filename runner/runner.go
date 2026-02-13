@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"mutant/builtin"
@@ -32,7 +33,7 @@ func Run(srcpath string, password string) (error, errrs.ErrorType) {
 
 	if security.IsDebuggerPresent() {
 		fmt.Println("debugger found, exiting")
-		// return errors.New("debugger found"), errrs.ERROR
+		return errors.New("debugger found"), errrs.ERROR
 	}
 
 	return runvm(bytecode, password)
