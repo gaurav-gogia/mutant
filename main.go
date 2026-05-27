@@ -56,6 +56,9 @@ func main() {
 
 			fmt.Println("\tmutant <FILENAME>.mu")
 			fmt.Println("\t\tRun mutant bytecode using mutant VM.")
+			fmt.Println("\t\tOptional: --compat to allow compatibility mode (weaker security checks).")
+			fmt.Println("\t\tOptional: --dev for developer mode (compat mode + default local password fallback).")
+			fmt.Println("\t\tDefault is --secure (fail-closed security behavior).")
 			fmt.Println()
 			fmt.Println("\tmutant gen -src <FILENAME>.mut [-password|-pwd]")
 			fmt.Println("\t\tCompile mutant source code into bytecode with optional password.")
@@ -64,7 +67,7 @@ func main() {
 			fmt.Println("\t\tCompile mutant source code into standalone, independent binary executable.")
 			fmt.Println("")
 			fmt.Println("\t\tOptional: -password|-pwd <STRING> to encrypt output with a password.")
-			fmt.Println("\t\tIf omitted, deterministic encryption (no password) is used.")
+			fmt.Println("\t\tIf omitted, deterministic compatibility mode (weaker obfuscation) is used.")
 			fmt.Println("")
 			fmt.Println("\t\tPossible values for -os: darwin | linux | windows.")
 			fmt.Println("\t\tPossible values for -arch: amd64 | arm64 | arm | 386 | x86. (386 & x86 have same meaning here)")
@@ -94,7 +97,7 @@ func main() {
 
 		if strings.HasSuffix(os.Args[1], global.MutantByteCodeCompiledFileExtension) {
 			pwd := mutil.GetPwd()
-			cli.RunCode(os.Args[1], pwd)
+			cli.RunCode(os.Args[1], pwd, true)
 			return
 		}
 	}
@@ -113,12 +116,20 @@ func main() {
 
 		if fileArg != "" {
 			password := extractPasswordArg(os.Args)
+			devMode := hasDevModeArg(os.Args)
+			secureMode := extractSecurityModeArg(os.Args)
+			if devMode {
+				secureMode = false
+			}
 			if strings.HasSuffix(fileArg, global.MutantSourceCodeFileExtention) {
 				cli.CompileCode(fileArg, "", "", false, password)
 				return
 			}
 			if strings.HasSuffix(fileArg, global.MutantByteCodeCompiledFileExtension) {
-				cli.RunCode(fileArg, password)
+				if password == "" && devMode {
+					password = mutil.GetPwd()
+				}
+				cli.RunCode(fileArg, password, secureMode)
 				return
 			}
 		}
@@ -147,6 +158,32 @@ func main() {
 		cli.CompileCode(src, goos, goarch, true, password)
 		return
 	}
+}
+
+// extractSecurityModeArg scans args for explicit mode flags.
+// Defaults to secure mode unless --compat is supplied.
+func extractSecurityModeArg(args []string) bool {
+	secureMode := true
+	for _, arg := range args {
+		switch arg {
+		case "--dev", "-dev":
+			secureMode = false
+		case "--compat", "-compat":
+			secureMode = false
+		case "--secure", "-secure":
+			secureMode = true
+		}
+	}
+	return secureMode
+}
+
+func hasDevModeArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--dev" || arg == "-dev" {
+			return true
+		}
+	}
+	return false
 }
 
 // extractPasswordArg scans args for -password|-pwd or --password=|--pwd=<value>

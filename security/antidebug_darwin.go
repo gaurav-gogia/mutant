@@ -30,16 +30,6 @@ func isDebuggerPresentDarwin() bool {
 		return true
 	}
 
-	// Check 4: Check for debugger processes running
-	if hasDebuggerProcessRunningDarwin() {
-		return true
-	}
-
-	// Check 5: Examine task ports and exception handlers
-	if hasInjectedCode() {
-		return true
-	}
-
 	return false
 }
 

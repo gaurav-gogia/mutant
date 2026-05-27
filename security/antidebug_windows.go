@@ -30,37 +30,21 @@ const (
 // isDebuggerPresentWindows performs multiple debugger detection techniques.
 // Uses a combination of methods inspired by Kaspersky, Symantec, and other security vendors.
 func isDebuggerPresentWindows() bool {
-	// Method 1: Check BeingDebugged flag in PEB
-	if checkBeingDebugged() {
+	// High-confidence checks: a single hit is enough.
+	if checkBeingDebugged() || checkRemoteDebugger() || checkProcessDebugPort() || checkProcessDebugObjectHandle() {
 		return true
 	}
 
-	// Method 2: Check RemoteDebuggerPresent
-	if checkRemoteDebugger() {
-		return true
-	}
-
-	// Method 3: Check ProcessDebugPort via NtQueryInformationProcess
-	if checkProcessDebugPort() {
-		return true
-	}
-
-	// Method 4: Check ProcessDebugObjectHandle
-	if checkProcessDebugObjectHandle() {
-		return true
-	}
-
-	// Method 5: Output debug string test
+	// Lower-confidence heuristics: require multiple weak signals.
+	weakHits := 0
 	if checkOutputDebugStringTest() {
-		return true
+		weakHits++
 	}
-
-	// Method 5: Check for common debugger DLLs loaded
 	if checkDebuggerDLLs() {
-		return true
+		weakHits++
 	}
 
-	return false
+	return shouldTriggerDebuggerByWeight(false, weakHits, 2)
 }
 
 // checkBeingDebugged uses IsDebuggerPresent API

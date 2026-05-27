@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 )
+
+const MinPasswordLength = 12
 
 // KDFParams stores key derivation parameters
 type KDFParams struct {
@@ -29,6 +32,12 @@ const (
 	DefaultArgon2Memory  = 64 * 1024 // 64 MB
 	DefaultArgon2Threads = 4
 	DefaultKeyLen        = 32 // 256 bits
+	MinArgon2Time        = 1
+	MaxArgon2Time        = 8
+	MinArgon2Memory      = 64 * 1024       // 64 MB
+	MaxArgon2Memory      = 4 * 1024 * 1024 // 4 GB (in KB units)
+	MinArgon2Threads     = 1
+	MaxArgon2Threads     = 16
 
 	// HKDF info strings
 	HKDFInfoBytecode  = "mutant-bytecode-encryption-v1"
@@ -68,6 +77,50 @@ func DeriveKeyFromPassword(password string, salt []byte) ([]byte, *KDFParams, er
 	}
 
 	return key, params, nil
+}
+
+// ValidatePassword enforces baseline password complexity for secure mode.
+func ValidatePassword(password string) error {
+	if len(password) < MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
+	}
+
+	var hasUpper, hasLower, hasDigit, hasSpecial bool
+	for _, r := range password {
+		switch {
+		case unicode.IsUpper(r):
+			hasUpper = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsPunct(r) || unicode.IsSymbol(r):
+			hasSpecial = true
+		}
+	}
+
+	if !hasUpper || !hasLower || !hasDigit || !hasSpecial {
+		return errors.New("password must include uppercase, lowercase, number, and special character")
+	}
+
+	return nil
+}
+
+// ValidateArgon2Params validates Argon2id parameter bounds.
+func ValidateArgon2Params(time, memory uint32, threads uint8) error {
+	if time < MinArgon2Time || time > MaxArgon2Time {
+		return fmt.Errorf("argon2 time must be between %d and %d", MinArgon2Time, MaxArgon2Time)
+	}
+
+	if memory < MinArgon2Memory || memory > MaxArgon2Memory {
+		return fmt.Errorf("argon2 memory must be between %d and %d KB", MinArgon2Memory, MaxArgon2Memory)
+	}
+
+	if threads < MinArgon2Threads || threads > MaxArgon2Threads {
+		return fmt.Errorf("argon2 threads must be between %d and %d", MinArgon2Threads, MaxArgon2Threads)
+	}
+
+	return nil
 }
 
 // DeriveKeyDeterministic derives a key deterministically from source code hash

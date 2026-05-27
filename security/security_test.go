@@ -1,6 +1,12 @@
 package security
 
 import (
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -89,5 +95,276 @@ func BenchmarkSecureCompare(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		SecureCompare(a, c)
+	}
+}
+
+func TestVerifyCodeWithTrustedPublicKey(t *testing.T) {
+	keyPair, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	payload := "test-payload"
+	signedCode, err := SignCode(payload, keyPair.PrivateKey)
+	if err != nil {
+		t.Fatalf("failed to sign payload: %v", err)
+	}
+
+	trustedPublicKeyHex := hex.EncodeToString(keyPair.PublicKey)
+	if err := VerifyCodeWithTrustedPublicKey(signedCode, trustedPublicKeyHex); err != nil {
+		t.Fatalf("expected trusted verification success, got: %v", err)
+	}
+}
+
+func TestVerifyCodeWithTrustedPublicKeyRejectsUntrustedSigner(t *testing.T) {
+	trustedKeyPair, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate trusted key pair: %v", err)
+	}
+
+	untrustedKeyPair, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate untrusted key pair: %v", err)
+	}
+
+	signedCode, err := SignCode("tampered-payload", untrustedKeyPair.PrivateKey)
+	if err != nil {
+		t.Fatalf("failed to sign payload: %v", err)
+	}
+
+	trustedPublicKeyHex := hex.EncodeToString(trustedKeyPair.PublicKey)
+	err = VerifyCodeWithTrustedPublicKey(signedCode, trustedPublicKeyHex)
+	if !errors.Is(err, ErrUntrustedSigner) {
+		t.Fatalf("expected ErrUntrustedSigner, got: %v", err)
+	}
+}
+
+func TestVerifyCodeWithTrustedPublicKeyRequiresTrustedKey(t *testing.T) {
+	keyPair, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	signedCode, err := SignCode("payload", keyPair.PrivateKey)
+	if err != nil {
+		t.Fatalf("failed to sign payload: %v", err)
+	}
+
+	if err := VerifyCodeWithTrustedPublicKey(signedCode, ""); err == nil {
+		t.Fatalf("expected error when trusted public key is empty")
+	}
+}
+
+func TestValidateArgon2Params(t *testing.T) {
+	if err := ValidateArgon2Params(DefaultArgon2Time, DefaultArgon2Memory, DefaultArgon2Threads); err != nil {
+		t.Fatalf("expected default params to be valid, got: %v", err)
+	}
+
+	if err := ValidateArgon2Params(0, DefaultArgon2Memory, DefaultArgon2Threads); err == nil {
+		t.Fatalf("expected invalid time to be rejected")
+	}
+
+	if err := ValidateArgon2Params(DefaultArgon2Time, MinArgon2Memory-1, DefaultArgon2Threads); err == nil {
+		t.Fatalf("expected invalid memory to be rejected")
+	}
+
+	if err := ValidateArgon2Params(DefaultArgon2Time, DefaultArgon2Memory, 0); err == nil {
+		t.Fatalf("expected invalid threads to be rejected")
+	}
+}
+
+func TestSecureXORRoundTrip(t *testing.T) {
+	plain := []byte("hello-secure-stream")
+	seed := int64(12345)
+	password := "Str0ng!Passw0rd"
+
+	enc, err := SecureXOR(plain, seed, password)
+	if err != nil {
+		t.Fatalf("SecureXOR encrypt failed: %v", err)
+	}
+
+	dec, err := SecureXOR(enc, seed, password)
+	if err != nil {
+		t.Fatalf("SecureXOR decrypt failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(plain, dec) {
+		t.Fatalf("round-trip mismatch: got=%q want=%q", string(dec), string(plain))
+	}
+}
+
+func TestSecureXOROneAtMatchesSliceDecrypt(t *testing.T) {
+	plain := []byte("offset-sensitive-bytes")
+	seed := int64(999)
+	password := "Str0ng!Passw0rd"
+
+	enc, err := SecureXOR(plain, seed, password)
+	if err != nil {
+		t.Fatalf("SecureXOR encrypt failed: %v", err)
+	}
+
+	for i := range plain {
+		decByte, err := SecureXOROneAt(enc[i], seed, password, int64(i))
+		if err != nil {
+			t.Fatalf("SecureXOROneAt failed at index %d: %v", i, err)
+		}
+		if decByte != plain[i] {
+			t.Fatalf("byte mismatch at index %d: got=%d want=%d", i, decByte, plain[i])
+		}
+	}
+}
+
+func TestSecurityTelemetryCounters(t *testing.T) {
+	ResetSecurityTelemetry()
+
+	RecordDebuggerDetected("test-stage")
+	RecordIntegrityFailure("test-stage")
+	RecordSignatureFailure("test-stage")
+
+	snapshot := SecurityTelemetrySnapshot()
+	if snapshot["debugger_detected"] != 1 {
+		t.Fatalf("expected debugger_detected=1, got %d", snapshot["debugger_detected"])
+	}
+	if snapshot["integrity_failed"] != 1 {
+		t.Fatalf("expected integrity_failed=1, got %d", snapshot["integrity_failed"])
+	}
+	if snapshot["signature_failed"] != 1 {
+		t.Fatalf("expected signature_failed=1, got %d", snapshot["signature_failed"])
+	}
+
+	ResetSecurityTelemetry()
+	snapshot = SecurityTelemetrySnapshot()
+	if snapshot["debugger_detected"] != 0 || snapshot["integrity_failed"] != 0 || snapshot["signature_failed"] != 0 {
+		t.Fatalf("expected counters to reset to zero, got %+v", snapshot)
+	}
+}
+
+func TestSecurityTelemetryJSONAndExport(t *testing.T) {
+	ResetSecurityTelemetry()
+	RecordDebuggerDetected("test-stage")
+	RecordIntegrityFailure("test-stage")
+
+	jsonBytes, err := SecurityTelemetryJSON()
+	if err != nil {
+		t.Fatalf("expected telemetry json, got error: %v", err)
+	}
+
+	var snapshot map[string]uint64
+	if err := json.Unmarshal(jsonBytes, &snapshot); err != nil {
+		t.Fatalf("expected valid telemetry json, got: %v", err)
+	}
+
+	if snapshot["debugger_detected"] != 1 || snapshot["integrity_failed"] != 1 {
+		t.Fatalf("unexpected telemetry values: %+v", snapshot)
+	}
+
+	tmpFile := filepath.Join(t.TempDir(), "telemetry.json")
+	if err := ExportSecurityTelemetry(tmpFile); err != nil {
+		t.Fatalf("expected telemetry export success, got: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed reading exported telemetry: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty telemetry export file")
+	}
+}
+
+func TestResolveTamperResponseDefaultsAndOverrides(t *testing.T) {
+	t.Setenv(TamperResponseEnv, "")
+	if got := ResolveTamperResponse(true); got != TamperResponseTerminate {
+		t.Fatalf("expected secure default terminate, got %q", got)
+	}
+	if got := ResolveTamperResponse(false); got != TamperResponseWarn {
+		t.Fatalf("expected compat default warn, got %q", got)
+	}
+
+	t.Setenv(TamperResponseEnv, TamperResponseDelay)
+	if got := ResolveTamperResponse(true); got != TamperResponseDelay {
+		t.Fatalf("expected override delay, got %q", got)
+	}
+
+	t.Setenv(TamperResponseEnv, "invalid")
+	if got := ResolveTamperResponse(true); got != TamperResponseTerminate {
+		t.Fatalf("expected fallback terminate for invalid override, got %q", got)
+	}
+}
+
+func TestApplyTamperResponse(t *testing.T) {
+	t.Setenv(TamperResponseEnv, TamperResponseWarn)
+	if err := ApplyTamperResponse("debugger_detected", "test", true, ErrDebuggerDetected); err != nil {
+		t.Fatalf("expected warn mode to continue, got error: %v", err)
+	}
+
+	t.Setenv(TamperResponseEnv, TamperResponseDelay)
+	t.Setenv(TamperDelayMsEnv, "0")
+	if err := ApplyTamperResponse("integrity_failed", "test", true, ErrDebuggerDetected); err != nil {
+		t.Fatalf("expected delay mode to continue, got error: %v", err)
+	}
+
+	t.Setenv(TamperResponseEnv, TamperResponseTerminate)
+	if err := ApplyTamperResponse("signature_failed", "test", true, ErrUntrustedSigner); !errors.Is(err, ErrUntrustedSigner) {
+		t.Fatalf("expected terminate mode to return base error, got: %v", err)
+	}
+}
+
+func TestCompatibilityPolicyMixedArtifacts(t *testing.T) {
+	t.Setenv(TamperResponseEnv, "")
+
+	// New-format signed payload should verify successfully.
+	keyPair, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	signed, err := SignCode("new-format-payload", keyPair.PrivateKey)
+	if err != nil {
+		t.Fatalf("failed to sign payload: %v", err)
+	}
+
+	trustedPubHex := hex.EncodeToString(keyPair.PublicKey)
+	if err := VerifyCodeWithTrustedPublicKey(signed, trustedPubHex); err != nil {
+		t.Fatalf("expected secure verification success for new artifact, got: %v", err)
+	}
+
+	if err := VerifyCode(signed); err != nil {
+		t.Fatalf("expected compatibility verification success for new artifact, got: %v", err)
+	}
+
+	// Legacy/malformed artifact should fail verification.
+	legacy := []byte("legacy-artifact-format")
+	legacyErr := VerifyCode(legacy)
+	if legacyErr == nil {
+		t.Fatalf("expected legacy artifact to fail compatibility verification")
+	}
+
+	// Compatibility mode defaults to warn (continue).
+	if err := ApplyTamperResponse("signature_failed", "compat-mode-verify", false, legacyErr); err != nil {
+		t.Fatalf("expected compatibility policy to continue on legacy artifact, got: %v", err)
+	}
+
+	// Secure mode defaults to terminate.
+	if err := ApplyTamperResponse("signature_failed", "secure-mode-verify", true, legacyErr); err == nil {
+		t.Fatalf("expected secure policy to terminate on legacy artifact")
+	}
+}
+
+func TestWindowsAntiDebugSignalWeighting(t *testing.T) {
+	if !shouldTriggerDebuggerByWeight(true, 0, 2) {
+		t.Fatalf("expected high-confidence hit to trigger detection")
+	}
+
+	if shouldTriggerDebuggerByWeight(false, 1, 2) {
+		t.Fatalf("expected one weak hit to be insufficient when threshold is 2")
+	}
+
+	if !shouldTriggerDebuggerByWeight(false, 2, 2) {
+		t.Fatalf("expected two weak hits to trigger when threshold is 2")
+	}
+
+	if !shouldTriggerDebuggerByWeight(false, 1, 1) {
+		t.Fatalf("expected one weak hit to trigger when threshold is 1")
 	}
 }

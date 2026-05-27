@@ -27,7 +27,7 @@ func Gets(args ...object.Object) object.Object {
 		return newError("something went wrong :/")
 	}
 	inType, inVal := getType(in)
-	fmt.Println(inType)
+
 	switch inType {
 	case "bool":
 		inVal := inVal.(bool)

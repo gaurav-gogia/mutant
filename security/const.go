@@ -4,11 +4,17 @@ import "errors"
 
 // Header and footer constant strings for file identification
 const (
-	HEADER          = "MUT"
-	FOOTER          = "ANT"
-	ENCSIG          = "MUTANT"
-	SEPERATOR       = "|"
-	OUTER_SEPERATOR = "|-|"
+	HEADER               = "MUT"
+	FOOTER               = "ANT"
+	ENCSIG               = "MUTANT"
+	SEPERATOR            = "|"
+	OUTER_SEPERATOR      = "|-|"
+	TrustedPublicKeyEnv  = "MUTANT_TRUSTED_PUBLIC_KEY_HEX"
+	SigningPrivateKeyEnv = "MUTANT_SIGNING_PRIVATE_KEY_HEX"
+	LocalKeyStoreDirEnv  = "MUTANT_KEYSTORE_DIR"
+
+	LocalSigningPrivateKeyFileName = "ed25519_private_key.hex"
+	LocalSigningPublicKeyFileName  = "ed25519_public_key.hex"
 )
 
 // Error definitions
@@ -24,4 +30,7 @@ var (
 
 	// ErrDebuggerDetected error is returned when a debugger is detected
 	ErrDebuggerDetected = errors.New("debugger detected, execution halted for security")
+
+	// ErrUntrustedSigner error is returned when signed payload key does not match trusted key
+	ErrUntrustedSigner = errors.New("untrusted signer public key")
 )

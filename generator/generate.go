@@ -2,7 +2,9 @@ package generator
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"mutant/builtin"
 	"mutant/compiler"
@@ -14,12 +16,20 @@ import (
 	"mutant/parser"
 	"mutant/security"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // Generate function takes a `string`, it's the path for the source code
 // password: optional password for encryption (empty string for deterministic encryption)
 // privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
 func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
+	if password != "" {
+		if err := security.ValidatePassword(password); err != nil {
+			return err, errrs.ERROR, nil
+		}
+	}
+
 	data, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
@@ -27,14 +37,21 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool, password stri
 
 	// Generate signing key if not provided
 	if privateKey == nil {
-		keyPair, err := security.GenerateKeyPair()
+		privateKey, err = loadSigningPrivateKeyFromEnv()
 		if err != nil {
 			return err, errrs.ERROR, nil
 		}
-		privateKey = keyPair.PrivateKey
 
-		// In production, you'd want to save/reuse keys
-		// For now, we generate a new key each time
+		if privateKey == nil {
+			keyPair, err := security.GenerateKeyPair()
+			if err != nil {
+				return err, errrs.ERROR, nil
+			}
+			privateKey = keyPair.PrivateKey
+
+			// In production, you should inject a persistent private key using
+			// MUTANT_SIGNING_PRIVATE_KEY_HEX to avoid ephemeral signer identities.
+		}
 	}
 
 	bytecode, err, errtype, errors := compile(data, password, privateKey)
@@ -59,6 +76,40 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool, password stri
 	}
 
 	return nil, "", nil
+}
+
+func loadSigningPrivateKeyFromEnv() ([]byte, error) {
+	privateKeyHex := strings.TrimSpace(os.Getenv(security.SigningPrivateKeyEnv))
+	if privateKeyHex == "" {
+		privateKey, _, created, keyDir, err := security.EnsureLocalSigningKeyPair()
+		if err != nil {
+			return nil, err
+		}
+
+		if created {
+			privatePath, publicPath := security.LocalKeyPairPaths(keyDir)
+			fmt.Fprintf(os.Stderr,
+				"[security] generated local signing keypair for reuse\n[security] private=%s\n[security] public=%s\n[security] set %s from %s in secure environments\n",
+				filepath.Clean(privatePath),
+				filepath.Clean(publicPath),
+				security.TrustedPublicKeyEnv,
+				filepath.Clean(publicPath),
+			)
+		}
+
+		return privateKey, nil
+	}
+
+	privateKey, err := hex.DecodeString(privateKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", security.SigningPrivateKeyEnv, err)
+	}
+
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid %s size: expected %d bytes", security.SigningPrivateKeyEnv, ed25519.PrivateKeySize)
+	}
+
+	return privateKey, nil
 }
 
 func compile(data []byte, password string, privateKey []byte) ([]byte, error, errrs.ErrorType, []string) {

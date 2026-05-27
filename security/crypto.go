@@ -80,7 +80,7 @@ func AESDecrypt(encodedMetadata string, password string) ([]byte, error) {
 	}
 
 	if !metadata.UsePasswordKDF {
-		return nil, errors.New("this data was encrypted deterministically, use AESDecrypt instead")
+		return nil, errors.New("this data was encrypted deterministically and cannot be decrypted with password mode")
 	}
 
 	// Reconstruct the key using password and stored KDF parameters
@@ -89,9 +89,18 @@ func AESDecrypt(encodedMetadata string, password string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid salt: %w", err)
 	}
 
-	key, _, err := DeriveKeyFromPassword(password, salt)
+	params := &KDFParams{
+		Algorithm: "argon2id",
+		Salt:      salt,
+		Time:      metadata.IterationCount,
+		Memory:    metadata.Memory,
+		Threads:   metadata.Parallelism,
+		KeyLen:    DefaultKeyLen,
+	}
+
+	key, err := ReconstructKey(password, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to derive key from password: %w", err)
+		return nil, fmt.Errorf("failed to reconstruct key from password: %w", err)
 	}
 	defer SecureZero(key) // Zero the key from memory when done	// Decrypt the data
 	return decryptWithKey(key, metadata.Ciphertext)
@@ -167,9 +176,19 @@ func deserializeMetadata(encoded string) (EncryptionMetadata, error) {
 		}
 
 		metadata.UsePasswordKDF = true
-		fmt.Sscanf(parts[4], "%d", &metadata.IterationCount)
-		fmt.Sscanf(parts[5], "%d", &metadata.Memory)
-		fmt.Sscanf(parts[6], "%d", &metadata.Parallelism)
+		if _, err := fmt.Sscanf(parts[4], "%d", &metadata.IterationCount); err != nil {
+			return EncryptionMetadata{}, fmt.Errorf("invalid metadata iteration count: %w", err)
+		}
+		if _, err := fmt.Sscanf(parts[5], "%d", &metadata.Memory); err != nil {
+			return EncryptionMetadata{}, fmt.Errorf("invalid metadata memory value: %w", err)
+		}
+		if _, err := fmt.Sscanf(parts[6], "%d", &metadata.Parallelism); err != nil {
+			return EncryptionMetadata{}, fmt.Errorf("invalid metadata parallelism value: %w", err)
+		}
+
+		if err := ValidateArgon2Params(metadata.IterationCount, metadata.Memory, metadata.Parallelism); err != nil {
+			return EncryptionMetadata{}, fmt.Errorf("invalid metadata argon2 parameters: %w", err)
+		}
 	} else {
 		// Deterministic encryption
 		metadata.UsePasswordKDF = false
@@ -224,6 +243,9 @@ func SecureXORDecrypt(data []byte) ([]byte, error) {
 	// Extract key and xored data
 	key := data[4 : 4+keyLen]
 	xored := data[4+keyLen:]
+	if len(xored) > len(key) {
+		return nil, errors.New("invalid XOR encrypted data: mismatched key/data length")
+	}
 
 	// XOR to decrypt
 	result := make([]byte, len(xored))

@@ -174,43 +174,28 @@ func ReadOperands(def *Definition, ins Instructions) ([]int, int) {
 	return operands, offset
 }
 
-func ReadUint16(ins Instructions, length int64, password string) (uint16, error) {
+func ReadUint16(ins Instructions, length int64, password string, offset int64) (uint16, error) {
 	if len(ins) < 2 {
 		return 0, fmt.Errorf("instruction slice too short for uint16")
 	}
 
-	ins, err := security.SecureXOR(ins, length, password)
+	dec, err := security.SecureXORAt(ins[:2], length, password, offset)
 	if err != nil {
 		return 0, err
 	}
 
-	index := binary.BigEndian.Uint16(ins)
-
-	ins, err = security.SecureXOR(ins, length, password)
-	if err != nil {
-		return 0, err
-	}
-
-	return index, nil
+	return binary.BigEndian.Uint16(dec), nil
 }
 
-func ReadUint8(ins Instructions, length int64, password string) (uint8, error) {
+func ReadUint8(ins Instructions, length int64, password string, offset int64) (uint8, error) {
 	if len(ins) < 1 {
 		return 0, fmt.Errorf("instruction slice too short for uint8")
 	}
 
-	var err error
-	ins[0], err = security.SecureXOROne(ins[0], length, password)
+	dec, err := security.SecureXOROneAt(ins[0], length, password, offset)
 	if err != nil {
 		return 0, err
 	}
 
-	index := uint8(ins[0])
-
-	ins[0], err = security.SecureXOROne(ins[0], length, password)
-	if err != nil {
-		return 0, err
-	}
-
-	return index, nil
+	return uint8(dec), nil
 }

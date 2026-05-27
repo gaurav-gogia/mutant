@@ -31,39 +31,11 @@ func SignCode(encodedString string, privateKey []byte) ([]byte, error) {
 	return []byte(signedCode), nil
 } // VerifyCode verifies bytecode Ed25519 signature
 func VerifyCode(signedCode []byte) error {
-	signedCodeString := string(signedCode)
-	parts := strings.Split(signedCodeString, OUTER_SEPERATOR)
-
-	if len(parts) < 5 {
-		return ErrWrongSignature
-	}
-
-	// Check header and footer
-	if parts[0] != HEADER {
-		return ErrWrongSignature
-	}
-
-	if parts[len(parts)-1] != FOOTER {
-		return ErrWrongSignature
-	}
-
-	// Extract components
-	encodedData := parts[1]
-	signatureHex := parts[len(parts)-3]
-	publicKeyHex := parts[len(parts)-2]
-
-	// Decode signature and public key
-	signatureBytes, err := hex.DecodeString(signatureHex)
+	encodedData, signatureBytes, publicKeyBytes, err := parseSignedCode(signedCode)
 	if err != nil {
-		return fmt.Errorf("invalid signature encoding: %w", err)
+		return err
 	}
 
-	publicKeyBytes, err := hex.DecodeString(publicKeyHex)
-	if err != nil {
-		return fmt.Errorf("invalid public key encoding: %w", err)
-	}
-
-	// Create CodeSignature struct for verification
 	codeSignature := &CodeSignature{
 		PublicKey: publicKeyBytes,
 		Signature: signatureBytes,
@@ -71,7 +43,41 @@ func VerifyCode(signedCode []byte) error {
 		Version:   "v2.1.0",
 	}
 
-	// Verify signature
+	if err := VerifyBytecode([]byte(encodedData), codeSignature); err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	return nil
+}
+
+// VerifyCodeWithTrustedPublicKey verifies payload signatures against a pinned trusted signer key.
+func VerifyCodeWithTrustedPublicKey(signedCode []byte, trustedPublicKeyHex string) error {
+	encodedData, signatureBytes, embeddedPublicKey, err := parseSignedCode(signedCode)
+	if err != nil {
+		return err
+	}
+
+	trustedPublicKeyHex = strings.TrimSpace(trustedPublicKeyHex)
+	if trustedPublicKeyHex == "" {
+		return fmt.Errorf("trusted public key is required")
+	}
+
+	trustedPublicKey, err := hex.DecodeString(trustedPublicKeyHex)
+	if err != nil {
+		return fmt.Errorf("invalid trusted public key encoding: %w", err)
+	}
+
+	if !SecureCompare(embeddedPublicKey, trustedPublicKey) {
+		return ErrUntrustedSigner
+	}
+
+	codeSignature := &CodeSignature{
+		PublicKey: trustedPublicKey,
+		Signature: signatureBytes,
+		Algorithm: "Ed25519",
+		Version:   "v2.1.0",
+	}
+
 	if err := VerifyBytecode([]byte(encodedData), codeSignature); err != nil {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
@@ -81,12 +87,40 @@ func VerifyCode(signedCode []byte) error {
 
 // GetEncryptedCode extracts the encrypted bytecode from signed code
 func GetEncryptedCode(signedCode []byte) string {
-	signedCodeString := string(signedCode)
-	parts := strings.Split(signedCodeString, OUTER_SEPERATOR)
-	if len(parts) < 2 {
+	encodedData, _, _, err := parseSignedCode(signedCode)
+	if err != nil {
 		return ""
 	}
-	return parts[1]
+	return encodedData
+}
+
+func parseSignedCode(signedCode []byte) (string, []byte, []byte, error) {
+	signedCodeString := string(signedCode)
+	parts := strings.Split(signedCodeString, OUTER_SEPERATOR)
+
+	if len(parts) < 5 {
+		return "", nil, nil, ErrWrongSignature
+	}
+
+	if parts[0] != HEADER || parts[len(parts)-1] != FOOTER {
+		return "", nil, nil, ErrWrongSignature
+	}
+
+	encodedData := parts[1]
+	signatureHex := parts[len(parts)-3]
+	publicKeyHex := parts[len(parts)-2]
+
+	signatureBytes, err := hex.DecodeString(signatureHex)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("invalid signature encoding: %w", err)
+	}
+
+	publicKeyBytes, err := hex.DecodeString(publicKeyHex)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("invalid public key encoding: %w", err)
+	}
+
+	return encodedData, signatureBytes, publicKeyBytes, nil
 }
 
 // GenerateSigningKeys generates a new Ed25519 key pair

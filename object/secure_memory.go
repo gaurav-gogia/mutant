@@ -65,6 +65,7 @@ func (sg *SecureGlobal) Clear() {
 // encryptObjectSecure encrypts an object using secure methods
 func encryptObjectSecure(obj Object, seed int64, password string) ([]byte, error) {
 	var data []byte
+	offset := objectStreamOffset(obj.Type())
 
 	switch obj.Type() {
 	case INTEGER_OBJ:
@@ -83,8 +84,8 @@ func encryptObjectSecure(obj Object, seed int64, password string) ([]byte, error
 		return nil, errors.New("unsupported object type for encryption")
 	}
 
-	// Use secure XOR with password
-	encrypted, err := security.SecureXOR(data, seed, password)
+	// Use offset-aware stream encryption with deterministic object-type offsets.
+	encrypted, err := security.SecureXORAt(data, seed, password, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -94,8 +95,8 @@ func encryptObjectSecure(obj Object, seed int64, password string) ([]byte, error
 
 // decryptObjectSecure decrypts an object using secure methods
 func decryptObjectSecure(encrypted []byte, objType ObjectType, seed int64, password string) (Object, error) {
-	// Decrypt using secure XOR with password
-	data, err := security.SecureXOR(encrypted, seed, password)
+	// Decrypt with the same deterministic object-type stream offset.
+	data, err := security.SecureXORAt(encrypted, seed, password, objectStreamOffset(objType))
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +118,19 @@ func decryptObjectSecure(encrypted []byte, objType ObjectType, seed int64, passw
 
 	default:
 		return nil, errors.New("unsupported object type for decryption")
+	}
+}
+
+func objectStreamOffset(objType ObjectType) int64 {
+	switch objType {
+	case INTEGER_OBJ:
+		return 64
+	case STRING_OBJ:
+		return 128
+	case BOOLEAN_OBJ:
+		return 192
+	default:
+		return 256
 	}
 }
 

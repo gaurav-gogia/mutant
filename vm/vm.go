@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"mutant/builtin"
 	"mutant/code"
@@ -13,14 +14,18 @@ import (
 
 // VM structure defines virtual machine
 type VM struct {
-	constants    []object.Object
-	stack        []object.Object
-	stackPointer int // top of stack is stack[stackPointer-1]
-	globals      []object.Object
-	frames       []*Frame
-	frameIndex   int
-	inslen       int
-	password     string // password for instruction decryption
+	constants       []object.Object
+	stack           []object.Object
+	stackPointer    int // top of stack is stack[stackPointer-1]
+	globals         []object.Object
+	frames          []*Frame
+	frameIndex      int
+	inslen          int
+	password        string // password for instruction decryption
+	stepCount       uint64
+	integrityEvery  uint64
+	integrityJitter uint64
+	frameIntegrity  map[*object.CompiledFunction][32]byte
 }
 
 func New(bc *compiler.ByteCode) *VM {
@@ -31,15 +36,22 @@ func New(bc *compiler.ByteCode) *VM {
 	mainFrame := NewFrame(mainClosure, 0)
 	frames[0] = mainFrame
 
+	frameIntegrity := make(map[*object.CompiledFunction][32]byte)
+	frameIntegrity[mainfn] = sha256.Sum256(mainfn.Instructions)
+
 	return &VM{
-		constants:    bc.Constants,
-		stack:        make([]object.Object, global.StackSize),
-		stackPointer: 0,
-		globals:      make([]object.Object, global.GlobalSize),
-		frames:       frames,
-		frameIndex:   1,
-		inslen:       len(bc.Instructions),
-		password:     "",
+		constants:       bc.Constants,
+		stack:           make([]object.Object, global.StackSize),
+		stackPointer:    0,
+		globals:         make([]object.Object, global.GlobalSize),
+		frames:          frames,
+		frameIndex:      1,
+		inslen:          len(bc.Instructions),
+		password:        "",
+		stepCount:       0,
+		integrityEvery:  64,
+		integrityJitter: uint64(len(bc.Instructions)%31 + 7),
+		frameIntegrity:  frameIntegrity,
 	}
 }
 
@@ -65,30 +77,30 @@ func (vm *VM) Run() error {
 	var ip int
 	var ins code.Instructions
 	var op code.Opcode
-	var err error
 
 	for vm.currentFrame().ip < len(vm.currentFrame().Instructions())-1 {
+		if err := vm.runIntegrityProbes(); err != nil {
+			return err
+		}
+
 		vm.currentFrame().ip++
+		vm.stepCount++
 
 		ip = vm.currentFrame().ip
 		ins = vm.currentFrame().Instructions()
 
-		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen), vm.password)
+		opcodeByte, err := security.SecureXOROneAt(ins[ip], int64(vm.inslen), vm.password, int64(ip))
 		if err != nil {
 			return err
 		}
-		op = code.Opcode(ins[ip])
-		ins[ip], err = security.SecureXOROne(ins[ip], int64(vm.inslen), vm.password)
-		if err != nil {
-			return err
-		}
+		op = code.Opcode(opcodeByte)
 
 		switch op {
 		case code.OpConstant:
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpConstant: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -121,7 +133,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpArray: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -135,7 +147,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpHash: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -157,7 +169,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpJump: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -167,7 +179,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpJumpFalse: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			res, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -181,7 +193,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpSetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -191,7 +203,7 @@ func (vm *VM) Run() error {
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpGetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			globalIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -203,7 +215,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpSetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -220,7 +232,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
+			localIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -233,7 +245,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetBuiltin: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
+			builtinIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -246,7 +258,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetFree: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
+			freeIndex, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -265,11 +277,11 @@ func (vm *VM) Run() error {
 			if ip+3 >= len(ins) {
 				return fmt.Errorf("OpClosure: not enough bytes for operands at ip=%d, len=%d", ip, len(ins))
 			}
-			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password)
+			constIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
-			numFree, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen), vm.password)
+			numFree, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen), vm.password, int64(ip+3))
 			if err != nil {
 				return err
 			}
@@ -286,7 +298,7 @@ func (vm *VM) Run() error {
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpCall: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
 			}
-			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password)
+			numArgs, err := code.ReadUint8(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
 			if err != nil {
 				return err
 			}
@@ -315,6 +327,26 @@ func (vm *VM) Run() error {
 			vm.pop()
 		}
 	}
+	return nil
+}
+
+func (vm *VM) runIntegrityProbes() error {
+	if vm.integrityEvery == 0 {
+		return nil
+	}
+
+	if vm.stepCount%vm.integrityEvery == 0 || vm.stepCount%97 == vm.integrityJitter%97 {
+		if err := vm.verifyCurrentFrameIntegrity(); err != nil {
+			return err
+		}
+	}
+
+	if vm.stepCount > 0 && vm.stepCount%251 == 0 {
+		if err := vm.verifyActiveFramesIntegrity(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -583,6 +615,9 @@ func (vm *VM) currentFrame() *Frame { return vm.frames[vm.frameIndex-1] }
 func (vm *VM) pushFrame(f *Frame) {
 	vm.frames[vm.frameIndex] = f
 	vm.frameIndex++
+	if f != nil && f.cl != nil && f.cl.Fn != nil {
+		vm.registerFrameIntegrity(f.cl.Fn)
+	}
 }
 func (vm *VM) popFrame() *Frame {
 	vm.frameIndex--
@@ -616,6 +651,51 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 	frame := NewFrame(cl, vm.stackPointer-numArgs)
 	vm.pushFrame(frame)
 	vm.stackPointer = frame.bp + cl.Fn.NumLocals
+	return nil
+}
+
+func (vm *VM) registerFrameIntegrity(fn *object.CompiledFunction) {
+	if vm.frameIntegrity == nil {
+		vm.frameIntegrity = make(map[*object.CompiledFunction][32]byte)
+	}
+	if _, exists := vm.frameIntegrity[fn]; !exists {
+		vm.frameIntegrity[fn] = sha256.Sum256(fn.Instructions)
+	}
+}
+
+func (vm *VM) verifyCurrentFrameIntegrity() error {
+	frame := vm.currentFrame()
+	return vm.verifyFrameIntegrity(frame, "vm-frame")
+}
+
+func (vm *VM) verifyActiveFramesIntegrity() error {
+	for i := 0; i < vm.frameIndex; i++ {
+		if err := vm.verifyFrameIntegrity(vm.frames[i], "vm-frame-sweep"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (vm *VM) verifyFrameIntegrity(frame *Frame, stage string) error {
+	if frame == nil || frame.cl == nil || frame.cl.Fn == nil {
+		return nil
+	}
+
+	fn := frame.cl.Fn
+	expected, exists := vm.frameIntegrity[fn]
+	if !exists {
+		vm.registerFrameIntegrity(fn)
+		expected = vm.frameIntegrity[fn]
+	}
+
+	actual := sha256.Sum256(fn.Instructions)
+	if !security.SecureCompare(expected[:], actual[:]) {
+		security.RecordIntegrityFailure(stage)
+		return security.ApplyTamperResponse("integrity_failed", stage, true, fmt.Errorf("runtime integrity check failed"))
+	}
+
 	return nil
 }
 

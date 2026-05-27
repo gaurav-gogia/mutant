@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+
+	"golang.org/x/crypto/chacha20"
 )
 
 // SecureRandByte generates a cryptographically secure random byte
@@ -32,42 +34,54 @@ func SecureRandBytes(n int) ([]byte, error) {
 // seed: instruction length or other deterministic value
 // password: optional user password (empty string for deterministic encryption without password)
 func SecureXOR(data []byte, seed int64, password string) ([]byte, error) {
+	return SecureXORAt(data, seed, password, 0)
+}
+
+// SecureXORAt encrypts/decrypts data using an offset-aware ChaCha20 keystream.
+// offset is the logical stream position and should match byte position in encrypted instruction/object regions.
+func SecureXORAt(data []byte, seed int64, password string, offset int64) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, errors.New("data cannot be empty")
 	}
+	if offset < 0 {
+		return nil, errors.New("offset cannot be negative")
+	}
+
+	key, nonce := deriveStreamKeyAndNonce(seed, password)
+	cipher, err := chacha20.NewUnauthenticatedCipher(key[:], nonce[:])
+	if err != nil {
+		return nil, err
+	}
+
+	blockOffset := uint32(offset / 64)
+	if blockOffset > 0 {
+		cipher.SetCounter(blockOffset)
+	}
+
+	skip := int(offset % 64)
+	if skip > 0 {
+		discard := make([]byte, skip)
+		cipher.XORKeyStream(discard, discard)
+	}
 
 	result := make([]byte, len(data))
-	for i := range data {
-		res, err := SecureXOROne(data[i], seed, password)
-		if err != nil {
-			return nil, err
-		}
-		result[i] = res
-	}
+	cipher.XORKeyStream(result, data)
 
 	return result, nil
 }
 
 // SecureXOROne performs XOR on a single byte with secure random key derived from seed and password
 func SecureXOROne(instruction byte, seed int64, password string) (byte, error) {
-	key, err := deriveXORKey(seed, password, 1)
+	return SecureXOROneAt(instruction, seed, password, 0)
+}
+
+// SecureXOROneAt encrypts/decrypts a single byte at the given stream offset.
+func SecureXOROneAt(instruction byte, seed int64, password string, offset int64) (byte, error) {
+	res, err := SecureXORAt([]byte{instruction}, seed, password, offset)
 	if err != nil {
 		return 0, err
 	}
-	return instruction ^ key[0], nil
-}
-
-// passwordToSeed converts a password string to a uint64 seed
-// If password is empty, returns 0
-// If password is provided, returns hash of password as uint64
-func passwordToSeed(password string) uint64 {
-	if password == "" {
-		return 0
-	}
-
-	hash := sha256.Sum256([]byte(password))
-	// Convert first 8 bytes to uint64
-	return binary.LittleEndian.Uint64(hash[:8])
+	return res[0], nil
 }
 
 // DerivePasswordFromInstructions derives a deterministic password seed from instruction hash
@@ -83,42 +97,22 @@ func DerivePasswordFromInstructions(instructions []byte) uint64 {
 	return binary.LittleEndian.Uint64(hash[:8])
 }
 
-// deriveXORKey derives a key for XOR operations using HKDF-like approach
-// Incorporates both seed (instruction length) and password for enhanced security
-func deriveXORKey(seed int64, password string, length int) ([]byte, error) {
-	// Convert seed to bytes
+func deriveStreamKeyAndNonce(seed int64, password string) ([32]byte, [12]byte) {
 	seedBytes := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		seedBytes[i] = byte(seed >> (i * 8))
-	}
+	binary.LittleEndian.PutUint64(seedBytes, uint64(seed))
 
-	// Convert password to seed and merge with instruction-length seed
-	passwordSeed := passwordToSeed(password)
-	passwordBytes := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		passwordBytes[i] = byte(passwordSeed >> (i * 8))
-	}
+	baseMaterial := append([]byte("mutant-stream-v1|"), seedBytes...)
+	baseMaterial = append(baseMaterial, '|')
+	baseMaterial = append(baseMaterial, []byte(password)...)
 
-	// XOR seeds together to mix password and instruction-length seed
-	mergedSeed := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		mergedSeed[i] = seedBytes[i] ^ passwordBytes[i]
-	}
+	keyHash := sha256.Sum256(append([]byte("key|"), baseMaterial...))
+	nonceHash := sha256.Sum256(append([]byte("nonce|"), baseMaterial...))
 
-	// Use a deterministic but secure key derivation
-	key := make([]byte, length)
-
-	// Simple HKDF-like expansion using merged seed
-	for i := 0; i < length; i += 32 {
-		counter := byte(i / 32)
-		block := append(mergedSeed, counter)
-
-		for j := 0; j < 32 && i+j < length; j++ {
-			key[i+j] = block[j%len(block)] ^ byte(i+j)
-		}
-	}
-
-	return key, nil
+	var key [32]byte
+	var nonce [12]byte
+	copy(key[:], keyHash[:])
+	copy(nonce[:], nonceHash[:12])
+	return key, nonce
 }
 
 // SecureCompare performs constant-time comparison to prevent timing attacks

@@ -3,7 +3,6 @@ package runner
 import (
 	"bytes"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"io"
 	"mutant/builtin"
@@ -14,15 +13,54 @@ import (
 	"mutant/security"
 	"mutant/vm"
 	"os"
+	"path/filepath"
 )
 
-func Run(srcpath string, password string) (error, errrs.ErrorType) {
+func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorType) {
+	telemetryPath := os.Getenv(security.SecurityTelemetryFileEnv)
+	if telemetryPath != "" {
+		defer func() {
+			_ = security.ExportSecurityTelemetry(telemetryPath)
+		}()
+	}
+
 	signedCode, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR
 	}
 
-	if err := security.VerifyCode(signedCode); err != nil {
+	if secureMode {
+		trustedPublicKey, generated, keyDir, keyErr := security.ResolveTrustedPublicKeyHex()
+		if keyErr != nil {
+			return fmt.Errorf("failed to resolve trusted public key: %w", keyErr), errrs.ERROR
+		}
+
+		if generated {
+			privatePath, publicPath := security.LocalKeyPairPaths(keyDir)
+			fmt.Fprintf(os.Stderr,
+				"[security] generated local keypair for secure mode bootstrap\n[security] private=%s\n[security] public=%s\n[security] optional: set %s to the public key for explicit pinning\n",
+				filepath.Clean(privatePath),
+				filepath.Clean(publicPath),
+				security.TrustedPublicKeyEnv,
+			)
+		}
+
+		if err := security.VerifyCodeWithTrustedPublicKey(signedCode, trustedPublicKey); err != nil {
+			security.RecordSignatureFailure("secure-mode-verify")
+			if responseErr := security.ApplyTamperResponse("signature_failed", "secure-mode-verify", secureMode, err); responseErr != nil {
+				return responseErr, errrs.ERROR
+			}
+		}
+	} else {
+		if err := security.VerifyCode(signedCode); err != nil {
+			security.RecordSignatureFailure("compat-mode-verify")
+			if responseErr := security.ApplyTamperResponse("signature_failed", "compat-mode-verify", secureMode, err); responseErr != nil {
+				return responseErr, errrs.ERROR
+			}
+		}
+	}
+
+	if err := enforceAntiDebug(secureMode, "pre-decode"); err != nil {
 		return err, errrs.ERROR
 	}
 
@@ -31,12 +69,20 @@ func Run(srcpath string, password string) (error, errrs.ErrorType) {
 		return err, errrs.ERROR
 	}
 
-	if security.IsDebuggerPresent() {
-		fmt.Println("debugger found, exiting")
-		return errors.New("debugger found"), errrs.ERROR
+	if err := enforceAntiDebug(secureMode, "pre-execution"); err != nil {
+		return err, errrs.ERROR
 	}
 
 	return runvm(bytecode, password)
+}
+
+func enforceAntiDebug(secureMode bool, stage string) error {
+	if !security.IsDebuggerPresent() {
+		return nil
+	}
+	security.RecordDebuggerDetected(stage)
+
+	return security.ApplyTamperResponse("debugger_detected", stage, secureMode, security.ErrDebuggerDetected)
 }
 
 func decode(data []byte, password string) (*compiler.ByteCode, error) {

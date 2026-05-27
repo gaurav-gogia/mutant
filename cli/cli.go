@@ -50,14 +50,14 @@ func CompileCode(src, goos, goarch string, release bool, password string) {
 	fmt.Println("Compiled in:", time.Since(start))
 }
 
-func RunCode(src string, password string) {
+func RunCode(src string, password string, secureMode bool) {
 	srcpath, err := filepath.Abs(src)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	if err, errtype := runner.Run(srcpath, password); err != nil {
+	if err, errtype := runner.Run(srcpath, password, secureMode); err != nil {
 		switch errtype {
 		case errrs.ERROR:
 			fmt.Println(err)
