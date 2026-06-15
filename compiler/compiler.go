@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"mutant/ast"
+	"mutant/builtin"
 	"mutant/code"
 	"mutant/object"
 	"sort"
@@ -39,7 +40,7 @@ func New() *Compiler {
 	}
 
 	table := NewSymbolTable()
-	for i, v := range object.Builtins {
+	for i, v := range builtin.Builtins {
 		table.DefineBuiltin(i, v.Name)
 	}
 

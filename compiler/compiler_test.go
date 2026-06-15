@@ -31,7 +31,7 @@ func runCompilerTests(t *testing.T, tests []compilerTestCase) {
 			t.Fatalf("testInstructions failed: %s", err)
 		}
 
-		if err := testConstants(t, tt.expectedConstants, bytecode.Constants); err != nil {
+		if err := testConstants(tt.expectedConstants, bytecode.Constants); err != nil {
 			t.Fatalf("testConstants failed: %s", err)
 		}
 	}
@@ -66,7 +66,7 @@ func flattenInstructions(s []code.Instructions) code.Instructions {
 	return out
 }
 
-func testConstants(t *testing.T, expected []interface{}, actual []object.Object) error {
+func testConstants(expected []interface{}, actual []object.Object) error {
 	if len(expected) != len(actual) {
 		return fmt.Errorf("wrong number of constants. got = %d, want = %d", len(actual), len(expected))
 	}

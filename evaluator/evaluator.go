@@ -2,6 +2,7 @@ package evaluator
 
 import (
 	"mutant/ast"
+	"mutant/builtin"
 	"mutant/object"
 )
 
@@ -162,7 +163,7 @@ func applyFunction(fn object.Object, args []object.Object) object.Object {
 		extendedEnv := extendFunctionEnv(fun, args)
 		evaluated := Eval(fun.Body, extendedEnv)
 		return unwrapReturnValue(evaluated)
-	case *object.BuiltIn:
+	case *builtin.BuiltIn:
 		if result := fun.Fn(args...); result != nil {
 			return result
 		}

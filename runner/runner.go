@@ -3,8 +3,9 @@ package runner
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"io"
-	"io/ioutil"
+	"mutant/builtin"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/global"
@@ -12,28 +13,104 @@ import (
 	"mutant/security"
 	"mutant/vm"
 	"os"
+	"path/filepath"
 )
 
-func Run(srcpath string) (error, errrs.ErrorType) {
-	signedCode, err := ioutil.ReadFile(srcpath)
+var (
+	isDebuggerPresent = security.IsDebuggerPresent
+	isSandboxed       = security.IsSandboxed
+)
+
+func Run(srcpath string, password string, secureMode bool, enforceSignerAuth bool) (error, errrs.ErrorType) {
+	telemetryPath := os.Getenv(security.SecurityTelemetryFileEnv)
+	if telemetryPath != "" {
+		defer func() {
+			_ = security.ExportSecurityTelemetry(telemetryPath)
+		}()
+	}
+
+	signedCode, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR
 	}
 
-	if err := security.VerifyCode(signedCode); err != nil {
+	if secureMode && enforceSignerAuth {
+		trustedPublicKey, generated, keyDir, keyErr := security.ResolveTrustedPublicKeyHex()
+		if keyErr != nil {
+			return fmt.Errorf("failed to resolve trusted public key: %w", keyErr), errrs.ERROR
+		}
+
+		if generated {
+			privatePath, publicPath := security.LocalKeyPairPaths(keyDir)
+			fmt.Fprintf(os.Stderr,
+				"[security] generated local keypair for secure mode bootstrap\n[security] private=%s\n[security] public=%s\n[security] optional: set %s to the public key for explicit pinning\n",
+				filepath.Clean(privatePath),
+				filepath.Clean(publicPath),
+				security.TrustedPublicKeyEnv,
+			)
+		}
+
+		if err := security.VerifyCodeWithTrustedPublicKey(signedCode, trustedPublicKey); err != nil {
+			security.RecordSignatureFailure("secure-mode-verify")
+			if responseErr := security.ApplyTamperResponse("signature_failed", "secure-mode-verify", secureMode, err); responseErr != nil {
+				return responseErr, errrs.ERROR
+			}
+		}
+	} else if !secureMode {
+		if err := security.VerifyCode(signedCode); err != nil {
+			security.RecordSignatureFailure("compat-mode-verify")
+			if responseErr := security.ApplyTamperResponse("signature_failed", "compat-mode-verify", secureMode, err); responseErr != nil {
+				return responseErr, errrs.ERROR
+			}
+		}
+	}
+
+	if err := enforceAntiRev(secureMode, "pre-decode"); err != nil {
 		return err, errrs.ERROR
 	}
 
-	bytecode, err := decode(signedCode)
+	bytecode, err := decode(signedCode, password)
 	if err != nil {
 		return err, errrs.ERROR
 	}
 
-	return runvm(bytecode)
+	if err := enforceAntiRev(secureMode, "pre-execution"); err != nil {
+		return err, errrs.ERROR
+	}
+
+	return runvm(bytecode, password)
 }
 
-func decode(data []byte) (*compiler.ByteCode, error) {
-	decodedData, err := decryptCode(data)
+func enforceAntiRev(secureMode bool, stage string) error {
+	if err := enforceAntiDebug(secureMode, stage); err != nil {
+		return err
+	}
+	if err := enforceAntiSandbox(secureMode, stage); err != nil {
+		return err
+	}
+	return nil
+}
+
+func enforceAntiDebug(secureMode bool, stage string) error {
+	if !isDebuggerPresent() {
+		return nil
+	}
+	security.RecordDebuggerDetected(stage)
+
+	return security.ApplyTamperResponse("debugger_detected", stage, secureMode, security.ErrDebuggerDetected)
+}
+
+func enforceAntiSandbox(secureMode bool, stage string) error {
+	if !isSandboxed() {
+		return nil
+	}
+	security.RecordSandboxDetected(stage)
+
+	return security.ApplyTamperResponse("sandbox_detected", stage, secureMode, security.ErrSandboxDetected)
+}
+
+func decode(data []byte, password string) (*compiler.ByteCode, error) {
+	decodedData, err := decryptCode(data, password)
 	if err != nil {
 		return nil, err
 	}
@@ -49,19 +126,30 @@ func decode(data []byte) (*compiler.ByteCode, error) {
 	return bytecode, nil
 }
 
-func decryptCode(signedCode []byte) ([]byte, error) {
-	encryptedCode := security.GetEncryptedCode(signedCode)
-	decryptedData, err := security.AESDecrypt(encryptedCode)
+func decryptCode(signedCode []byte, password string) ([]byte, error) {
+	encryptedMetadata := security.GetEncryptedCode(signedCode)
+
+	// Decrypt using the new secure method
+	var xorEncryptedData []byte
+	var err error
+
+	xorEncryptedData, err = security.AESDecrypt(encryptedMetadata, password)
 	if err != nil {
 		return nil, err
 	}
-	decodedData := security.XOR(decryptedData, len(decryptedData))
+
+	// Decrypt the XOR layer (key is embedded in the data)
+	decodedData, err := security.SecureXORDecrypt(xorEncryptedData)
+	if err != nil {
+		return nil, err
+	}
+
 	return decodedData, nil
 }
 
-func runvm(bytecode *compiler.ByteCode) (error, errrs.ErrorType) {
+func runvm(bytecode *compiler.ByteCode, password string) (error, errrs.ErrorType) {
 	globals := make([]object.Object, global.GlobalSize)
-	machine := vm.NewWithGlobalStore(bytecode, globals)
+	machine := vm.NewWithPasswordAndGlobalStore(bytecode, password, globals)
 
 	if err := machine.Run(); err != nil {
 		return err, errrs.VM_ERROR
@@ -82,7 +170,7 @@ func registerTypes() {
 	gob.Register(&object.Error{})
 	gob.Register(&object.Function{})
 	gob.Register(&object.String{})
-	gob.Register(&object.BuiltIn{})
+	gob.Register(&builtin.BuiltIn{})
 	gob.Register(&object.Array{})
 	gob.Register(&object.Hash{})
 	gob.Register(&object.Quote{})

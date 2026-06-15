@@ -41,7 +41,7 @@ func runVMTests(t *testing.T, tests []vmTestCase) {
 			fmt.Println()
 		}
 
-		byteCode = mutil.EncryptByteCode(byteCode)
+		byteCode = mutil.EncryptByteCode(byteCode, "")
 
 		vm := New(comp.ByteCode())
 		if err := vm.Run(); err != nil {
@@ -462,7 +462,7 @@ func TestCallingFunctionsWithWrongArguments(t *testing.T) {
 		}
 
 		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode)
+		byteCode = mutil.EncryptByteCode(byteCode, "")
 
 		vm := New(byteCode)
 

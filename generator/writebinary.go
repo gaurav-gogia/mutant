@@ -4,15 +4,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"mutant/binformat"
+	"mutant/global"
 	"os"
 	"regexp"
 )
 
 const (
 	EXPRESSION = `(\|\#\|)(.+)(\|\#\|)`
-	DARWIN     = "darwin"
-	LINUX      = "linux"
-	WINDOWS    = "windows"
 
 	AMD64 = "amd64"
 	X86   = "386"
@@ -52,12 +50,12 @@ func writeBinary(dstpath, goos, goarch string, bytecode []byte) error {
 
 func getBinaryFormat(goos, goarch string) ([]byte, error) {
 	switch goos {
-	case DARWIN:
+	case global.DARWIN:
 		if goarch == AMD64 {
 			return []byte(binformat.DarwinAmd64), nil
 		}
 
-	case LINUX:
+	case global.LINUX:
 		if goarch == AMD64 {
 			return []byte(binformat.LinuxAmd64), nil
 		}
@@ -71,7 +69,7 @@ func getBinaryFormat(goos, goarch string) ([]byte, error) {
 			return []byte(binformat.LinuxArm386), nil
 		}
 
-	case WINDOWS:
+	case global.WINDOWS:
 		if goarch == AMD64 {
 			return []byte(binformat.WindowsAmd64), nil
 		}

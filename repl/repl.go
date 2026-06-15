@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"mutant/builtin"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/evaluator"
@@ -46,7 +47,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 	constants := []object.Object{}
 	globals := make([]object.Object, global.GlobalSize)
 	symbolTable := compiler.NewSymbolTable()
-	for i, v := range object.Builtins {
+	for i, v := range builtin.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
 	}
 
@@ -89,7 +90,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		}
 
 		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode)
+		byteCode = mutil.EncryptByteCode(byteCode, "") // Empty password for REPL (deterministic encryption based on instructions)
 
 		machine := vm.NewWithGlobalStore(byteCode, globals)
 		if err := machine.Run(); err != nil {
@@ -127,17 +128,17 @@ func vanity(line string, out io.Writer, enableMacros bool) bool {
 
 	if line == "clear" || line == "cls" {
 		clear := make(map[string]func())
-		clear["linux"] = func() {
+		clear[global.LINUX] = func() {
 			cmd := exec.Command("clear")
 			cmd.Stdout = os.Stdout
 			cmd.Run()
 		}
-		clear["darwin"] = func() {
+		clear[global.DARWIN] = func() {
 			cmd := exec.Command("clear")
 			cmd.Stdout = os.Stdout
 			cmd.Run()
 		}
-		clear["windows"] = func() {
+		clear[global.WINDOWS] = func() {
 			cmd := exec.Command("cmd", "/c", "cls")
 			cmd.Stdout = os.Stdout
 			cmd.Run()

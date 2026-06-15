@@ -2,9 +2,11 @@ package generator
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
+	"mutant/builtin"
 	"mutant/compiler"
 	"mutant/errrs"
 	"mutant/global"
@@ -14,22 +16,45 @@ import (
 	"mutant/parser"
 	"mutant/security"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // Generate function takes a `string`, it's the path for the source code
-func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs.ErrorType, []string) {
-	data, err := ioutil.ReadFile(srcpath)
+// password: optional password for encryption (empty string for deterministic encryption)
+// privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
+func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
+	data, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
 	}
 
-	bytecode, err, errtype, errors := compile(data)
+	// Generate signing key if not provided
+	if privateKey == nil {
+		privateKey, err = loadSigningPrivateKeyFromEnv()
+		if err != nil {
+			return err, errrs.ERROR, nil
+		}
+
+		if privateKey == nil {
+			keyPair, err := security.GenerateKeyPair()
+			if err != nil {
+				return err, errrs.ERROR, nil
+			}
+			privateKey = keyPair.PrivateKey
+
+			// In production, you should inject a persistent private key using
+			// MUTANT_SIGNING_PRIVATE_KEY_HEX to avoid ephemeral signer identities.
+		}
+	}
+
+	bytecode, err, errtype, errors := compile(data, password, privateKey)
 	if err != nil {
 		return err, errtype, errors
 	}
 
 	if release {
-		if goos == WINDOWS {
+		if goos == global.WINDOWS {
 			dstpath += global.WindowsPE32ExecutableExtension
 		}
 
@@ -47,10 +72,44 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool) (error, errrs
 	return nil, "", nil
 }
 
-func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
+func loadSigningPrivateKeyFromEnv() ([]byte, error) {
+	privateKeyHex := strings.TrimSpace(os.Getenv(security.SigningPrivateKeyEnv))
+	if privateKeyHex == "" {
+		privateKey, _, created, keyDir, err := security.EnsureLocalSigningKeyPair()
+		if err != nil {
+			return nil, err
+		}
+
+		if created {
+			privatePath, publicPath := security.LocalKeyPairPaths(keyDir)
+			fmt.Fprintf(os.Stderr,
+				"[security] generated local signing keypair for reuse\n[security] private=%s\n[security] public=%s\n[security] set %s from %s in secure environments\n",
+				filepath.Clean(privatePath),
+				filepath.Clean(publicPath),
+				security.TrustedPublicKeyEnv,
+				filepath.Clean(publicPath),
+			)
+		}
+
+		return privateKey, nil
+	}
+
+	privateKey, err := hex.DecodeString(privateKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", security.SigningPrivateKeyEnv, err)
+	}
+
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid %s size: expected %d bytes", security.SigningPrivateKeyEnv, ed25519.PrivateKeySize)
+	}
+
+	return privateKey, nil
+}
+
+func compile(data []byte, password string, privateKey []byte) ([]byte, error, errrs.ErrorType, []string) {
 	constants := []object.Object{}
 	symbolTable := compiler.NewSymbolTable()
-	for i, v := range object.Builtins {
+	for i, v := range builtin.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
 	}
 
@@ -67,7 +126,7 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 		return nil, err, errrs.COMPILER_ERROR, nil
 	}
 
-	encodedByteCode, err := encode(comp.ByteCode())
+	encodedByteCode, err := encode(comp.ByteCode(), password, privateKey)
 	if err != nil {
 		return nil, err, errrs.ERROR, nil
 	}
@@ -75,10 +134,10 @@ func compile(data []byte) ([]byte, error, errrs.ErrorType, []string) {
 	return encodedByteCode, nil, "", nil
 }
 
-func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
+func encode(compByteCode *compiler.ByteCode, password string, privateKey []byte) ([]byte, error) {
 	var content bytes.Buffer
 
-	compByteCode = mutil.EncryptByteCode(compByteCode)
+	compByteCode = mutil.EncryptByteCode(compByteCode, password)
 
 	registerTypes()
 	enc := gob.NewEncoder(&content)
@@ -87,16 +146,29 @@ func encode(compByteCode *compiler.ByteCode) ([]byte, error) {
 	}
 
 	byteCode := content.Bytes()
-	return encryptCode(byteCode)
+	return encryptCode(byteCode, password, privateKey)
 }
 
-func encryptCode(b64ByteCode []byte) ([]byte, error) {
-	xorByteCode := security.XOR(b64ByteCode, len(b64ByteCode))
-	encodedByteCode, err := security.AESEncrypt(xorByteCode)
+func encryptCode(b64ByteCode []byte, password string, privateKey []byte) ([]byte, error) {
+	// Apply secure XOR (replaces insecure math/rand-based XOR)
+	xorByteCode, err := security.SecureXOREncrypt(b64ByteCode)
 	if err != nil {
 		return nil, err
 	}
-	signedCode := security.SignCode(encodedByteCode)
+
+	// Encrypt using new secure method (no key storage)
+	var encodedByteCode string
+	encodedByteCode, err = security.AESEncrypt(xorByteCode, password)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sign with Ed25519 (replaces insecure MD5)
+	signedCode, err := security.SignCode(encodedByteCode, privateKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return signedCode, nil
 }
 
@@ -108,7 +180,7 @@ func registerTypes() {
 	gob.Register(&object.Error{})
 	gob.Register(&object.Function{})
 	gob.Register(&object.String{})
-	gob.Register(&object.BuiltIn{})
+	gob.Register(&builtin.BuiltIn{})
 	gob.Register(&object.Array{})
 	gob.Register(&object.Hash{})
 	gob.Register(&object.Quote{})
