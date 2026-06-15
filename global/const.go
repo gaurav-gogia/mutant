@@ -10,3 +10,9 @@ const (
 	MutantByteCodeCompiledFileExtension = ".mu"
 	WindowsPE32ExecutableExtension      = ".exe"
 )
+
+const (
+	DARWIN  = "darwin"
+	LINUX   = "linux"
+	WINDOWS = "windows"
+)

@@ -58,6 +58,7 @@ func main() {
 			fmt.Println("\t\tRun mutant bytecode using mutant VM.")
 			fmt.Println("\t\tOptional: --compat to allow compatibility mode (weaker security checks).")
 			fmt.Println("\t\tOptional: --dev for developer mode (compat mode + default local password fallback).")
+			fmt.Println("\t\tOptional: --signer-auth to enforce trusted signer key verification in secure mode.")
 			fmt.Println("\t\tDefault is --secure (fail-closed security behavior).")
 			fmt.Println()
 			fmt.Println("\tmutant gen -src <FILENAME>.mut [-password|-pwd]")
@@ -97,7 +98,7 @@ func main() {
 
 		if strings.HasSuffix(os.Args[1], global.MutantByteCodeCompiledFileExtension) {
 			pwd := mutil.GetPwd()
-			cli.RunCode(os.Args[1], pwd, true)
+			cli.RunCode(os.Args[1], pwd, true, false)
 			return
 		}
 	}
@@ -118,6 +119,7 @@ func main() {
 			password := extractPasswordArg(os.Args)
 			devMode := hasDevModeArg(os.Args)
 			secureMode := extractSecurityModeArg(os.Args)
+			enforceSignerAuth := extractSignerAuthArg(os.Args)
 			if devMode {
 				secureMode = false
 			}
@@ -129,7 +131,7 @@ func main() {
 				if password == "" && devMode {
 					password = mutil.GetPwd()
 				}
-				cli.RunCode(fileArg, password, secureMode)
+				cli.RunCode(fileArg, password, secureMode, enforceSignerAuth)
 				return
 			}
 		}
@@ -184,6 +186,21 @@ func hasDevModeArg(args []string) bool {
 		}
 	}
 	return false
+}
+
+// extractSignerAuthArg scans args for explicit signer-auth flags.
+// Defaults to disabled unless --signer-auth is supplied.
+func extractSignerAuthArg(args []string) bool {
+	enforceSignerAuth := false
+	for _, arg := range args {
+		switch arg {
+		case "--signer-auth", "-signer-auth":
+			enforceSignerAuth = true
+		case "--no-signer-auth", "-no-signer-auth":
+			enforceSignerAuth = false
+		}
+	}
+	return enforceSignerAuth
 }
 
 // extractPasswordArg scans args for -password|-pwd or --password=|--pwd=<value>

@@ -220,6 +220,7 @@ func TestSecurityTelemetryCounters(t *testing.T) {
 	RecordDebuggerDetected("test-stage")
 	RecordIntegrityFailure("test-stage")
 	RecordSignatureFailure("test-stage")
+	RecordSandboxDetected("test-stage")
 
 	snapshot := SecurityTelemetrySnapshot()
 	if snapshot["debugger_detected"] != 1 {
@@ -231,10 +232,13 @@ func TestSecurityTelemetryCounters(t *testing.T) {
 	if snapshot["signature_failed"] != 1 {
 		t.Fatalf("expected signature_failed=1, got %d", snapshot["signature_failed"])
 	}
+	if snapshot["sandbox_detected"] != 1 {
+		t.Fatalf("expected sandbox_detected=1, got %d", snapshot["sandbox_detected"])
+	}
 
 	ResetSecurityTelemetry()
 	snapshot = SecurityTelemetrySnapshot()
-	if snapshot["debugger_detected"] != 0 || snapshot["integrity_failed"] != 0 || snapshot["signature_failed"] != 0 {
+	if snapshot["debugger_detected"] != 0 || snapshot["integrity_failed"] != 0 || snapshot["signature_failed"] != 0 || snapshot["sandbox_detected"] != 0 {
 		t.Fatalf("expected counters to reset to zero, got %+v", snapshot)
 	}
 }
@@ -257,6 +261,9 @@ func TestSecurityTelemetryJSONAndExport(t *testing.T) {
 	if snapshot["debugger_detected"] != 1 || snapshot["integrity_failed"] != 1 {
 		t.Fatalf("unexpected telemetry values: %+v", snapshot)
 	}
+	if snapshot["sandbox_detected"] != 0 {
+		t.Fatalf("expected sandbox_detected=0, got %+v", snapshot)
+	}
 
 	tmpFile := filepath.Join(t.TempDir(), "telemetry.json")
 	if err := ExportSecurityTelemetry(tmpFile); err != nil {
@@ -269,6 +276,31 @@ func TestSecurityTelemetryJSONAndExport(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatalf("expected non-empty telemetry export file")
+	}
+}
+
+func TestSandboxDetectionAPIs(t *testing.T) {
+	typ, confidence, _ := DetectSandboxType()
+	if confidence < 0 || confidence > 100 {
+		t.Fatalf("expected confidence in [0,100], got %d", confidence)
+	}
+	if typ == "" {
+		t.Fatalf("expected non-empty sandbox type")
+	}
+
+	indicators, _ := GetSandboxIndicators()
+	for _, indicator := range indicators {
+		if indicator == "" {
+			t.Fatalf("expected non-empty indicator entries")
+		}
+	}
+
+	isSandboxed := IsSandboxed()
+	if isSandboxed && confidence < 70 {
+		t.Fatalf("expected confidence >= 70 when sandboxed, got %d", confidence)
+	}
+	if !isSandboxed && confidence >= 70 {
+		t.Fatalf("expected confidence < 70 when not sandboxed, got %d", confidence)
 	}
 }
 

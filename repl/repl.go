@@ -128,17 +128,17 @@ func vanity(line string, out io.Writer, enableMacros bool) bool {
 
 	if line == "clear" || line == "cls" {
 		clear := make(map[string]func())
-		clear["linux"] = func() {
+		clear[global.LINUX] = func() {
 			cmd := exec.Command("clear")
 			cmd.Stdout = os.Stdout
 			cmd.Run()
 		}
-		clear["darwin"] = func() {
+		clear[global.DARWIN] = func() {
 			cmd := exec.Command("clear")
 			cmd.Stdout = os.Stdout
 			cmd.Run()
 		}
-		clear["windows"] = func() {
+		clear[global.WINDOWS] = func() {
 			cmd := exec.Command("cmd", "/c", "cls")
 			cmd.Stdout = os.Stdout
 			cmd.Run()

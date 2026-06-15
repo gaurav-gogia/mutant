@@ -16,7 +16,12 @@ import (
 	"path/filepath"
 )
 
-func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorType) {
+var (
+	isDebuggerPresent = security.IsDebuggerPresent
+	isSandboxed       = security.IsSandboxed
+)
+
+func Run(srcpath string, password string, secureMode bool, enforceSignerAuth bool) (error, errrs.ErrorType) {
 	telemetryPath := os.Getenv(security.SecurityTelemetryFileEnv)
 	if telemetryPath != "" {
 		defer func() {
@@ -29,7 +34,7 @@ func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorTy
 		return err, errrs.ERROR
 	}
 
-	if secureMode {
+	if secureMode && enforceSignerAuth {
 		trustedPublicKey, generated, keyDir, keyErr := security.ResolveTrustedPublicKeyHex()
 		if keyErr != nil {
 			return fmt.Errorf("failed to resolve trusted public key: %w", keyErr), errrs.ERROR
@@ -51,7 +56,7 @@ func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorTy
 				return responseErr, errrs.ERROR
 			}
 		}
-	} else {
+	} else if !secureMode {
 		if err := security.VerifyCode(signedCode); err != nil {
 			security.RecordSignatureFailure("compat-mode-verify")
 			if responseErr := security.ApplyTamperResponse("signature_failed", "compat-mode-verify", secureMode, err); responseErr != nil {
@@ -60,7 +65,7 @@ func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorTy
 		}
 	}
 
-	if err := enforceAntiDebug(secureMode, "pre-decode"); err != nil {
+	if err := enforceAntiRev(secureMode, "pre-decode"); err != nil {
 		return err, errrs.ERROR
 	}
 
@@ -69,20 +74,39 @@ func Run(srcpath string, password string, secureMode bool) (error, errrs.ErrorTy
 		return err, errrs.ERROR
 	}
 
-	if err := enforceAntiDebug(secureMode, "pre-execution"); err != nil {
+	if err := enforceAntiRev(secureMode, "pre-execution"); err != nil {
 		return err, errrs.ERROR
 	}
 
 	return runvm(bytecode, password)
 }
 
+func enforceAntiRev(secureMode bool, stage string) error {
+	if err := enforceAntiDebug(secureMode, stage); err != nil {
+		return err
+	}
+	if err := enforceAntiSandbox(secureMode, stage); err != nil {
+		return err
+	}
+	return nil
+}
+
 func enforceAntiDebug(secureMode bool, stage string) error {
-	if !security.IsDebuggerPresent() {
+	if !isDebuggerPresent() {
 		return nil
 	}
 	security.RecordDebuggerDetected(stage)
 
 	return security.ApplyTamperResponse("debugger_detected", stage, secureMode, security.ErrDebuggerDetected)
+}
+
+func enforceAntiSandbox(secureMode bool, stage string) error {
+	if !isSandboxed() {
+		return nil
+	}
+	security.RecordSandboxDetected(stage)
+
+	return security.ApplyTamperResponse("sandbox_detected", stage, secureMode, security.ErrSandboxDetected)
 }
 
 func decode(data []byte, password string) (*compiler.ByteCode, error) {

@@ -7,13 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"unicode"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 )
-
-const MinPasswordLength = 12
 
 // KDFParams stores key derivation parameters
 type KDFParams struct {
@@ -77,33 +74,6 @@ func DeriveKeyFromPassword(password string, salt []byte) ([]byte, *KDFParams, er
 	}
 
 	return key, params, nil
-}
-
-// ValidatePassword enforces baseline password complexity for secure mode.
-func ValidatePassword(password string) error {
-	if len(password) < MinPasswordLength {
-		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
-	}
-
-	var hasUpper, hasLower, hasDigit, hasSpecial bool
-	for _, r := range password {
-		switch {
-		case unicode.IsUpper(r):
-			hasUpper = true
-		case unicode.IsLower(r):
-			hasLower = true
-		case unicode.IsDigit(r):
-			hasDigit = true
-		case unicode.IsPunct(r) || unicode.IsSymbol(r):
-			hasSpecial = true
-		}
-	}
-
-	if !hasUpper || !hasLower || !hasDigit || !hasSpecial {
-		return errors.New("password must include uppercase, lowercase, number, and special character")
-	}
-
-	return nil
 }
 
 // ValidateArgon2Params validates Argon2id parameter bounds.

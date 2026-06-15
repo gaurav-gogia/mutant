@@ -2,223 +2,168 @@
 
 ## Overview
 
-The sandbox detection module provides comprehensive detection of virtualized environments, containerized systems, and various sandbox implementations across Windows, Linux, and macOS platforms. This feature complements the existing anti-debugging and memory encryption security measures.
+The sandbox detection module identifies containerized and virtualized runtimes
+and feeds that signal into the runtime tamper-response pipeline.
 
-## Why Sandbox Detection?
+Current implementation status:
 
-Sandbox detection is crucial for security-conscious applications because:
+- API implemented: IsSandboxed, DetectSandboxType, GetSandboxIndicators
+- Platform detectors implemented: Windows, Linux, macOS
+- Runtime enforcement integrated in bytecode execution path (runner.Run
+  pre-execution)
+- Telemetry integrated: sandbox_detected counter and audit event
 
-1. **Analysis Prevention**: Detects when the application runs in analysis/testing environments where security measures might be bypassed
-2. **Compliance**: Helps enforce licensing and DRM policies by preventing execution in virtualized/containerized environments
-3. **Threat Intelligence**: Identifies when code is running under observation during incident response
-4. **Security Research**: Prevents malware analysis and reverse engineering in controlled environments
-5. **Behavioral Defense**: Combined with other security features, creates a comprehensive defense strategy
+## API
 
-## API Functions
+### IsSandboxed() bool
 
-### 1. `IsSandboxed() bool`
-
-Returns true if the process is running in any detected sandbox or virtualized environment.
+Returns true when detection confidence is greater than or equal to the built-in
+threshold (currently 70).
 
 ```go
 if security.IsSandboxed() {
-    log.Println("Running in sandboxed environment")
-    // Take appropriate action
+    // High-confidence sandbox/container/vm signal
 }
 ```
 
-### 2. `DetectSandboxType() (string, int)`
+### DetectSandboxType() (string, int)
 
-Returns the specific type of sandbox/VM detected and a confidence level (0-100).
+Returns the most likely environment type and confidence in [0, 100].
+
+Behavior:
+
+- Returns ("none", 0) when no signal is present
+- Confidence is clamped to [0, 100]
+- Type is the highest-scoring class for current platform heuristics
 
 ```go
 sandboxType, confidence := security.DetectSandboxType()
-if confidence > 70 {
-    log.Printf("Detected: %s (confidence: %d%%)\n", sandboxType, confidence)
+if confidence >= 70 {
+    log.Printf("detected %s (%d%%)", sandboxType, confidence)
 }
 ```
 
-**Possible values:**
-- Windows: VMware, VirtualBox, Hyper-V, KVM/QEMU, Windows Defender Sandbox, Parallels, Xen, Cuckoo, Sandboxie, WINE
-- Linux: Docker, Kubernetes, LXC, KVM/QEMU, Cuckoo, systemd-nspawn, VMware, VirtualBox, Xen
-- macOS: macOS App Sandbox, Parallels, VMware Fusion, VirtualBox, UTM, Colima, QEMU
+### GetSandboxIndicators() []string
 
-### 3. `GetSandboxIndicators() []string`
-
-Returns a detailed list of all detected sandbox indicators for logging and analysis.
+Returns normalized, deduplicated indicator strings used by the detector.
 
 ```go
-indicators := security.GetSandboxIndicators()
-for _, indicator := range indicators {
-    log.Println("Sandbox indicator:", indicator)
+for _, indicator := range security.GetSandboxIndicators() {
+    log.Println(indicator)
 }
 ```
 
-## Detection Techniques by Platform
-
-### Windows
-
-1. **Virtual Machine Detection**
-   - VMware: Registry keys, processes, DLLs, MAC address prefix (00:0c:29), CPU brand
-   - VirtualBox: Registry keys, processes, MAC address (08:00:27), DLLs
-   - Hyper-V: Registry keys, CPU features (CPUID), processes
-   - Parallels: Registry keys, processes, MAC address (00:1c:42)
-   - Xen: Registry keys, CPU brand, xenbus drivers
-   - KVM/QEMU: CPU brand indicators
-
-2. **Sandbox Detection**
-   - Windows Defender Sandbox: Device Guard indicators, HVCI, MPAS environment
-   - Sandboxie: Registry, DLL injection detection, environment variables
-   - Cuckoo: Cuckoo DLL detection, environment variables, specific file paths
-   - WINE: Registry, WINE-specific DLLs, environment variables
-
-3. **System Metrics Analysis**
-   - Processor count validation
-   - RAM size analysis
-   - Disk space verification
+## Implemented Detection Signals
 
 ### Linux
 
-1. **Container Detection**
-   - Docker: `/.dockerenv`, cgroup markers, hostname patterns, Docker environment vars
-   - Kubernetes: Service host/port variables, certificate detection
-   - LXC: Process markers, cgroup identification, AppArmor profiles
-   - systemd-nspawn: Environment variable detection, cgroup analysis
+Container and VM heuristics currently include:
 
-2. **Virtual Machine Detection**
-   - KVM/QEMU: CPUID hypervisor detection, DMI product name, `/proc/cpuinfo` analysis
-   - VMware: DMI identification, `/proc/scsi/scsi` analysis
-   - VirtualBox: DMI detection, Guest Additions, kernel modules
-   - Xen: `/proc/xen` detection, DMI markers, xenbus modules
+- Marker files: /.dockerenv, /run/.containerenv, /proc/xen
+- Environment markers: KUBERNETES_SERVICE_HOST, KUBERNETES_SERVICE_PORT
+- Cgroup markers from /proc/1/cgroup and /proc/self/cgroup: docker, containerd,
+  podman, libpod, crio, kubepods, lxc, systemd patterns
+- CPU markers from /proc/cpuinfo: hypervisor, kvm, qemu, vmware, virtualbox, xen
+- DMI markers from /sys/class/dmi/id/*: vmware, virtualbox, kvm/qemu, xen,
+  hyper-v fingerprints
 
-3. **Sandbox Detection**
-   - Cuckoo: Process detection, `/cuckoo/` path, analysis markers
-   - Behavioral sandboxes: Cgroup-based detection
+Potential types include: Docker, Container, Kubernetes, LXC, systemd-nspawn, VM,
+KVM/QEMU, VMware, VirtualBox, Xen, Hyper-V
+
+### Windows
+
+VM/sandbox heuristics currently include:
+
+- Driver/library file markers: vmmouse.sys, vmhgfs.sys, VBoxMouse.sys,
+  VBoxGuest.sys, xenbus.sys, SbieDll.dll
+- Environment markers: SANDBOXIE, CUCKOO, VBOX_INSTALL_PATH
+- Process markers from tasklist: vmtoolsd.exe, vmwaretray.exe, vboxservice.exe,
+  vboxtray.exe, xenservice.exe, qemu-ga.exe, sbiectrl.exe,
+  sandboxiedcomlaunch.exe
+
+Potential types include: VMware, VirtualBox, Xen, KVM/QEMU, Sandboxie, Cuckoo
 
 ### macOS
 
-1. **Virtualization Detection**
-   - Parallels: Application bundles, LaunchDaemon detection, process identification
-   - VMware Fusion: VMware application files, sysctl properties, process detection
-   - VirtualBox: VirtualBox app, Guest Additions, kernel extensions
-   - UTM: UTM application, QEMU processes
-   - QEMU: QEMU executables, CPUID detection
+Virtualization/sandbox heuristics currently include:
 
-2. **Sandbox Detection**
-   - macOS App Sandbox: Environment variables, Home directory container markers, entitlements
-   - Colima: Docker socket detection, Colima VM directories
+- Environment markers: APP_SANDBOX_CONTAINER_ID, DYLD_INSERT_LIBRARIES,
+  COLIMA_HOME
+- Application/file markers: /Applications/VMware Fusion.app,
+  /Applications/VirtualBox.app, /Applications/Parallels Desktop.app,
+  /Applications/UTM.app, /Users/Shared/Parallels, /opt/homebrew/bin/colima
+- Process markers from ps -axo comm: vmware-vmx, vboxservice, vboxclient,
+  prl_tools, qemu-system, colima
 
-## Integration with Other Security Features
+Potential types include: macOS App Sandbox, Colima, VMware Fusion, VirtualBox,
+Parallels, UTM, QEMU
 
-The sandbox detection feature integrates seamlessly with existing security measures:
+## Runtime Enforcement Integration
 
-```go
-package main
+Sandbox detection is enforced in runner.Run at pre-execution stage, after decode
+and after anti-debug pre-execution check.
 
-import (
-    "log"
-    "mutant/security"
-)
+Current flow:
 
-func main() {
-    // Combined security checks
-    if security.IsDebuggerPresent() {
-        log.Fatal("Debugger detected - exiting")
-    }
+1. Signature verification
+2. Anti-debug pre-decode
+3. Decode/decrypt
+4. Anti-debug pre-execution
+5. Anti-sandbox pre-execution
+6. VM run
 
-    if security.IsSandboxed() {
-        log.Fatal("Running in sandbox - exiting")
-    }
+On sandbox detection:
 
-    sandboxType, confidence := security.DetectSandboxType()
-    if confidence > 80 {
-        log.Printf("High-confidence sandbox detected: %s\n", sandboxType)
-    }
+- Event recorded: sandbox_detected
+- Base error: ErrSandboxDetected
+- Response policy resolved by existing tamper policy mechanism
 
-    // Continue with application logic
-}
-```
+Default response behavior:
 
-## Configuration and Customization
+- Secure mode: terminate
+- Compat mode: warn
+- Override via MUTANT_TAMPER_RESPONSE (warn|delay|terminate)
 
-### Adjusting Detection Sensitivity
+## Telemetry
 
-Different applications may need different sensitivity levels:
+Sandbox detection contributes to security telemetry snapshot/export:
 
-```go
-// High security: Detect even low-confidence indicators
-indicators := security.GetSandboxIndicators()
-if len(indicators) > 0 {
-    log.Fatal("Any sandbox indicators detected")
-}
+- sandbox_detected
 
-// Medium security: Require type detection
-if sandboxType, conf := security.DetectSandboxType(); conf > 70 {
-    log.Fatal("Likely sandbox environment")
-}
+Audit stream integration (when MUTANT_SECURITY_AUDIT=1):
 
-// Low security: Only block on definite detection
-if security.IsSandboxed() {
-    log.Fatal("Sandbox definitely detected")
-}
-```
+- event=sandbox_detected stage=<stage>
 
-## Performance Considerations
+Telemetry export file is controlled by:
 
-- **Startup Impact**: Minimal - checks are fast and parallelizable
-- **Memory Usage**: Negligible - primarily reads system information
-- **Platform Optimization**: Platform-specific implementations for efficiency
-
-Benchmark results show:
-- `IsSandboxed()`: ~1-5ms per call
-- `DetectSandboxType()`: ~1-5ms per call
-- `GetSandboxIndicators()`: ~2-10ms per call
-
-## Security Best Practices
-
-1. **Combine with Anti-Debugging**: Use both `IsDebuggerPresent()` and `IsSandboxed()` for comprehensive protection
-2. **Don't Advertise**: Avoid logging which detection method failed
-3. **Gradual Response**: Consider having different response levels (warn, restrict, terminate)
-4. **Regular Updates**: VM and sandbox detection signatures evolve - keep the library updated
-5. **Timing Analysis**: Be aware that multiple detection calls might be noticeable
-
-## Future Enhancements
-
-Potential additions to the sandbox detection module:
-
-1. **Cloud Platform Detection** (AWS, Azure, GCP metadata services)
-2. **Emulator Detection** (Android emulators, game console emulators)
-3. **Network-based Detection** (analyzing network stack for VM indicators)
-4. **Memory Signature Analysis** (detecting hypervisor memory patterns)
-5. **Custom Sandbox Registry** (allowing users to define custom detection rules)
+- MUTANT_SECURITY_TELEMETRY_FILE
 
 ## Testing
 
-The sandbox detection module includes comprehensive tests:
+Relevant tests:
+
+- security package sandbox API contract and telemetry coverage
+- runner package anti-sandbox policy behavior (secure terminate, compat warn)
+
+Run:
 
 ```bash
-go test ./security -v -run TestSandbox
-go test ./security -bench BenchmarkSandbox -benchmem
+go test ./security ./runner
 ```
-
-## Platform Support
-
-- ✅ **Windows** (Vista and later)
-- ✅ **Linux** (all distributions)
-- ✅ **macOS** (10.10+)
-- ⚠️ **Other platforms** (stub implementations available)
 
 ## Known Limitations
 
-1. Some sophisticated VMs may not be detected
-2. Container detection is environment-specific
-3. Sandboxes with full OS simulation are harder to detect
-4. False positives possible in legitimate virtualized environments
-5. Requires appropriate file system and process permissions
+1. Heuristic coverage is intentionally lightweight and may miss sophisticated
+   environments.
+2. False positives are possible in legitimate virtualized/containerized
+   deployments.
+3. Some signals depend on process/file visibility and OS permissions.
+4. Confidence scores are heuristic, not cryptographic guarantees.
 
-## Related Functions
+## Future Enhancements
 
-- `security.IsDebuggerPresent()` - Debugger detection
-- `security.SecureMemory` - Memory encryption
-- `security.RandomBytes()` - Cryptographic randomness
-- `security.SignData()` - Cryptographic signing
+1. Cloud metadata-based environment detection.
+2. Additional sandbox frameworks and emulator fingerprints.
+3. Policy controls specific to sandbox events (separate from debugger/integrity
+   policies).
+4. Configurable confidence threshold for IsSandboxed.

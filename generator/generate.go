@@ -24,12 +24,6 @@ import (
 // password: optional password for encryption (empty string for deterministic encryption)
 // privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
 func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
-	if password != "" {
-		if err := security.ValidatePassword(password); err != nil {
-			return err, errrs.ERROR, nil
-		}
-	}
-
 	data, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
@@ -60,7 +54,7 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool, password stri
 	}
 
 	if release {
-		if goos == WINDOWS {
+		if goos == global.WINDOWS {
 			dstpath += global.WindowsPE32ExecutableExtension
 		}
 

@@ -15,6 +15,14 @@ const (
 
 	LocalSigningPrivateKeyFileName = "ed25519_private_key.hex"
 	LocalSigningPublicKeyFileName  = "ed25519_public_key.hex"
+
+	DOCKER = "Docker"
+)
+
+// Linux sandbox detection files
+const (
+	LNX_DCKR_ENV_0 = "/.dockerenv"
+	LNX_DCKR_ENV_1 = "linux:file:/.dockerenv"
 )
 
 // Error definitions
@@ -30,6 +38,9 @@ var (
 
 	// ErrDebuggerDetected error is returned when a debugger is detected
 	ErrDebuggerDetected = errors.New("debugger detected, execution halted for security")
+
+	// ErrSandboxDetected error is returned when a sandbox/container/vm is detected
+	ErrSandboxDetected = errors.New("sandbox detected, execution halted for security")
 
 	// ErrUntrustedSigner error is returned when signed payload key does not match trusted key
 	ErrUntrustedSigner = errors.New("untrusted signer public key")

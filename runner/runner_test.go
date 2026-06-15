@@ -20,7 +20,7 @@ func TestRunSecureModeRejectsMalformedPayload(t *testing.T) {
 	t.Setenv(security.TrustedPublicKeyEnv, toHex(t, keyPair.PublicKey))
 
 	path := writeTempPayload(t, []byte("legacy-format-payload"))
-	err, errType := Run(path, "", true)
+	err, errType := Run(path, "", true, true)
 	if err == nil {
 		t.Fatalf("expected secure mode to reject malformed payload")
 	}
@@ -38,7 +38,7 @@ func TestRunSecureModeBootstrapsLocalKeysWhenTrustedEnvMissing(t *testing.T) {
 	t.Setenv(security.TrustedPublicKeyEnv, "")
 
 	path := writeTempPayload(t, []byte("legacy-format-payload"))
-	err, errType := Run(path, "", true)
+	err, errType := Run(path, "", true, true)
 	if err == nil {
 		t.Fatalf("expected malformed payload to fail")
 	}
@@ -64,7 +64,7 @@ func TestRunCompatModeWarnsAndContinuesOnMalformedPayload(t *testing.T) {
 	t.Setenv(security.TamperResponseEnv, security.TamperResponseWarn)
 
 	path := writeTempPayload(t, []byte("legacy-format-payload"))
-	err, errType := Run(path, "", false)
+	err, errType := Run(path, "", false, false)
 	if err == nil {
 		t.Fatalf("expected compat mode to fail later during decode")
 	}
@@ -92,7 +92,7 @@ func TestRunSecureModeRejectsTamperedSignedPayload(t *testing.T) {
 	tampered := tamperSignedPublicKey(t, string(signed))
 	path := writeTempPayload(t, []byte(tampered))
 
-	err, errType := Run(path, "", true)
+	err, errType := Run(path, "", true, true)
 	if err == nil {
 		t.Fatalf("expected secure mode to reject tampered signed payload")
 	}
@@ -118,7 +118,7 @@ func TestRunSecureModeAcceptsSignatureThenFailsDecode(t *testing.T) {
 	}
 
 	path := writeTempPayload(t, signed)
-	err, errType := Run(path, "", true)
+	err, errType := Run(path, "", true, true)
 	if err == nil {
 		t.Fatalf("expected decode failure after signature verification")
 	}
@@ -127,6 +127,53 @@ func TestRunSecureModeAcceptsSignatureThenFailsDecode(t *testing.T) {
 	}
 	if errors.Is(err, security.ErrUntrustedSigner) || errors.Is(err, security.ErrWrongSignature) {
 		t.Fatalf("expected non-signature decode error after successful signature verification, got: %v", err)
+	}
+}
+
+func TestRunSecureModeWithoutSignerAuthFlagSkipsSignatureVerification(t *testing.T) {
+	t.Setenv(security.TamperResponseEnv, "")
+
+	path := writeTempPayload(t, []byte("legacy-format-payload"))
+	err, errType := Run(path, "", true, false)
+	if err == nil {
+		t.Fatalf("expected malformed payload to fail decode")
+	}
+	if errType != errrs.ERROR {
+		t.Fatalf("expected errrs.ERROR, got %q", errType)
+	}
+	if errors.Is(err, security.ErrWrongSignature) || errors.Is(err, security.ErrUntrustedSigner) {
+		t.Fatalf("expected secure mode to skip signer verification by default, got: %v", err)
+	}
+}
+
+func TestEnforceAntiSandboxSecureModeTerminates(t *testing.T) {
+	originalSandbox := isSandboxed
+	isSandboxed = func() bool { return true }
+	defer func() {
+		isSandboxed = originalSandbox
+	}()
+
+	t.Setenv(security.TamperResponseEnv, "")
+	err := enforceAntiSandbox(true, "test-stage")
+	if err == nil {
+		t.Fatalf("expected secure mode to terminate on sandbox detection")
+	}
+	if !errors.Is(err, security.ErrSandboxDetected) {
+		t.Fatalf("expected ErrSandboxDetected, got: %v", err)
+	}
+}
+
+func TestEnforceAntiSandboxCompatModeWarnsAndContinues(t *testing.T) {
+	originalSandbox := isSandboxed
+	isSandboxed = func() bool { return true }
+	defer func() {
+		isSandboxed = originalSandbox
+	}()
+
+	t.Setenv(security.TamperResponseEnv, security.TamperResponseWarn)
+	err := enforceAntiSandbox(false, "test-stage")
+	if err != nil {
+		t.Fatalf("expected compat warn mode to continue, got: %v", err)
 	}
 }
 
