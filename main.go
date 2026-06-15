@@ -7,6 +7,7 @@ import (
 	"mutant/cli"
 	"mutant/global"
 	"mutant/mutil"
+	"mutant/runner"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,34 @@ const (
 )
 
 func main() {
+	if shouldAttemptEmbeddedRun(os.Args) {
+		executablePath, err := os.Executable()
+		if err == nil {
+			hasStandalonePayload, payloadErr := runner.HasStandalonePayload(executablePath)
+			if payloadErr != nil {
+				fmt.Println(payloadErr)
+				os.Exit(1)
+			}
+
+			if hasStandalonePayload {
+				password := extractPasswordArg(os.Args)
+				devMode := hasDevModeArg(os.Args)
+				secureMode := extractSecurityModeArg(os.Args)
+				enforceSignerAuth := extractSignerAuthArg(os.Args)
+
+				if devMode {
+					secureMode = false
+				}
+				if password == "" && devMode {
+					password = mutil.GetPwd()
+				}
+
+				cli.RunCode(executablePath, password, secureMode, enforceSignerAuth)
+				return
+			}
+		}
+	}
+
 	if len(os.Args) == 1 {
 		cli.RunRepl(VERSION, false)
 		return
@@ -61,11 +90,15 @@ func main() {
 			fmt.Println("\t\tOptional: --signer-auth to enforce trusted signer key verification in secure mode.")
 			fmt.Println("\t\tDefault is --secure (fail-closed security behavior).")
 			fmt.Println()
-			fmt.Println("\tmutant gen -src <FILENAME>.mut [-password|-pwd]")
+			fmt.Println("\tmutant gen <FILENAME>.mut [-password|-pwd]")
 			fmt.Println("\t\tCompile mutant source code into bytecode with optional password.")
+			fmt.Println("\tmutant gen --release-assets [-out <DIR>]")
+			fmt.Println("\t\tGenerate embedded release runtime assets files (index + data/*.bin).")
+			fmt.Println("\t\tAlso supported: mutant gen assets [-out <DIR>].")
 			fmt.Println()
-			fmt.Println("\tmutant release -src <FILENAME>.mut [-os | -arch]")
+			fmt.Println("\tmutant release <FILENAME>.mut [-os | -arch]")
 			fmt.Println("\t\tCompile mutant source code into standalone, independent binary executable.")
+			fmt.Println("\t\tRelease requires embedded runtime assets for target OS/ARCH.")
 			fmt.Println("")
 			fmt.Println("\t\tOptional: -password|-pwd <STRING> to encrypt output with a password.")
 			fmt.Println("\t\tIf omitted, deterministic compatibility mode (weaker obfuscation) is used.")
@@ -137,6 +170,18 @@ func main() {
 		}
 	}
 
+	if len(os.Args) >= 2 && os.Args[1] == GENCMD && hasReleaseAssetsArg(os.Args) {
+		out, err := prepareReleaseAssetsGeneration(os.Args)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		fmt.Println("Generating embedded release runtime assets....")
+		cli.GenerateReleaseAssets(out)
+		return
+	}
+
 	if len(os.Args) >= 2 && (os.Args[1] == GENCMD || os.Args[1] == RUNCMD) {
 		src, password, err := prepareGenRun(os.Args)
 		if err != nil {
@@ -160,6 +205,26 @@ func main() {
 		cli.CompileCode(src, goos, goarch, true, password)
 		return
 	}
+}
+
+func shouldAttemptEmbeddedRun(args []string) bool {
+	if len(args) == 1 {
+		return true
+	}
+
+	for _, arg := range args[1:] {
+		switch arg {
+		case RELEASECMD, GENCMD, RUNCMD, "-h", "--help", "-v", "--version", "-em", "--enableMacros":
+			return false
+		}
+
+		if strings.HasSuffix(arg, global.MutantSourceCodeFileExtention) ||
+			strings.HasSuffix(arg, global.MutantByteCodeCompiledFileExtension) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // extractSecurityModeArg scans args for explicit mode flags.
@@ -236,6 +301,14 @@ func prepareRelease(args []string) (string, string, string, string, error) {
 		return "", "", "", "", err
 	}
 
+	if src == "" {
+		src = findSourceArg(args[2:])
+	}
+
+	if password == "" {
+		password = extractPasswordArg(args)
+	}
+
 	if releasecmd.Parsed() {
 		if src == "" {
 			return "", "", "", "", errors.New("mutant source code file path is required, please use -src flag")
@@ -269,6 +342,14 @@ func prepareGenRun(args []string) (string, string, error) {
 		return "", "", err
 	}
 
+	if src == "" {
+		src = findSourceArg(args[2:])
+	}
+
+	if password == "" {
+		password = extractPasswordArg(args)
+	}
+
 	if gencmd.Parsed() {
 		if src == "" {
 			return "", "", errors.New("mutant source code file path is required, please use -src flag")
@@ -287,4 +368,61 @@ func prepareGenRun(args []string) (string, string, error) {
 	}
 
 	return "", "", errors.New("could not parse values")
+}
+
+func hasReleaseAssetsArg(args []string) bool {
+	if len(args) >= 3 && strings.EqualFold(args[2], "assets") {
+		return true
+	}
+
+	for _, arg := range args {
+		if arg == "--release-assets" || arg == "-release-assets" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func prepareReleaseAssetsGeneration(args []string) (string, error) {
+	var out string
+
+	gencmd := flag.NewFlagSet(GENCMD, flag.ExitOnError)
+	gencmd.Bool("release-assets", false, "Generate embedded release runtime assets")
+	gencmd.StringVar(&out, "out", "releaseassets", "Directory for generated release assets")
+
+	if err := gencmd.Parse(args[2:]); err != nil {
+		return "", err
+	}
+
+	if out == "releaseassets" {
+		for _, arg := range gencmd.Args() {
+			if strings.EqualFold(arg, "assets") {
+				continue
+			}
+			out = arg
+			break
+		}
+	}
+
+	absOut, err := filepath.Abs(out)
+	if err != nil {
+		return "", err
+	}
+
+	return absOut, nil
+}
+
+func findSourceArg(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		if strings.HasSuffix(arg, global.MutantSourceCodeFileExtention) {
+			return arg
+		}
+	}
+
+	return ""
 }

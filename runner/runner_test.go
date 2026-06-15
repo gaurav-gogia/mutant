@@ -1,6 +1,9 @@
 package runner
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +13,48 @@ import (
 	"mutant/errrs"
 	"mutant/security"
 )
+
+func TestExtractStandaloneSignedCodeValidTrailer(t *testing.T) {
+	payload := []byte("signed-payload")
+	binaryData := makeStandaloneBinaryBlob(payload)
+
+	extracted, err := extractStandaloneSignedCode(binaryData)
+	if err != nil {
+		t.Fatalf("expected extraction to succeed: %v", err)
+	}
+
+	if !bytes.Equal(extracted, payload) {
+		t.Fatalf("unexpected payload extracted")
+	}
+}
+
+func TestExtractStandaloneSignedCodeRejectsChecksumMismatch(t *testing.T) {
+	payload := []byte("signed-payload")
+	binaryData := makeStandaloneBinaryBlob(payload)
+	binaryData[len(binaryData)-1] = 0x42
+
+	_, err := extractStandaloneSignedCode(binaryData)
+	if err == nil {
+		t.Fatalf("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch error, got: %v", err)
+	}
+}
+
+func TestHasStandalonePayloadReportsPresence(t *testing.T) {
+	payload := []byte("signed-payload")
+	binaryData := makeStandaloneBinaryBlob(payload)
+
+	path := writeTempPayload(t, binaryData)
+	hasPayload, err := HasStandalonePayload(path)
+	if err != nil {
+		t.Fatalf("expected payload check to succeed: %v", err)
+	}
+	if !hasPayload {
+		t.Fatalf("expected standalone payload to be detected")
+	}
+}
 
 func TestRunSecureModeRejectsMalformedPayload(t *testing.T) {
 	keyPair, err := security.GenerateKeyPair()
@@ -218,4 +263,25 @@ func toHex(t *testing.T, b []byte) string {
 		out[i*2+1] = hex[v&0x0f]
 	}
 	return string(out)
+}
+
+func makeStandaloneBinaryBlob(payload []byte) []byte {
+	prefix := []byte("runtime-binary")
+	checksum := sha256.Sum256(payload)
+
+	trailer := make([]byte, 0, security.StandaloneTailSize)
+	trailer = append(trailer, []byte(security.StandaloneTailMarker)...)
+	trailer = append(trailer, security.StandaloneTailV1)
+
+	lenBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(lenBuf, uint64(len(payload)))
+	trailer = append(trailer, lenBuf...)
+	trailer = append(trailer, checksum[:]...)
+
+	blob := make([]byte, 0, len(prefix)+len(payload)+len(trailer))
+	blob = append(blob, prefix...)
+	blob = append(blob, payload...)
+	blob = append(blob, trailer...)
+
+	return blob
 }

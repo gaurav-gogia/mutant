@@ -2,7 +2,10 @@ package runner
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"mutant/builtin"
@@ -30,6 +33,11 @@ func Run(srcpath string, password string, secureMode bool, enforceSignerAuth boo
 	}
 
 	signedCode, err := os.ReadFile(srcpath)
+	if err != nil {
+		return err, errrs.ERROR
+	}
+
+	signedCode, err = extractStandaloneSignedCode(signedCode)
 	if err != nil {
 		return err, errrs.ERROR
 	}
@@ -145,6 +153,72 @@ func decryptCode(signedCode []byte, password string) ([]byte, error) {
 	}
 
 	return decodedData, nil
+}
+
+func extractStandaloneSignedCode(binaryData []byte) ([]byte, error) {
+	if len(binaryData) < security.StandaloneTailSize {
+		return binaryData, nil
+	}
+
+	trailerStart := len(binaryData) - security.StandaloneTailSize
+	trailer := binaryData[trailerStart:]
+
+	if !bytes.Equal(trailer[:len(security.StandaloneTailMarker)], []byte(security.StandaloneTailMarker)) {
+		return binaryData, nil
+	}
+
+	versionOffset := len(security.StandaloneTailMarker)
+	if trailer[versionOffset] != security.StandaloneTailV1 {
+		return nil, fmt.Errorf("unsupported standalone trailer version: %d", trailer[versionOffset])
+	}
+
+	lengthStart := versionOffset + 1
+	lengthEnd := lengthStart + 8
+	payloadLength := binary.BigEndian.Uint64(trailer[lengthStart:lengthEnd])
+
+	if payloadLength == 0 {
+		return nil, errors.New("invalid standalone payload length: 0")
+	}
+
+	if payloadLength > uint64(trailerStart) {
+		return nil, fmt.Errorf("invalid standalone payload length: %d", payloadLength)
+	}
+
+	payloadStart := trailerStart - int(payloadLength)
+	payload := binaryData[payloadStart:trailerStart]
+
+	expectedChecksum := trailer[lengthEnd:]
+	actualChecksum := sha256.Sum256(payload)
+	if !bytes.Equal(expectedChecksum, actualChecksum[:]) {
+		return nil, errors.New("standalone payload checksum mismatch")
+	}
+
+	return payload, nil
+}
+
+func HasStandalonePayload(srcpath string) (bool, error) {
+	binaryData, err := os.ReadFile(srcpath)
+	if err != nil {
+		return false, err
+	}
+
+	if len(binaryData) < security.StandaloneTailSize {
+		return false, nil
+	}
+
+	trailerStart := len(binaryData) - security.StandaloneTailSize
+	trailer := binaryData[trailerStart:]
+
+	if !bytes.Equal(trailer[:len(security.StandaloneTailMarker)], []byte(security.StandaloneTailMarker)) {
+		return false, nil
+	}
+
+	versionOffset := len(security.StandaloneTailMarker)
+	if trailer[versionOffset] != security.StandaloneTailV1 {
+		return false, fmt.Errorf("unsupported standalone trailer version: %d", trailer[versionOffset])
+	}
+
+	return true, nil
 }
 
 func runvm(bytecode *compiler.ByteCode, password string) (error, errrs.ErrorType) {

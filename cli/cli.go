@@ -50,6 +50,17 @@ func CompileCode(src, goos, goarch string, release bool, password string) {
 	fmt.Println("Compiled in:", time.Since(start))
 }
 
+func GenerateReleaseAssets(outputPath string) {
+	start := time.Now()
+
+	if err := generator.GenerateReleaseAssets(outputPath); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("Generated in:", time.Since(start))
+}
+
 func RunCode(src string, password string, secureMode bool, enforceSignerAuth bool) {
 	srcpath, err := filepath.Abs(src)
 	if err != nil {

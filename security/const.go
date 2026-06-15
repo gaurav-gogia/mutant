@@ -6,6 +6,9 @@ import "errors"
 const (
 	HEADER               = "MUT"
 	FOOTER               = "ANT"
+	StandaloneTailMarker = "MUTANTBC"
+	StandaloneTailV1     = byte(1)
+	StandaloneTailSize   = 49
 	ENCSIG               = "MUTANT"
 	SEPERATOR            = "|"
 	OUTER_SEPERATOR      = "|-|"
