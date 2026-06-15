@@ -1,10 +1,13 @@
 package vm
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"mutant/code"
 	"mutant/compiler"
+	"mutant/mutil"
 	"mutant/security"
 )
 
@@ -70,4 +73,32 @@ func tamperedVMForPolicyTest() *VM {
 	frame := vm.currentFrame()
 	frame.cl.Fn.Instructions[0] ^= 0xFF
 	return vm
+}
+
+func TestValidateSecurityCheckOpcodesPresent(t *testing.T) {
+	ins := append(code.Make(code.OpChkDbg), code.Make(code.OpChkSnd)...)
+	ins = append(ins, code.Make(code.OpNull)...)
+
+	bc := &compiler.ByteCode{Instructions: ins}
+	encrypted := mutil.EncryptByteCode(bc, "testpwd")
+	vm := NewWithPassword(encrypted, "testpwd")
+
+	if err := vm.validateSecurityCheckOpcodes("before-execution"); err != nil {
+		t.Fatalf("expected required security opcodes to be present: %v", err)
+	}
+}
+
+func TestValidateSecurityCheckOpcodesMissing(t *testing.T) {
+	bc := &compiler.ByteCode{Instructions: code.Make(code.OpNull)}
+	encrypted := mutil.EncryptByteCode(bc, "testpwd")
+	vm := NewWithPassword(encrypted, "testpwd")
+
+	err := vm.validateSecurityCheckOpcodes("before-execution")
+	if err == nil {
+		t.Fatalf("expected missing security opcode validation error")
+	}
+
+	if !strings.Contains(err.Error(), "required security check opcodes missing") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
 }

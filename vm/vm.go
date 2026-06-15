@@ -26,6 +26,8 @@ type VM struct {
 	integrityEvery  uint64
 	integrityJitter uint64
 	frameIntegrity  map[*object.CompiledFunction][32]byte
+
+	enforceSecurityCheckOpcodes bool
 }
 
 func New(bc *compiler.ByteCode) *VM {
@@ -52,12 +54,15 @@ func New(bc *compiler.ByteCode) *VM {
 		integrityEvery:  64,
 		integrityJitter: uint64(len(bc.Instructions)%31 + 7),
 		frameIntegrity:  frameIntegrity,
+
+		enforceSecurityCheckOpcodes: false,
 	}
 }
 
 func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
 	vm := New(bc)
 	vm.password = password
+	vm.enforceSecurityCheckOpcodes = true
 	return vm
 }
 
@@ -78,6 +83,10 @@ func (vm *VM) Run() error {
 	var ins code.Instructions
 	var op code.Opcode
 
+	if err := vm.validateSecurityCheckOpcodes("before-execution"); err != nil {
+		return err
+	}
+
 	for vm.currentFrame().ip < len(vm.currentFrame().Instructions())-1 {
 		if err := vm.runIntegrityProbes(); err != nil {
 			return err
@@ -96,6 +105,14 @@ func (vm *VM) Run() error {
 		op = code.Opcode(opcodeByte)
 
 		switch op {
+		case code.OpChkDbg:
+			if security.IsDebuggerPresent() {
+				return security.ErrDebuggerDetected
+			}
+		case code.OpChkSnd:
+			if security.IsSandboxed() {
+				return security.ErrSandboxDetected
+			}
 		case code.OpConstant:
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpConstant: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
@@ -327,7 +344,90 @@ func (vm *VM) Run() error {
 			vm.pop()
 		}
 	}
+
+	if err := vm.validateSecurityCheckOpcodes("after-execution"); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (vm *VM) validateSecurityCheckOpcodes(stage string) error {
+	if !vm.enforceSecurityCheckOpcodes {
+		return nil
+	}
+
+	foundDbg, foundSnd, err := vm.scanSecurityCheckOpcodes()
+	if err != nil {
+		return err
+	}
+
+	if !foundDbg || !foundSnd {
+		return fmt.Errorf("required security check opcodes missing %s: OpChkDbg=%t OpChkSnd=%t", stage, foundDbg, foundSnd)
+	}
+
+	return nil
+}
+
+func (vm *VM) scanSecurityCheckOpcodes() (bool, bool, error) {
+	foundDbg := false
+	foundSnd := false
+
+	mainFoundDbg, mainFoundSnd, err := vm.scanInstructionsForSecurityCheckOpcodes(vm.currentFrame().Instructions())
+	if err != nil {
+		return false, false, err
+	}
+	foundDbg = foundDbg || mainFoundDbg
+	foundSnd = foundSnd || mainFoundSnd
+
+	for _, constant := range vm.constants {
+		compiledFn, ok := constant.(*object.CompiledFunction)
+		if !ok {
+			continue
+		}
+
+		fnFoundDbg, fnFoundSnd, scanErr := vm.scanInstructionsForSecurityCheckOpcodes(compiledFn.Instructions)
+		if scanErr != nil {
+			return false, false, scanErr
+		}
+		foundDbg = foundDbg || fnFoundDbg
+		foundSnd = foundSnd || fnFoundSnd
+	}
+
+	return foundDbg, foundSnd, nil
+}
+
+func (vm *VM) scanInstructionsForSecurityCheckOpcodes(ins code.Instructions) (bool, bool, error) {
+	foundDbg := false
+	foundSnd := false
+
+	for i := 0; i < len(ins); {
+		opcodeByte, err := security.SecureXOROneAt(ins[i], int64(vm.inslen), vm.password, int64(i))
+		if err != nil {
+			return false, false, err
+		}
+
+		op := code.Opcode(opcodeByte)
+		if op == code.OpChkDbg {
+			foundDbg = true
+		}
+		if op == code.OpChkSnd {
+			foundSnd = true
+		}
+
+		def, err := code.Lookup(byte(op))
+		if err != nil {
+			return false, false, err
+		}
+
+		next := 1
+		for _, width := range def.OperandWidths {
+			next += width
+		}
+		i += next
+	}
+
+	return foundDbg, foundSnd, nil
 }
 
 func (vm *VM) runIntegrityProbes() error {

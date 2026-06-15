@@ -122,6 +122,7 @@ func compile(data []byte, password string, privateKey []byte) ([]byte, error, er
 	}
 
 	comp := compiler.NewWithState(symbolTable, constants)
+	comp.EnableSecurityOpcodeInjection()
 	if err := comp.Compile(program); err != nil {
 		return nil, err, errrs.COMPILER_ERROR, nil
 	}

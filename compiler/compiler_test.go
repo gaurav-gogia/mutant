@@ -763,6 +763,39 @@ func TestFunctionCalls(t *testing.T) {
 	runCompilerTests(t, tests)
 }
 
+func TestSecurityOpcodeInjection(t *testing.T) {
+	program := parse("let x = 1; x + 2;")
+
+	compiler := New()
+	compiler.EnableSecurityOpcodeInjection()
+
+	if err := compiler.Compile(program); err != nil {
+		t.Fatalf("compiler error: %s", err)
+	}
+
+	bytecode := compiler.ByteCode()
+
+	hasChkDbg := false
+	hasChkSnd := false
+	for i := 0; i < len(bytecode.Instructions); i++ {
+		op := code.Opcode(bytecode.Instructions[i])
+		if op == code.OpChkDbg {
+			hasChkDbg = true
+		}
+		if op == code.OpChkSnd {
+			hasChkSnd = true
+		}
+	}
+
+	if !hasChkDbg {
+		t.Fatalf("expected OpChkDbg to be present in instructions")
+	}
+
+	if !hasChkSnd {
+		t.Fatalf("expected OpChkSnd to be present in instructions")
+	}
+}
+
 func TestBuiltins(t *testing.T) {
 	tests := []compilerTestCase{
 		{

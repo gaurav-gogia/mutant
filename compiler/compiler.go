@@ -1,6 +1,8 @@
 package compiler
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"mutant/ast"
 	"mutant/builtin"
@@ -14,6 +16,10 @@ type Compiler struct {
 	symbolTable *SymbolTable
 	scopes      []CompilationScope
 	scopeIndex  int
+
+	injectSecurityChecks bool
+	hasChkDbg            bool
+	hasChkSnd            bool
 }
 
 type ByteCode struct {
@@ -59,6 +65,10 @@ func NewWithState(st *SymbolTable, constants []object.Object) *Compiler {
 	return compiler
 }
 
+func (c *Compiler) EnableSecurityOpcodeInjection() {
+	c.injectSecurityChecks = true
+}
+
 func (c *Compiler) Compile(node ast.Node) error {
 	switch node := node.(type) {
 	case *ast.Program:
@@ -66,6 +76,7 @@ func (c *Compiler) Compile(node ast.Node) error {
 			if err := c.Compile(s); err != nil {
 				return err
 			}
+			c.maybeEmitRandomSecurityCheckOpcodes()
 		}
 	case *ast.BlockStatement:
 		for _, s := range node.Statements {
@@ -279,10 +290,55 @@ func (c *Compiler) Compile(node ast.Node) error {
 }
 
 func (c *Compiler) ByteCode() *ByteCode {
+	if c.injectSecurityChecks {
+		c.ensureRequiredSecurityCheckOpcodes()
+	}
+
 	return &ByteCode{
 		Instructions: c.currentInstructions(),
 		Constants:    c.constants,
 	}
+}
+
+func (c *Compiler) maybeEmitRandomSecurityCheckOpcodes() {
+	if !c.injectSecurityChecks {
+		return
+	}
+
+	if randomChance(3) {
+		c.emit(code.OpChkDbg)
+		c.hasChkDbg = true
+	}
+
+	if randomChance(3) {
+		c.emit(code.OpChkSnd)
+		c.hasChkSnd = true
+	}
+}
+
+func (c *Compiler) ensureRequiredSecurityCheckOpcodes() {
+	if !c.hasChkDbg {
+		c.emit(code.OpChkDbg)
+		c.hasChkDbg = true
+	}
+
+	if !c.hasChkSnd {
+		c.emit(code.OpChkSnd)
+		c.hasChkSnd = true
+	}
+}
+
+func randomChance(mod uint32) bool {
+	if mod == 0 {
+		return false
+	}
+
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return false
+	}
+
+	return binary.BigEndian.Uint32(b)%mod == 0
 }
 
 func (c *Compiler) addConstant(obj object.Object) int {
