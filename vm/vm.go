@@ -10,6 +10,7 @@ import (
 	"mutant/mutil"
 	"mutant/object"
 	"mutant/security"
+	"os"
 )
 
 // VM structure defines virtual machine
@@ -26,9 +27,18 @@ type VM struct {
 	integrityEvery  uint64
 	integrityJitter uint64
 	frameIntegrity  map[*object.CompiledFunction][32]byte
+	secureMode      bool
 
 	enforceSecurityCheckOpcodes bool
 }
+
+var (
+	isDebuggerPresent  = security.IsDebuggerPresent
+	isSandboxed        = security.IsSandboxed
+	logSecurityWarning = func(event, stage string) {
+		fmt.Fprintf(os.Stderr, "[security] event=%s stage=%s action=warn\n", event, stage)
+	}
+)
 
 func New(bc *compiler.ByteCode) *VM {
 	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
@@ -54,26 +64,41 @@ func New(bc *compiler.ByteCode) *VM {
 		integrityEvery:  64,
 		integrityJitter: uint64(len(bc.Instructions)%31 + 7),
 		frameIntegrity:  frameIntegrity,
+		secureMode:      true,
 
 		enforceSecurityCheckOpcodes: false,
 	}
 }
 
 func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
+	return NewWithPasswordMode(bc, password, true)
+}
+
+func NewWithPasswordMode(bc *compiler.ByteCode, password string, secureMode bool) *VM {
 	vm := New(bc)
 	vm.password = password
+	vm.secureMode = secureMode
 	vm.enforceSecurityCheckOpcodes = true
 	return vm
 }
 
 func NewWithGlobalStore(bc *compiler.ByteCode, globals []object.Object) *VM {
-	vm := New(bc)
-	vm.globals = globals
-	return vm
+	return NewWithGlobalStoreMode(bc, globals, true)
 }
 
 func NewWithPasswordAndGlobalStore(bc *compiler.ByteCode, password string, globals []object.Object) *VM {
-	vm := NewWithPassword(bc, password)
+	return NewWithPasswordAndGlobalStoreMode(bc, password, globals, true)
+}
+
+func NewWithGlobalStoreMode(bc *compiler.ByteCode, globals []object.Object, secureMode bool) *VM {
+	vm := New(bc)
+	vm.globals = globals
+	vm.secureMode = secureMode
+	return vm
+}
+
+func NewWithPasswordAndGlobalStoreMode(bc *compiler.ByteCode, password string, globals []object.Object, secureMode bool) *VM {
+	vm := NewWithPasswordMode(bc, password, secureMode)
 	vm.globals = globals
 	return vm
 }
@@ -106,11 +131,21 @@ func (vm *VM) Run() error {
 
 		switch op {
 		case code.OpChkDbg:
-			if security.IsDebuggerPresent() {
+			if isDebuggerPresent() {
+				security.RecordDebuggerDetected("vm-run")
+				if !vm.secureMode {
+					logSecurityWarning("debugger_detected", "vm-run")
+					continue
+				}
 				return security.ErrDebuggerDetected
 			}
 		case code.OpChkSnd:
-			if security.IsSandboxed() {
+			if isSandboxed() {
+				security.RecordSandboxDetected("vm-run")
+				if !vm.secureMode {
+					logSecurityWarning("sandbox_detected", "vm-run")
+					continue
+				}
 				return security.ErrSandboxDetected
 			}
 		case code.OpConstant:

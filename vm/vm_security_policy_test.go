@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +102,39 @@ func TestValidateSecurityCheckOpcodesMissing(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "required security check opcodes missing") {
 		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestVMDevModeWarnsOnSecurityOpcodes(t *testing.T) {
+	prevDebugger := isDebuggerPresent
+	prevSandbox := isSandboxed
+	prevLogger := logSecurityWarning
+	defer func() {
+		isDebuggerPresent = prevDebugger
+		isSandboxed = prevSandbox
+		logSecurityWarning = prevLogger
+	}()
+
+	isDebuggerPresent = func() bool { return true }
+	isSandboxed = func() bool { return true }
+
+	var warnings bytes.Buffer
+	logSecurityWarning = func(event, stage string) {
+		_, _ = io.WriteString(&warnings, event+":"+stage+"\n")
+	}
+
+	ins := append(code.Make(code.OpChkDbg), code.Make(code.OpChkSnd)...)
+	ins = append(ins, code.Make(code.OpNull)...)
+
+	bc := &compiler.ByteCode{Instructions: ins}
+	encrypted := mutil.EncryptByteCode(bc, "testpwd")
+	vm := NewWithPasswordMode(encrypted, "testpwd", false)
+
+	if err := vm.Run(); err != nil {
+		t.Fatalf("expected dev mode VM to continue, got: %v", err)
+	}
+
+	if got := warnings.String(); !strings.Contains(got, "debugger_detected:vm-run") || !strings.Contains(got, "sandbox_detected:vm-run") {
+		t.Fatalf("expected warning log entries, got: %q", got)
 	}
 }

@@ -86,7 +86,7 @@ func Run(srcpath string, password string, secureMode bool, enforceSignerAuth boo
 		return err, errrs.ERROR
 	}
 
-	return runvm(bytecode, password)
+	return runvm(bytecode, password, secureMode)
 }
 
 func enforceAntiRev(secureMode bool, stage string) error {
@@ -221,9 +221,9 @@ func HasStandalonePayload(srcpath string) (bool, error) {
 	return true, nil
 }
 
-func runvm(bytecode *compiler.ByteCode, password string) (error, errrs.ErrorType) {
+func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error, errrs.ErrorType) {
 	globals := make([]object.Object, global.GlobalSize)
-	machine := vm.NewWithPasswordAndGlobalStore(bytecode, password, globals)
+	machine := vm.NewWithPasswordAndGlobalStoreMode(bytecode, password, globals, secureMode)
 
 	if err := machine.Run(); err != nil {
 		return err, errrs.VM_ERROR
