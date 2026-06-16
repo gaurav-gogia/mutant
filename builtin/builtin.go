@@ -31,6 +31,35 @@ var Builtins = []struct {
 	{"cmd_builder", &BuiltIn{CmdBuilder}},
 	{"cmd_add", &BuiltIn{CmdAdd}},
 	{"cmd_run", &BuiltIn{CmdRun}},
+	// file system
+	{"fs_read", &BuiltIn{FsRead}},
+	{"fs_write", &BuiltIn{FsWrite}},
+	{"fs_append", &BuiltIn{FsAppend}},
+	{"fs_delete", &BuiltIn{FsDelete}},
+	{"fs_exists", &BuiltIn{FsExists}},
+	{"fs_stat", &BuiltIn{FsStat}},
+	{"fs_list", &BuiltIn{FsList}},
+	{"fs_mkdir", &BuiltIn{FsMkdir}},
+	{"fs_copy", &BuiltIn{FsCopy}},
+	{"fs_move", &BuiltIn{FsMove}},
+	// network
+	{"net_resolve", &BuiltIn{NetResolve}},
+	{"net_dial", &BuiltIn{NetDial}},
+	// http
+	{"http_get", &BuiltIn{HttpGet}},
+	{"http_post", &BuiltIn{HttpPost}},
+	{"http_request", &BuiltIn{HttpRequest}},
+	// graph db
+	{"db_open", &BuiltIn{DbOpen}},
+	{"db_open_disk", &BuiltIn{DbOpenDisk}},
+	{"db_close", &BuiltIn{DbClose}},
+	{"db_add_node", &BuiltIn{DbAddNode}},
+	{"db_add_edge", &BuiltIn{DbAddEdge}},
+	{"db_index_prop", &BuiltIn{DbIndexProp}},
+	{"db_query_nodes", &BuiltIn{DbQueryNodes}},
+	{"db_bfs", &BuiltIn{DbBFS}},
+	{"db_shortest_path", &BuiltIn{DbShortestPath}},
+	{"db_stats", &BuiltIn{DbStats}},
 }
 
 func GetBuiltinByName(name string) *BuiltIn {
