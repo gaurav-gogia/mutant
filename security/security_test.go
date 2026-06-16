@@ -316,6 +316,7 @@ func TestSandboxDetectionAPIs(t *testing.T) {
 }
 
 func TestResolveTamperResponseDefaultsAndOverrides(t *testing.T) {
+	t.Setenv(ProtectionProfileEnv, "")
 	t.Setenv(TamperResponseEnv, "")
 	if got := ResolveTamperResponse(true); got != TamperResponseTerminate {
 		t.Fatalf("expected secure default terminate, got %q", got)
@@ -332,6 +333,34 @@ func TestResolveTamperResponseDefaultsAndOverrides(t *testing.T) {
 	t.Setenv(TamperResponseEnv, "invalid")
 	if got := ResolveTamperResponse(true); got != TamperResponseTerminate {
 		t.Fatalf("expected fallback terminate for invalid override, got %q", got)
+	}
+}
+
+func TestResolveTamperResponseFollowsProtectionProfile(t *testing.T) {
+	t.Setenv(TamperResponseEnv, "")
+
+	t.Setenv(ProtectionProfileEnv, ProtectionProfileMinimal)
+	if got := ResolveTamperResponse(true); got != TamperResponseWarn {
+		t.Fatalf("expected minimal profile to warn, got %q", got)
+	}
+
+	t.Setenv(ProtectionProfileEnv, ProtectionProfileParanoid)
+	if got := ResolveTamperResponse(false); got != TamperResponseTerminate {
+		t.Fatalf("expected paranoid profile to terminate, got %q", got)
+	}
+}
+
+func TestDefaultBuiltinCapabilityPolicyFollowsProtectionProfile(t *testing.T) {
+	t.Setenv(ProtectionProfileEnv, ProtectionProfileMinimal)
+	policy := DefaultBuiltinCapabilityPolicy()
+	if _, ok := policy["all"]; !ok {
+		t.Fatalf("expected minimal profile to default-allow all builtins")
+	}
+
+	t.Setenv(ProtectionProfileEnv, ProtectionProfileStandard)
+	policy = DefaultBuiltinCapabilityPolicy()
+	if len(policy) != 0 {
+		t.Fatalf("expected standard profile to default-deny builtins, got %+v", policy)
 	}
 }
 

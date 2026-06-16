@@ -54,6 +54,26 @@ func RecordRustProbeError(stage string) {
 	auditEvent("rust_probe_error", stage)
 }
 
+func RecordCommandAttempt(stage string) {
+	atomic.AddUint64(&telemetryCommandAttempt, 1)
+	auditEvent("command_attempt", stage)
+}
+
+func RecordCommandBlocked(stage string) {
+	atomic.AddUint64(&telemetryCommandBlocked, 1)
+	auditEvent("command_blocked", stage)
+}
+
+func RecordCommandSucceeded(stage string) {
+	atomic.AddUint64(&telemetryCommandSucceeded, 1)
+	auditEvent("command_succeeded", stage)
+}
+
+func RecordCommandFailed(stage string) {
+	atomic.AddUint64(&telemetryCommandFailed, 1)
+	auditEvent("command_failed", stage)
+}
+
 func SecurityTelemetrySnapshot() map[string]uint64 {
 	return map[string]uint64{
 		"debugger_detected":  atomic.LoadUint64(&telemetryDebuggerDetected),
@@ -62,6 +82,10 @@ func SecurityTelemetrySnapshot() map[string]uint64 {
 		"sandbox_detected":   atomic.LoadUint64(&telemetrySandboxDetected),
 		"rust_probe_invoked": atomic.LoadUint64(&telemetryRustProbeInvoked),
 		"rust_probe_error":   atomic.LoadUint64(&telemetryRustProbeError),
+		"command_attempt":    atomic.LoadUint64(&telemetryCommandAttempt),
+		"command_blocked":    atomic.LoadUint64(&telemetryCommandBlocked),
+		"command_succeeded":  atomic.LoadUint64(&telemetryCommandSucceeded),
+		"command_failed":     atomic.LoadUint64(&telemetryCommandFailed),
 	}
 }
 

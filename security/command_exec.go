@@ -27,31 +27,46 @@ const (
 )
 
 type CommandResult struct {
-	Allowed      bool
-	ExitCode     int
-	Stdout       string
-	Stderr       string
-	TimedOut     bool
-	ErrorMessage string
+	Allowed        bool
+	PolicyDecision string
+	ExitCode       int
+	Stdout         string
+	Stderr         string
+	TimedOut       bool
+	ErrorMessage   string
 }
 
 func ExecuteCommand(shell, command, stage string) CommandResult {
+	RecordCommandAttempt(stage)
 
 	trimmedCommand := strings.TrimSpace(command)
 	if trimmedCommand == "" {
+		RecordCommandBlocked(stage)
 		return CommandResult{
-			Allowed:      false,
-			ErrorMessage: "command is empty",
+			Allowed:        false,
+			PolicyDecision: "blocked_empty",
+			ErrorMessage:   "command is empty",
+		}
+	}
+
+	if strings.TrimSpace(os.Getenv(CommandExecEnabledEnv)) != "1" {
+		RecordCommandBlocked(stage)
+		return CommandResult{
+			Allowed:        false,
+			PolicyDecision: "blocked_disabled",
+			ErrorMessage:   "command execution disabled",
 		}
 	}
 
 	normalizedShell := normalizeShell(shell)
 	execName, execArgs, err := buildShellCommand(normalizedShell, trimmedCommand)
 	if err != nil {
+		RecordCommandBlocked(stage)
 
 		return CommandResult{
-			Allowed:      false,
-			ErrorMessage: err.Error(),
+			Allowed:        false,
+			PolicyDecision: "blocked_shell",
+			ErrorMessage:   err.Error(),
 		}
 	}
 
@@ -67,7 +82,8 @@ func ExecuteCommand(shell, command, stage string) CommandResult {
 
 	runErr := cmd.Run()
 	result := CommandResult{
-		Allowed: true,
+		Allowed:        true,
+		PolicyDecision: "allowed",
 
 		ExitCode: 0,
 		Stdout:   truncateOutput(stdout.String(), resolveCommandExecMaxOutput()),
@@ -78,6 +94,7 @@ func ExecuteCommand(shell, command, stage string) CommandResult {
 		result.TimedOut = true
 		result.ErrorMessage = "command timed out"
 		result.ExitCode = -1
+		RecordCommandFailed(stage)
 		return result
 	}
 
@@ -89,8 +106,11 @@ func ExecuteCommand(shell, command, stage string) CommandResult {
 			result.ExitCode = -1
 		}
 		result.ErrorMessage = runErr.Error()
+		RecordCommandFailed(stage)
 		return result
 	}
+
+	RecordCommandSucceeded(stage)
 
 	return result
 }

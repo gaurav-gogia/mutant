@@ -8,7 +8,12 @@ const (
 	FOOTER               = "ANT"
 	StandaloneTailMarker = "MUTANTBC"
 	StandaloneTailV1     = byte(1)
-	StandaloneTailSize   = 49
+	StandaloneTailV2     = byte(2)
+	StandaloneTailV3     = byte(3)
+	StandaloneTailV1Size = len(StandaloneTailMarker) + 1 + 8 + 32
+	StandaloneTailV2Size = len(StandaloneTailMarker) + 1 + 8 + 32 + 8
+	StandaloneTailV3Size = len(StandaloneTailMarker) + 1 + 8 + 32 + 8 + 1 + 32
+	StandaloneTailSize   = StandaloneTailV3Size
 	ENCSIG               = "MUTANT"
 	SEPERATOR            = "|"
 	OUTER_SEPERATOR      = "|-|"

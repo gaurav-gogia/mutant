@@ -8,6 +8,9 @@ import (
 )
 
 func NetResolve(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityNetwork, "builtin:net_resolve"); !allowed {
+		return blockedCapabilityError(CapabilityNetwork, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -27,6 +30,9 @@ func NetResolve(args ...object.Object) object.Object {
 }
 
 func NetDial(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityNetwork, "builtin:net_dial"); !allowed {
+		return blockedCapabilityError(CapabilityNetwork, decision)
+	}
 	if len(args) != 2 {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}

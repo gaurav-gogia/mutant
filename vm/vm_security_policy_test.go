@@ -138,3 +138,74 @@ func TestVMDevModeWarnsOnSecurityOpcodes(t *testing.T) {
 		t.Fatalf("expected warning log entries, got: %q", got)
 	}
 }
+
+func TestIntegrityProbeScheduleAdvancesWithinBounds(t *testing.T) {
+	bc := &compiler.ByteCode{Instructions: append(code.Make(code.OpChkDbg), code.Make(code.OpChkSnd)...)}
+	vm := New(bc)
+
+	if vm.nextIntegrityAt != 0 {
+		t.Fatalf("expected first integrity probe at step 0, got %d", vm.nextIntegrityAt)
+	}
+
+	if vm.nextSweepAt < integritySweepBase || vm.nextSweepAt >= integritySweepBase+integritySweepSpread {
+		t.Fatalf("unexpected initial sweep schedule: %d", vm.nextSweepAt)
+	}
+
+	firstProbe := vm.nextProbeInterval()
+	if firstProbe < vm.integrityEvery || firstProbe >= vm.integrityEvery+integrityProbeSpread {
+		t.Fatalf("probe interval out of bounds: %d", firstProbe)
+	}
+
+	firstSweep := vm.nextSweepInterval()
+	if firstSweep < integritySweepBase || firstSweep >= integritySweepBase+integritySweepSpread {
+		t.Fatalf("sweep interval out of bounds: %d", firstSweep)
+	}
+
+	secondProbe := vm.nextProbeInterval()
+	if secondProbe < vm.integrityEvery || secondProbe >= vm.integrityEvery+integrityProbeSpread {
+		t.Fatalf("second probe interval out of bounds: %d", secondProbe)
+	}
+
+	if firstProbe == secondProbe && integrityProbeSpread > 1 {
+		t.Fatalf("expected probe schedule to advance, got repeated interval %d", firstProbe)
+	}
+}
+
+func TestControlFlowIntegrityRejectsInvalidInstructionPointer(t *testing.T) {
+	security.ResetSecurityTelemetry()
+	t.Setenv(security.TamperResponseEnv, security.TamperResponseTerminate)
+
+	bc := &compiler.ByteCode{Instructions: append(code.Make(code.OpConstant, 0), code.Make(code.OpNull)...)}
+	encrypted := mutil.EncryptByteCode(bc, "testpwd")
+	vm := NewWithPasswordMode(encrypted, "testpwd", true)
+	vm.currentFrame().ip = 1
+
+	err := vm.runIntegrityProbes()
+	if err == nil {
+		t.Fatalf("expected invalid instruction pointer to fail control-flow integrity")
+	}
+
+	snapshot := security.SecurityTelemetrySnapshot()
+	if snapshot["integrity_failed"] == 0 {
+		t.Fatalf("expected integrity failure telemetry increment for control-flow violation")
+	}
+}
+
+func TestControlFlowIntegrityAllowsInitialFrameSentinel(t *testing.T) {
+	security.ResetSecurityTelemetry()
+	t.Setenv(security.TamperResponseEnv, security.TamperResponseTerminate)
+
+	bc := &compiler.ByteCode{Instructions: append(code.Make(code.OpConstant, 0), code.Make(code.OpNull)...)}
+	encrypted := mutil.EncryptByteCode(bc, "testpwd")
+	vm := NewWithPasswordMode(encrypted, "testpwd", true)
+
+	err := vm.runIntegrityProbes()
+	if err != nil {
+		t.Fatalf("expected initial frame sentinel ip to be accepted, got: %v", err)
+	}
+
+	snapshot := security.SecurityTelemetrySnapshot()
+	if snapshot["integrity_failed"] != 0 {
+		t.Fatalf("expected no integrity failure telemetry for initial sentinel ip")
+	}
+}

@@ -27,7 +27,10 @@ type VM struct {
 	stepCount       uint64
 	integrityEvery  uint64
 	integrityJitter uint64
+	nextIntegrityAt uint64
+	nextSweepAt     uint64
 	frameIntegrity  map[*object.CompiledFunction][32]byte
+	frameBoundaries map[*object.CompiledFunction]map[int]struct{}
 	secureMode      bool
 
 	enforceSecurityCheckOpcodes bool
@@ -45,7 +48,52 @@ const (
 	initialStackCapacity   = global.StackSize
 	initialGlobalsCapacity = global.GlobalSize
 	initialFrameCapacity   = global.MaxFrames
+	integritySweepBase     = uint64(251)
+	integritySweepSpread   = uint64(83)
+	integrityProbeSpread   = uint64(31)
 )
+
+func deriveIntegritySeed(instructions []byte) uint64 {
+	h := sha256.Sum256(instructions)
+	seed := uint64(h[0]) |
+		(uint64(h[1]) << 8) |
+		(uint64(h[2]) << 16) |
+		(uint64(h[3]) << 24) |
+		(uint64(h[4]) << 32) |
+		(uint64(h[5]) << 40) |
+		(uint64(h[6]) << 48) |
+		(uint64(h[7]) << 56)
+	if seed == 0 {
+		return 0x9e3779b97f4a7c15
+	}
+	return seed
+}
+
+func nextIntegrityJitter(state uint64) uint64 {
+	if state == 0 {
+		state = 0x9e3779b97f4a7c15
+	}
+	state ^= state << 13
+	state ^= state >> 7
+	state ^= state << 17
+	return state
+}
+
+func (vm *VM) nextProbeInterval() uint64 {
+	vm.integrityJitter = nextIntegrityJitter(vm.integrityJitter)
+	if integrityProbeSpread == 0 {
+		return vm.integrityEvery
+	}
+	return vm.integrityEvery + (vm.integrityJitter % integrityProbeSpread)
+}
+
+func (vm *VM) nextSweepInterval() uint64 {
+	vm.integrityJitter = nextIntegrityJitter(vm.integrityJitter)
+	if integritySweepSpread == 0 {
+		return integritySweepBase
+	}
+	return integritySweepBase + (vm.integrityJitter % integritySweepSpread)
+}
 
 func New(bc *compiler.ByteCode) *VM {
 	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
@@ -57,8 +105,9 @@ func New(bc *compiler.ByteCode) *VM {
 
 	frameIntegrity := make(map[*object.CompiledFunction][32]byte)
 	frameIntegrity[mainfn] = sha256.Sum256(mainfn.Instructions)
+	integritySeed := deriveIntegritySeed(bc.Instructions)
 
-	return &VM{
+	vm := &VM{
 		constants:       bc.Constants,
 		stack:           make([]object.Object, initialStackCapacity),
 		stackPointer:    0,
@@ -69,12 +118,15 @@ func New(bc *compiler.ByteCode) *VM {
 		password:        "",
 		stepCount:       0,
 		integrityEvery:  64,
-		integrityJitter: uint64(len(bc.Instructions)%31 + 7),
+		integrityJitter: integritySeed,
 		frameIntegrity:  frameIntegrity,
 		secureMode:      true,
 
 		enforceSecurityCheckOpcodes: false,
 	}
+	vm.nextIntegrityAt = 0
+	vm.nextSweepAt = vm.nextSweepInterval()
+	return vm
 }
 
 func growSize(current, required, fallback int) int {
@@ -228,6 +280,7 @@ func NewWithPasswordMode(bc *compiler.ByteCode, password string, secureMode bool
 	vm.password = password
 	vm.secureMode = secureMode
 	vm.enforceSecurityCheckOpcodes = true
+	vm.ensureFrameBoundaries()
 	return vm
 }
 
@@ -259,13 +312,96 @@ func NewWithPasswordAndGlobalStoreMode(bc *compiler.ByteCode, password string, g
 	if globals != nil {
 		vm.globals = globals
 	}
+	vm.ensureFrameBoundaries()
 	return vm
+}
+
+func (vm *VM) ensureFrameBoundaries() {
+	if vm == nil || vm.password == "" {
+		return
+	}
+
+	if vm.frameBoundaries == nil {
+		vm.frameBoundaries = make(map[*object.CompiledFunction]map[int]struct{})
+	}
+
+	if frame := vm.currentFrame(); frame != nil && frame.cl != nil && frame.cl.Fn != nil {
+		fn := frame.cl.Fn
+		if _, exists := vm.frameBoundaries[fn]; !exists {
+			vm.frameBoundaries[fn] = buildInstructionBoundaries(fn.Instructions, vm.password, vm.inslen)
+		}
+	}
+
+	for _, constant := range vm.constants {
+		compiledFn, ok := constant.(*object.CompiledFunction)
+		if !ok {
+			continue
+		}
+		if _, exists := vm.frameBoundaries[compiledFn]; !exists {
+			vm.frameBoundaries[compiledFn] = buildInstructionBoundaries(compiledFn.Instructions, vm.password, vm.inslen)
+		}
+	}
+}
+
+func buildInstructionBoundaries(ins code.Instructions, password string, length int) map[int]struct{} {
+	boundaries := make(map[int]struct{})
+	if password == "" {
+		return boundaries
+	}
+
+	for i := 0; i < len(ins); {
+		boundaries[i] = struct{}{}
+		opcodeByte, err := security.SecureXOROneAt(ins[i], int64(length), password, int64(i))
+		if err != nil {
+			break
+		}
+
+		def, err := code.Lookup(opcodeByte)
+		if err != nil {
+			break
+		}
+
+		next := 1
+		for _, width := range def.OperandWidths {
+			next += width
+		}
+		i += next
+	}
+
+	return boundaries
+}
+
+func (vm *VM) verifyFrameControlFlow(frame *Frame, stage string) error {
+	if frame == nil || frame.cl == nil || frame.cl.Fn == nil {
+		return nil
+	}
+
+	// New frames start at ip=-1 until the first opcode fetch.
+	if frame.ip < 0 {
+		return nil
+	}
+
+	vm.ensureFrameBoundaries()
+	fn := frame.cl.Fn
+	boundaries, exists := vm.frameBoundaries[fn]
+	if !exists {
+		boundaries = buildInstructionBoundaries(fn.Instructions, vm.password, vm.inslen)
+		vm.frameBoundaries[fn] = boundaries
+	}
+
+	if _, ok := boundaries[frame.ip]; !ok {
+		security.RecordIntegrityFailure(stage)
+		return security.ApplyTamperResponse("integrity_failed", stage, vm.secureMode, fmt.Errorf("control-flow integrity check failed at ip=%d", frame.ip))
+	}
+
+	return nil
 }
 
 func (vm *VM) Run() error {
 	var ip int
 	var ins code.Instructions
 	var op code.Opcode
+	vm.ensureFrameBoundaries()
 
 	if err := vm.validateSecurityCheckOpcodes("before-execution"); err != nil {
 		return err
@@ -629,16 +765,26 @@ func (vm *VM) runIntegrityProbes() error {
 		return nil
 	}
 
-	if vm.stepCount%vm.integrityEvery == 0 || vm.stepCount%97 == vm.integrityJitter%97 {
+	vm.ensureFrameBoundaries()
+
+	if vm.stepCount >= vm.nextIntegrityAt {
+		if err := vm.verifyFrameControlFlow(vm.currentFrame(), "vm-cfi"); err != nil {
+			return err
+		}
 		if err := vm.verifyCurrentFrameIntegrity(); err != nil {
 			return err
 		}
+		vm.nextIntegrityAt = vm.stepCount + vm.nextProbeInterval()
 	}
 
-	if vm.stepCount > 0 && vm.stepCount%251 == 0 {
+	if vm.stepCount >= vm.nextSweepAt {
+		if err := vm.verifyFrameControlFlow(vm.currentFrame(), "vm-cfi-sweep"); err != nil {
+			return err
+		}
 		if err := vm.verifyActiveFramesIntegrity(); err != nil {
 			return err
 		}
+		vm.nextSweepAt = vm.stepCount + vm.nextSweepInterval()
 	}
 
 	return nil
@@ -999,6 +1145,14 @@ func (vm *VM) registerFrameIntegrity(fn *object.CompiledFunction) {
 	if _, exists := vm.frameIntegrity[fn]; !exists {
 		vm.frameIntegrity[fn] = sha256.Sum256(fn.Instructions)
 	}
+	if vm.frameBoundaries == nil {
+		vm.frameBoundaries = make(map[*object.CompiledFunction]map[int]struct{})
+	}
+	if vm.password != "" {
+		if _, exists := vm.frameBoundaries[fn]; !exists {
+			vm.frameBoundaries[fn] = buildInstructionBoundaries(fn.Instructions, vm.password, vm.inslen)
+		}
+	}
 }
 
 func (vm *VM) verifyCurrentFrameIntegrity() error {
@@ -1008,6 +1162,9 @@ func (vm *VM) verifyCurrentFrameIntegrity() error {
 
 func (vm *VM) verifyActiveFramesIntegrity() error {
 	for i := 0; i < vm.frameIndex; i++ {
+		if err := vm.verifyFrameControlFlow(vm.frames[i], "vm-cfi-sweep"); err != nil {
+			return err
+		}
 		if err := vm.verifyFrameIntegrity(vm.frames[i], "vm-frame-sweep"); err != nil {
 			return err
 		}

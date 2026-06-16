@@ -9,6 +9,9 @@ import (
 )
 
 func FsRead(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_read"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -24,6 +27,9 @@ func FsRead(args ...object.Object) object.Object {
 }
 
 func FsWrite(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_write"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 2 {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}
@@ -40,6 +46,9 @@ func FsWrite(args ...object.Object) object.Object {
 }
 
 func FsAppend(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_append"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 2 {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}
@@ -61,6 +70,9 @@ func FsAppend(args ...object.Object) object.Object {
 }
 
 func FsDelete(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_delete"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -72,6 +84,9 @@ func FsDelete(args ...object.Object) object.Object {
 }
 
 func FsExists(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_exists"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -84,6 +99,9 @@ func FsExists(args ...object.Object) object.Object {
 }
 
 func FsStat(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_stat"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -111,6 +129,9 @@ func FsStat(args ...object.Object) object.Object {
 }
 
 func FsList(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_list"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -139,6 +160,9 @@ func FsList(args ...object.Object) object.Object {
 }
 
 func FsMkdir(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_mkdir"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -150,6 +174,9 @@ func FsMkdir(args ...object.Object) object.Object {
 }
 
 func FsCopy(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_copy"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 2 {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}
@@ -182,6 +209,9 @@ func FsCopy(args ...object.Object) object.Object {
 }
 
 func FsMove(args ...object.Object) object.Object {
+	if allowed, decision := requireBuiltinCapability(CapabilityFilesystem, "builtin:fs_move"); !allowed {
+		return blockedCapabilityError(CapabilityFilesystem, decision)
+	}
 	if len(args) != 2 {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}

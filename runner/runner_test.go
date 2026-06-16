@@ -16,7 +16,7 @@ import (
 
 func TestExtractStandaloneSignedCodeValidTrailer(t *testing.T) {
 	payload := []byte("signed-payload")
-	binaryData := makeStandaloneBinaryBlob(payload)
+	binaryData := makeStandaloneBinaryBlob(t, payload)
 
 	extracted, err := extractStandaloneSignedCode(binaryData)
 	if err != nil {
@@ -30,8 +30,8 @@ func TestExtractStandaloneSignedCodeValidTrailer(t *testing.T) {
 
 func TestExtractStandaloneSignedCodeRejectsChecksumMismatch(t *testing.T) {
 	payload := []byte("signed-payload")
-	binaryData := makeStandaloneBinaryBlob(payload)
-	binaryData[len(binaryData)-1] = 0x42
+	binaryData := makeStandaloneBinaryBlob(t, payload)
+	binaryData[len(binaryData)-73] = 0x42
 
 	_, err := extractStandaloneSignedCode(binaryData)
 	if err == nil {
@@ -42,9 +42,23 @@ func TestExtractStandaloneSignedCodeRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestExtractStandaloneSignedCodeRejectsCanaryMismatch(t *testing.T) {
+	payload := []byte("signed-payload")
+	binaryData := makeStandaloneBinaryBlob(t, payload)
+	binaryData[len(binaryData)-41] ^= 0x01
+
+	_, err := extractStandaloneSignedCode(binaryData)
+	if err == nil {
+		t.Fatalf("expected canary mismatch error")
+	}
+	if !strings.Contains(err.Error(), "canary mismatch") {
+		t.Fatalf("expected canary mismatch error, got: %v", err)
+	}
+}
+
 func TestHasStandalonePayloadReportsPresence(t *testing.T) {
 	payload := []byte("signed-payload")
-	binaryData := makeStandaloneBinaryBlob(payload)
+	binaryData := makeStandaloneBinaryBlob(t, payload)
 
 	path := writeTempPayload(t, binaryData)
 	hasPayload, err := HasStandalonePayload(path)
@@ -191,6 +205,20 @@ func TestRunSecureModeWithoutSignerAuthFlagSkipsSignatureVerification(t *testing
 	}
 }
 
+func TestExtractStandaloneSignedCodeRejectsProvenanceMismatch(t *testing.T) {
+	payload := []byte("signed-payload")
+	binaryData := makeStandaloneBinaryBlob(t, payload)
+	binaryData[len(binaryData)-1] ^= 0x01
+
+	_, err := extractStandaloneSignedCode(binaryData)
+	if err == nil {
+		t.Fatalf("expected provenance mismatch error")
+	}
+	if !strings.Contains(err.Error(), "provenance mismatch") {
+		t.Fatalf("expected provenance mismatch error, got: %v", err)
+	}
+}
+
 func TestEnforceAntiSandboxSecureModeTerminates(t *testing.T) {
 	originalSandbox := isSandboxed
 	isSandboxed = func() bool { return true }
@@ -265,18 +293,26 @@ func toHex(t *testing.T, b []byte) string {
 	return string(out)
 }
 
-func makeStandaloneBinaryBlob(payload []byte) []byte {
+func makeStandaloneBinaryBlob(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	t.Setenv(security.ProtectionProfileEnv, security.ProtectionProfileStandard)
 	prefix := []byte("runtime-binary")
 	checksum := sha256.Sum256(payload)
+	canary := deriveStandaloneTailCanary(payload, checksum[:])
+	profileCode := security.ResolveProtectionProfileCode()
+	provenance := security.DeriveStandaloneProvenance(payload, checksum[:], profileCode)
 
-	trailer := make([]byte, 0, security.StandaloneTailSize)
+	trailer := make([]byte, 0, security.StandaloneTailV3Size)
 	trailer = append(trailer, []byte(security.StandaloneTailMarker)...)
-	trailer = append(trailer, security.StandaloneTailV1)
+	trailer = append(trailer, security.StandaloneTailV3)
 
 	lenBuf := make([]byte, 8)
 	binary.BigEndian.PutUint64(lenBuf, uint64(len(payload)))
 	trailer = append(trailer, lenBuf...)
 	trailer = append(trailer, checksum[:]...)
+	trailer = append(trailer, canary...)
+	trailer = append(trailer, profileCode)
+	trailer = append(trailer, provenance[:]...)
 
 	blob := make([]byte, 0, len(prefix)+len(payload)+len(trailer))
 	blob = append(blob, prefix...)

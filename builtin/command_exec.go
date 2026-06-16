@@ -12,6 +12,10 @@ func ExecString(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=1 or 2", len(args))
 	}
 
+	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:exec_string"); !allowed {
+		return blockedCommandResult(decision, "command execution capability not granted")
+	}
+
 	commandArg, ok := args[0].(*object.String)
 	if !ok {
 		return newError("argument to `exec_string` at position=1 must be STRING, got %s", args[0].Type())
@@ -35,6 +39,10 @@ func CmdBuilder(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=0 or 1", len(args))
 	}
 
+	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_builder"); !allowed {
+		return blockedCommandResult(decision, "command execution capability not granted")
+	}
+
 	shell := "powershell"
 	if len(args) == 1 {
 		shellArg, ok := args[0].(*object.String)
@@ -55,6 +63,10 @@ func CmdAdd(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}
 
+	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_add"); !allowed {
+		return blockedCommandResult(decision, "command execution capability not granted")
+	}
+
 	builder, errObj := decodeBuilder(args[0])
 	if errObj != nil {
 		return errObj
@@ -72,6 +84,10 @@ func CmdAdd(args ...object.Object) object.Object {
 func CmdRun(args ...object.Object) object.Object {
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
+	}
+
+	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_run"); !allowed {
+		return blockedCommandResult(decision, "command execution capability not granted")
 	}
 
 	builder, errObj := decodeBuilder(args[0])
@@ -152,13 +168,14 @@ func hashValueByKey(hash *object.Hash, key string) object.Object {
 
 func commandResultHash(result security.CommandResult) object.Object {
 	return makeHashObject(map[string]object.Object{
-		"ok":             boolObj(result.Allowed && result.ErrorMessage == "" && !result.TimedOut && result.ExitCode == 0),
-		"allowed":        boolObj(result.Allowed),
-		"exit_code":      intObj(int64(result.ExitCode)),
-		"stdout":         stringObj(result.Stdout),
-		"stderr":         stringObj(result.Stderr),
-		"timed_out":      boolObj(result.TimedOut),
-		"error":          stringObj(result.ErrorMessage),
-		"schema_version": intObj(1),
+		"ok":              boolObj(result.Allowed && result.ErrorMessage == "" && !result.TimedOut && result.ExitCode == 0),
+		"allowed":         boolObj(result.Allowed),
+		"policy_decision": stringObj(result.PolicyDecision),
+		"exit_code":       intObj(int64(result.ExitCode)),
+		"stdout":          stringObj(result.Stdout),
+		"stderr":          stringObj(result.Stderr),
+		"timed_out":       boolObj(result.TimedOut),
+		"error":           stringObj(result.ErrorMessage),
+		"schema_version":  intObj(1),
 	})
 }

@@ -11,6 +11,8 @@ Primary event classes:
 1. signature_failed
 2. debugger_detected
 3. integrity_failed
+4. command_blocked
+5. command_failed
 
 ---
 
@@ -51,11 +53,42 @@ Primary event classes:
 
 - required for secure mode signer pinning
 
+6. MUTANT_PROTECTION_PROFILE
+
+- `minimal`, `standard`, or `paranoid`
+- controls default tamper policy and builtin capability defaults when explicit
+  settings are absent
+
+7. MUTANT_BUILTIN_CAPABILITIES
+
+- explicit allow-list for risky builtin groups
+- comma or space separated values
+- current groups: `command_exec`, `filesystem`, `network`
+
 ### 3.2 Telemetry Counters
 
 1. debugger_detected
 2. integrity_failed
 3. signature_failed
+4. command_blocked
+5. command_failed
+
+### 3.4 Protection Profile Interpretation
+
+1. `minimal`
+
+- default tamper policy is warn
+- risky builtins default to allow unless explicitly constrained
+
+2. `standard`
+
+- default tamper policy matches the current secure/compat defaults
+- risky builtins default to deny until explicitly enabled
+
+3. `paranoid`
+
+- default tamper policy is terminate
+- risky builtins default to deny until explicitly enabled
 
 ### 3.3 Audit Event Format
 
@@ -120,6 +153,9 @@ flowchart TD
 5. Preserve suspect artifact file hash and copy.
 6. Determine whether issue is isolated or fleet-wide.
 7. If production and integrity_failed occurs, isolate host immediately.
+8. If a risky builtin is blocked unexpectedly, capture
+   `MUTANT_PROTECTION_PROFILE` and `MUTANT_BUILTIN_CAPABILITIES` before changing
+   policy.
 
 ---
 
@@ -145,6 +181,8 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 Get-ChildItem Env:MUTANT_* | Out-File "$dir/env.txt"
 Get-FileHash .\mutant.exe -Algorithm SHA256 | Out-File "$dir/hashes.txt"
 Get-FileHash .\examples\code.mu -Algorithm SHA256 | Out-File "$dir/hashes.txt" -Append
+
+Get-ChildItem Env:MUTANT_PROTECTION_PROFILE,Env:MUTANT_BUILTIN_CAPABILITIES | Out-File "$dir/policy.txt"
 
 if (Test-Path .\telemetry.json) { Copy-Item .\telemetry.json "$dir/telemetry.json" }
 ```
@@ -189,6 +227,8 @@ sha256sum ./mutant ./examples/code.mu > "$dir/hashes.txt"
 1. Quarantine suspect artifact.
 2. Block further rollout from source channel until signer chain is confirmed.
 3. Force secure mode with terminate policy in all production launch paths.
+4. If the artifact was built with the wrong protection profile, rebuild and
+   redeploy using the expected `MUTANT_PROTECTION_PROFILE` value.
 
 ### 8.5 Recovery
 
@@ -212,12 +252,15 @@ Escalate to Security Incident Commander if:
 
 1. pre-decode stage detection
 2. pre-execution stage detection
+3. repeated blocked risky builtin usage in a production path
 
 ### 9.2 Immediate Actions
 
 1. Determine whether host is production or controlled test environment.
 2. Capture parent process, command line, and environment markers.
 3. Validate whether approved diagnostic tooling was active.
+4. For command-blocked events, inspect the requested builtin group and compare
+   it against `MUTANT_BUILTIN_CAPABILITIES`.
 
 ### 9.3 Triage Questions
 

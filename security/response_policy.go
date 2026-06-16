@@ -25,10 +25,7 @@ func ResolveTamperResponse(secureMode bool) string {
 		return configured
 	}
 
-	if secureMode {
-		return TamperResponseTerminate
-	}
-	return TamperResponseWarn
+	return defaultTamperResponseForProfile(secureMode)
 }
 
 func ApplyTamperResponse(event, stage string, secureMode bool, baseErr error) error {

@@ -159,41 +159,12 @@ func decryptCode(signedCode []byte, password string) ([]byte, error) {
 }
 
 func extractStandaloneSignedCode(binaryData []byte) ([]byte, error) {
-	if len(binaryData) < security.StandaloneTailSize {
+	payload, found, err := validateStandalonePayload(binaryData)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
 		return binaryData, nil
-	}
-
-	trailerStart := len(binaryData) - security.StandaloneTailSize
-	trailer := binaryData[trailerStart:]
-
-	if !bytes.Equal(trailer[:len(security.StandaloneTailMarker)], []byte(security.StandaloneTailMarker)) {
-		return binaryData, nil
-	}
-
-	versionOffset := len(security.StandaloneTailMarker)
-	if trailer[versionOffset] != security.StandaloneTailV1 {
-		return nil, fmt.Errorf("unsupported standalone trailer version: %d", trailer[versionOffset])
-	}
-
-	lengthStart := versionOffset + 1
-	lengthEnd := lengthStart + 8
-	payloadLength := binary.BigEndian.Uint64(trailer[lengthStart:lengthEnd])
-
-	if payloadLength == 0 {
-		return nil, errors.New("invalid standalone payload length: 0")
-	}
-
-	if payloadLength > uint64(trailerStart) {
-		return nil, fmt.Errorf("invalid standalone payload length: %d", payloadLength)
-	}
-
-	payloadStart := trailerStart - int(payloadLength)
-	payload := binaryData[payloadStart:trailerStart]
-
-	expectedChecksum := trailer[lengthEnd:]
-	actualChecksum := sha256.Sum256(payload)
-	if !bytes.Equal(expectedChecksum, actualChecksum[:]) {
-		return nil, errors.New("standalone payload checksum mismatch")
 	}
 
 	return payload, nil
@@ -205,23 +176,103 @@ func HasStandalonePayload(srcpath string) (bool, error) {
 		return false, err
 	}
 
-	if len(binaryData) < security.StandaloneTailSize {
-		return false, nil
+	_, found, err := validateStandalonePayload(binaryData)
+	if err != nil {
+		return false, err
 	}
 
-	trailerStart := len(binaryData) - security.StandaloneTailSize
+	return found, nil
+}
+
+func validateStandalonePayload(binaryData []byte) ([]byte, bool, error) {
+	if payload, found, err := validateStandaloneTrailer(binaryData, security.StandaloneTailV3, security.StandaloneTailV3Size); found || err != nil {
+		return payload, found, err
+	}
+
+	if payload, found, err := validateStandaloneTrailer(binaryData, security.StandaloneTailV2, security.StandaloneTailV2Size); found || err != nil {
+		return payload, found, err
+	}
+
+	return validateStandaloneTrailer(binaryData, security.StandaloneTailV1, security.StandaloneTailV1Size)
+}
+
+func validateStandaloneTrailer(binaryData []byte, version byte, trailerSize int) ([]byte, bool, error) {
+	if len(binaryData) < trailerSize {
+		return nil, false, nil
+	}
+
+	trailerStart := len(binaryData) - trailerSize
 	trailer := binaryData[trailerStart:]
-
-	if !bytes.Equal(trailer[:len(security.StandaloneTailMarker)], []byte(security.StandaloneTailMarker)) {
-		return false, nil
+	markerBytes := []byte(security.StandaloneTailMarker)
+	if !bytes.Equal(trailer[:len(markerBytes)], markerBytes) {
+		return nil, false, nil
 	}
 
-	versionOffset := len(security.StandaloneTailMarker)
-	if trailer[versionOffset] != security.StandaloneTailV1 {
-		return false, fmt.Errorf("unsupported standalone trailer version: %d", trailer[versionOffset])
+	versionOffset := len(markerBytes)
+	if trailer[versionOffset] != version {
+		return nil, true, fmt.Errorf("unsupported standalone trailer version: %d", trailer[versionOffset])
 	}
 
-	return true, nil
+	lengthStart := versionOffset + 1
+	lengthEnd := lengthStart + 8
+	payloadLength := binary.BigEndian.Uint64(trailer[lengthStart:lengthEnd])
+	if payloadLength == 0 {
+		return nil, true, errors.New("invalid standalone payload length: 0")
+	}
+	if payloadLength > uint64(trailerStart) {
+		return nil, true, fmt.Errorf("invalid standalone payload length: %d", payloadLength)
+	}
+
+	payloadStart := trailerStart - int(payloadLength)
+	payload := binaryData[payloadStart:trailerStart]
+	checksumStart := lengthEnd
+	checksumEnd := checksumStart + sha256.Size
+	expectedChecksum := trailer[checksumStart:checksumEnd]
+	actualChecksum := sha256.Sum256(payload)
+	if !bytes.Equal(expectedChecksum, actualChecksum[:]) {
+		return nil, true, errors.New("standalone payload checksum mismatch")
+	}
+
+	if version == security.StandaloneTailV2 {
+		canary := trailer[checksumEnd:]
+		expectedCanary := deriveStandaloneTailCanary(payload, expectedChecksum)
+		if !bytes.Equal(canary, expectedCanary) {
+			return nil, true, errors.New("standalone payload canary mismatch")
+		}
+	}
+
+	if version == security.StandaloneTailV3 {
+		canary := trailer[checksumEnd : checksumEnd+8]
+		profileOffset := checksumEnd + 8
+		profileCode := trailer[profileOffset]
+		provenance := trailer[profileOffset+1:]
+
+		if _, ok := security.ProtectionProfileFromCode(profileCode); !ok {
+			return nil, true, fmt.Errorf("invalid standalone protection profile code: %d", profileCode)
+		}
+
+		expectedCanary := deriveStandaloneTailCanary(payload, expectedChecksum)
+		if !bytes.Equal(canary, expectedCanary) {
+			return nil, true, errors.New("standalone payload canary mismatch")
+		}
+
+		expectedProvenance := security.DeriveStandaloneProvenance(payload, expectedChecksum, profileCode)
+		if !bytes.Equal(provenance, expectedProvenance[:]) {
+			return nil, true, errors.New("standalone payload provenance mismatch")
+		}
+	}
+
+	return payload, true, nil
+}
+
+func deriveStandaloneTailCanary(payload []byte, checksum []byte) []byte {
+	seed := make([]byte, 0, len(payload)+len(checksum)+len(security.StandaloneTailMarker)+1)
+	seed = append(seed, payload...)
+	seed = append(seed, checksum...)
+	seed = append(seed, []byte(security.StandaloneTailMarker)...)
+	seed = append(seed, security.StandaloneTailV2)
+	digest := sha256.Sum256(seed)
+	return digest[:8]
 }
 
 func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error, errrs.ErrorType) {

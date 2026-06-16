@@ -30,12 +30,13 @@ func TestExecStringBuiltinDisabledByDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("policy_decision is not String")
 	}
-	if decisionObj.Value != "blocked_disabled" {
-		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
+	if decisionObj.Value != "blocked_missing_capability" {
+		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_missing_capability")
 	}
 }
 
 func TestCommandBuilderRoundTrip(t *testing.T) {
+	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
 	builder := CmdBuilder(&object.String{Value: "powershell"})
 	builder = CmdAdd(builder, &object.String{Value: "$x='a'"})
 	builder = CmdAdd(builder, &object.String{Value: "Write-Output $x"})
@@ -56,9 +57,29 @@ func TestCommandBuilderRoundTrip(t *testing.T) {
 }
 
 func TestCmdRunEmptyBuilderErrors(t *testing.T) {
+	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
 	builder := CmdBuilder()
 	result := CmdRun(builder)
 	if _, ok := result.(*object.Error); !ok {
 		t.Fatalf("expected Error, got=%T", result)
+	}
+}
+
+func TestExecStringBlockedWhenCapabilityGrantedButExecutionDisabled(t *testing.T) {
+	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
+	t.Setenv(security.CommandExecEnabledEnv, "")
+
+	result := ExecString(&object.String{Value: "Write-Output 'mutant'"})
+	hash, ok := result.(*object.Hash)
+	if !ok {
+		t.Fatalf("exec_string() result is not Hash. got=%T", result)
+	}
+
+	decisionObj, ok := hashValueByKey(hash, "policy_decision").(*object.String)
+	if !ok {
+		t.Fatalf("policy_decision is not String")
+	}
+	if decisionObj.Value != "blocked_disabled" {
+		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
 	}
 }

@@ -77,6 +77,35 @@ Mutant currently has three practical launch postures:
   password fallback is used (`mutil.GetPwd()`).
 - Intended for local testing convenience, not production hardening.
 
+### 4.3 Protection Profiles
+
+Mutant also supports a protection profile layer via `MUTANT_PROTECTION_PROFILE`.
+
+Supported values:
+
+1. `minimal`
+
+- Favors compatibility and operator convenience.
+- Defaults tamper policy to `warn`.
+- Defaults risky builtin groups to allow-all unless an explicit capability list
+  is set.
+
+2. `standard`
+
+- Default profile when the env var is unset or invalid.
+- Keeps secure mode fail-closed and compatibility mode warn-by-default.
+
+3. `paranoid`
+
+- Favors maximum tamper resistance.
+- Defaults tamper policy to `terminate` regardless of secure or compat posture.
+
+Profile precedence:
+
+- Explicit `MUTANT_TAMPER_RESPONSE` still wins when set.
+- Explicit `MUTANT_BUILTIN_CAPABILITIES` still wins when set.
+- Profile selection only controls defaults.
+
 ### 4.1 Mode Resolution Rules
 
 CLI precedence is "last matching mode flag wins" due to linear arg scanning.
@@ -203,6 +232,50 @@ Notes:
 - Signature/public key are hex encoded.
 - `ENCODED_DATA` is the serialized encryption metadata string.
 
+### 6.1.1 Standalone Release Trailer
+
+Release binaries produced by the generator append a standalone trailer after the
+embedded runtime payload.
+
+Current format version: V3
+
+`MUTANTBC | version | payload_len | payload_sha256 | canary | profile_code | provenance_sha256`
+
+Field details:
+
+1. `version`
+
+- V1 and V2 are accepted for legacy compatibility.
+- V3 is the current emission format.
+
+2. `payload_len`
+
+- Big-endian `uint64` payload length.
+
+3. `payload_sha256`
+
+- SHA-256 over the embedded bytecode payload.
+
+4. `canary`
+
+- Short SHA-256 derived guard used to detect trailer corruption.
+
+5. `profile_code`
+
+- Encoded protection profile selected at build time.
+- `1 = minimal`, `2 = standard`, `3 = paranoid`.
+
+6. `provenance_sha256`
+
+- SHA-256 over `payload || payload_sha256 || profile_code`.
+- Used to detect tampering and mismatched release provenance.
+
+Compatibility rules:
+
+- Runner validates V3 first, then V2, then V1.
+- V1 and V2 remain supported for older artifacts.
+- V3 is required for new release builds.
+
 ### 6.2 Encrypted Metadata Payload
 
 `ENCODED_DATA` format in password mode:
@@ -234,6 +307,10 @@ Rationale:
   mode.
 - Additional stream/XOR layers increase analysis friction.
 
+The standalone release trailer adds a separate provenance check path so the
+runtime can validate the generated build profile and trailer integrity before
+payload decode.
+
 ---
 
 ## 7. Key Derivation and Password Handling
@@ -257,10 +334,19 @@ Validation hard bounds:
 
 ### 7.2 Password Quality Policy
 
-When password mode is used at generation:
+Easy memorable passwords
 
-- minimum length 12
-- requires upper, lower, digit, special
+### 7.3 Build-Time Profile Binding
+
+Release generation binds the selected protection profile into the standalone
+trailer via the `profile_code` field.
+
+Security implication:
+
+- The build mode becomes auditable in the emitted artifact.
+- Trailer provenance mismatch is treated as tamper.
+- Runtime behavior still honors explicit environment overrides for policy
+  controls.
 
 ### 7.3 Deterministic Local Password Fallback
 
@@ -373,6 +459,32 @@ sequenceDiagram
 If `MUTANT_SECURITY_TELEMETRY_FILE` is set, runner defers telemetry JSON export
 at function exit.
 
+### 9.2 Standalone Trailer Validation
+
+Before signature verification and decode, runner performs standalone trailer
+validation when the binary appears to carry an appended payload.
+
+Validation order:
+
+1. V3 trailer
+2. V2 trailer
+3. V1 trailer
+
+Checks performed:
+
+1. trailer marker and version
+2. payload length bounds
+3. payload SHA-256
+4. canary (V2+)
+5. profile code validity and provenance hash (V3)
+
+Failure handling:
+
+- checksum mismatch -> reject payload
+- canary mismatch -> reject payload
+- provenance mismatch -> reject payload
+- unsupported trailer version -> reject payload
+
 ---
 
 ## 10. VM Runtime Protection Internals
@@ -417,6 +529,23 @@ Important implementation detail:
 - VM currently calls tamper response with `secureMode=true` for integrity
   failures, making secure defaults (`terminate`) apply unless env override
   downgrades policy.
+
+### 10.5 Builtin Capability Gating
+
+Risky builtins are gated by explicit capability names and default policy from
+the selected protection profile.
+
+Current capability groups:
+
+1. `command_exec`
+2. `filesystem`
+3. `network`
+
+Behavior:
+
+- `minimal` profile defaults to allow-all.
+- `standard` and `paranoid` profiles default-deny the risky groups.
+- Explicit `MUTANT_BUILTIN_CAPABILITIES` overrides the profile default.
 
 ```mermaid
 stateDiagram-v2
