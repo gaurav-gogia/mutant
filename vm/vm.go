@@ -267,6 +267,9 @@ func (vm *VM) Run() error {
 				return err
 			}
 			vm.currentFrame().ip++
+			if int(builtinIndex) >= len(builtin.Builtins) {
+				return fmt.Errorf("OpGetBuiltin: invalid builtin index=%d, len=%d", builtinIndex, len(builtin.Builtins))
+			}
 			definition := builtin.Builtins[builtinIndex]
 			if err := vm.push(definition.Builtin); err != nil {
 				return err

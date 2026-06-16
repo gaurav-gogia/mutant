@@ -4,11 +4,11 @@ let sum = fn(n1, n2) {
 
 putln("Lets add two numbers: ");
 
-puts("Enter first number: ");
+putf("Enter first number: ");
 let num1 = gets();
 
-puts("Enter second number: ");
+putf("Enter second number: ");
 let num2 = gets();
 
 let ans = sum(num1, num2);
-puts("Answer is: ", ans);
+putf("Answer is: ", ans);

@@ -16,6 +16,8 @@ var (
 	telemetryIntegrityFailed  uint64
 	telemetrySignatureFailed  uint64
 	telemetrySandboxDetected  uint64
+	telemetryRustProbeInvoked uint64
+	telemetryRustProbeError   uint64
 )
 
 func RecordDebuggerDetected(stage string) {
@@ -38,12 +40,24 @@ func RecordSandboxDetected(stage string) {
 	auditEvent("sandbox_detected", stage)
 }
 
+func RecordRustProbeInvoked(stage string) {
+	atomic.AddUint64(&telemetryRustProbeInvoked, 1)
+	auditEvent("rust_probe_invoked", stage)
+}
+
+func RecordRustProbeError(stage string) {
+	atomic.AddUint64(&telemetryRustProbeError, 1)
+	auditEvent("rust_probe_error", stage)
+}
+
 func SecurityTelemetrySnapshot() map[string]uint64 {
 	return map[string]uint64{
-		"debugger_detected": atomic.LoadUint64(&telemetryDebuggerDetected),
-		"integrity_failed":  atomic.LoadUint64(&telemetryIntegrityFailed),
-		"signature_failed":  atomic.LoadUint64(&telemetrySignatureFailed),
-		"sandbox_detected":  atomic.LoadUint64(&telemetrySandboxDetected),
+		"debugger_detected":  atomic.LoadUint64(&telemetryDebuggerDetected),
+		"integrity_failed":   atomic.LoadUint64(&telemetryIntegrityFailed),
+		"signature_failed":   atomic.LoadUint64(&telemetrySignatureFailed),
+		"sandbox_detected":   atomic.LoadUint64(&telemetrySandboxDetected),
+		"rust_probe_invoked": atomic.LoadUint64(&telemetryRustProbeInvoked),
+		"rust_probe_error":   atomic.LoadUint64(&telemetryRustProbeError),
 	}
 }
 
@@ -70,6 +84,8 @@ func ResetSecurityTelemetry() {
 	atomic.StoreUint64(&telemetryIntegrityFailed, 0)
 	atomic.StoreUint64(&telemetrySignatureFailed, 0)
 	atomic.StoreUint64(&telemetrySandboxDetected, 0)
+	atomic.StoreUint64(&telemetryRustProbeInvoked, 0)
+	atomic.StoreUint64(&telemetryRustProbeError, 0)
 }
 
 func auditEvent(event, stage string) {

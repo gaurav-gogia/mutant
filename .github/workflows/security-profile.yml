@@ -8,6 +8,8 @@ on:
       - runner/**
       - vm/**
       - object/**
+      - native/rustffi/**
+      - docs/RUST_ANTITAMPER.md
       - .github/workflows/security-profile.yml
 
 jobs:
@@ -40,3 +42,83 @@ jobs:
           name: security-telemetry
           path: /tmp/mutant-security-telemetry.json
           if-no-files-found: ignore
+
+  rust-staticlib-and-cgo-compile:
+    name: Rust staticlib + cgo compile (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            lib_dir: native/rustffi/lib/target/x86_64-unknown-linux-gnu/release
+            lib_file: libmutant_rust.a
+          - name: linux-arm64
+            os: ubuntu-latest
+            rust_target: aarch64-unknown-linux-gnu
+            lib_dir: native/rustffi/lib/target/aarch64-unknown-linux-gnu/release
+            lib_file: libmutant_rust.a
+          - name: windows-amd64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            lib_dir: native/rustffi/lib/target/x86_64-pc-windows-msvc/release
+            lib_file: mutant_rust.lib
+          - name: darwin-amd64
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+            lib_dir: native/rustffi/lib/target/x86_64-apple-darwin/release
+            lib_file: libmutant_rust.a
+          - name: darwin-arm64
+            os: macos-14
+            rust_target: aarch64-apple-darwin
+            lib_dir: native/rustffi/lib/target/aarch64-apple-darwin/release
+            lib_file: libmutant_rust.a
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Linux arm64 linker prerequisites
+        if: runner.os == 'Linux' && matrix.rust_target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build Rust static library
+        working-directory: native/rustffi/lib
+        run: cargo build --release --target ${{ matrix.rust_target }}
+
+      - name: Verify Rust library artifact
+        shell: bash
+        run: |
+          test -f "${{ matrix.lib_dir }}/${{ matrix.lib_file }}"
+
+      - name: Go compile check with cgo + mutant_rust tag (Linux/macOS)
+        if: runner.os != 'Windows'
+        env:
+          CGO_ENABLED: "1"
+          CGO_LDFLAGS: -L${{ github.workspace }}/${{ matrix.lib_dir }}
+        run: |
+          go test -c -tags mutant_rust ./native/rustffi
+
+      - name: Go compile check with cgo + mutant_rust tag (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          $libDir = Join-Path $env:GITHUB_WORKSPACE "${{ matrix.lib_dir }}"
+          $env:CGO_LDFLAGS = "-L$libDir"
+          go test -c -tags mutant_rust ./native/rustffi

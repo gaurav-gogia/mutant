@@ -210,11 +210,11 @@ func TestFunctionApplication(t *testing.T) {
 }
 
 func TestClosures(t *testing.T) {
-	input := ` 
-			let newAdder = fn(x) { 
-				fn(y) { x + y }; 
-			}; 
-			let addTwo = newAdder(2); 
+	input := `
+			let newAdder = fn(x) {
+				fn(y) { x + y };
+			};
+			let addTwo = newAdder(2);
 			addTwo(2);
 			`
 	testIntegerObject(t, testEval(input), 4)
@@ -268,6 +268,23 @@ func TestBuiltInFunctions(t *testing.T) {
 			}
 			if errObj.Message != expected {
 				t.Errorf("wrong error message. expected=%q, got=%q", expected, errObj.Message)
+			}
+		}
+	}
+}
+
+func TestSecurityStatusBuiltins(t *testing.T) {
+	for _, input := range []string{"debug_status()", "sandbox_status()"} {
+		evaluated := testEval(input)
+		hash, ok := evaluated.(*object.Hash)
+		if !ok {
+			t.Fatalf("%s did not return Hash. got=%T", input, evaluated)
+		}
+
+		for _, key := range []string{"detected", "type", "confidence", "indicators", "rust_signals", "rust_enabled", "rust_error", "source", "advisory", "event_count", "error", "schema_version"} {
+			keyObj := &object.String{Value: key}
+			if _, ok := hash.Pairs[keyObj.HashKey()]; !ok {
+				t.Fatalf("%s missing key %q", input, key)
 			}
 		}
 	}

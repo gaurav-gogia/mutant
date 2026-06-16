@@ -829,6 +829,18 @@ func TestBuiltins(t *testing.T) {
 				code.Make(code.OpPop),
 			},
 		},
+		{
+			input:             "debug_status(); sandbox_status();",
+			expectedConstants: []interface{}{},
+			expectedInstructions: []code.Instructions{
+				code.Make(code.OpGetBuiltin, 9),
+				code.Make(code.OpCall, 0),
+				code.Make(code.OpPop),
+				code.Make(code.OpGetBuiltin, 10),
+				code.Make(code.OpCall, 0),
+				code.Make(code.OpPop),
+			},
+		},
 	}
 	runCompilerTests(t, tests)
 }

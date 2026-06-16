@@ -17,7 +17,7 @@ var Builtins = []struct {
 	Builtin *BuiltIn
 }{
 	{"len", &BuiltIn{Len}},
-	{"puts", &BuiltIn{Puts}},
+	{"putf", &BuiltIn{Puts}},
 	{"putln", &BuiltIn{Putln}},
 	{"gets", &BuiltIn{Gets}},
 	{"first", &BuiltIn{First}},
@@ -25,6 +25,8 @@ var Builtins = []struct {
 	{"rest", &BuiltIn{Rest}},
 	{"push", &BuiltIn{Push}},
 	{"pop", &BuiltIn{Pop}},
+	{"debug_status", &BuiltIn{DebugStatus}},
+	{"sandbox_status", &BuiltIn{SandboxStatus}},
 }
 
 func GetBuiltinByName(name string) *BuiltIn {
@@ -36,6 +38,6 @@ func GetBuiltinByName(name string) *BuiltIn {
 	return nil
 }
 
-func newError(format string, a ...interface{}) *object.Error {
+func newError(format string, a ...any) *object.Error {
 	return &object.Error{Message: fmt.Sprintf(format, a...)}
 }
