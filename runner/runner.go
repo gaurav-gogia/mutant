@@ -41,6 +41,7 @@ func Run(srcpath string, password string, secureMode bool, enforceSignerAuth boo
 	if err != nil {
 		return err, errrs.ERROR
 	}
+	defer security.SecureZero(signedCode)
 
 	if secureMode && enforceSignerAuth {
 		trustedPublicKey, generated, keyDir, keyErr := security.ResolveTrustedPublicKeyHex()

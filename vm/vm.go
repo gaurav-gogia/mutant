@@ -175,9 +175,9 @@ func (vm *VM) clearObjectSensitiveData(obj object.Object) {
 	}
 }
 
-// CleanupSensitiveData clears encrypted runtime data buffers after execution.
-// If clearGlobals is false, globals are preserved (useful for REPL stateful sessions).
-func (vm *VM) CleanupSensitiveData(clearGlobals bool) {
+// CleanupRuntimeSensitiveData clears encrypted runtime data buffers after execution.
+// clearGlobals controls whether globals are wiped; clearConstants controls whether constants are wiped.
+func (vm *VM) CleanupRuntimeSensitiveData(clearGlobals bool, clearConstants bool) {
 	for i := range vm.stack {
 		vm.clearObjectSensitiveData(vm.stack[i])
 		vm.stack[i] = nil
@@ -191,13 +191,15 @@ func (vm *VM) CleanupSensitiveData(clearGlobals bool) {
 		}
 	}
 
-	for i := range vm.constants {
-		if compiledFn, ok := vm.constants[i].(*object.CompiledFunction); ok {
-			security.SecureZero(compiledFn.Instructions)
-			compiledFn.Instructions = nil
+	if clearConstants {
+		for i := range vm.constants {
+			if compiledFn, ok := vm.constants[i].(*object.CompiledFunction); ok {
+				security.SecureZero(compiledFn.Instructions)
+				compiledFn.Instructions = nil
+			}
+			vm.clearObjectSensitiveData(vm.constants[i])
+			vm.constants[i] = nil
 		}
-		vm.clearObjectSensitiveData(vm.constants[i])
-		vm.constants[i] = nil
 	}
 
 	for i := range vm.frames {
@@ -205,6 +207,16 @@ func (vm *VM) CleanupSensitiveData(clearGlobals bool) {
 	}
 	vm.frameIndex = 0
 	vm.password = ""
+}
+
+// CleanupSensitiveData clears runtime buffers and constants. Intended for one-shot execution paths.
+func (vm *VM) CleanupSensitiveData(clearGlobals bool) {
+	vm.CleanupRuntimeSensitiveData(clearGlobals, true)
+}
+
+// GlobalStore returns the VM global storage slice reference.
+func (vm *VM) GlobalStore() []object.Object {
+	return vm.globals
 }
 
 func NewWithPassword(bc *compiler.ByteCode, password string) *VM {

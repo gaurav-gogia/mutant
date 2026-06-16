@@ -767,6 +767,42 @@ func TestCleanupSensitiveDataCanPreserveGlobals(t *testing.T) {
 	}
 }
 
+func TestCleanupSensitiveDataWipesCompiledFunctionInstructions(t *testing.T) {
+	compiled := &object.CompiledFunction{Instructions: []byte{1, 2, 3}}
+	vm := New(&compiler.ByteCode{
+		Instructions: []byte{0},
+		Constants:    []object.Object{compiled},
+	})
+
+	vm.CleanupSensitiveData(true)
+
+	if compiled.Instructions != nil {
+		t.Fatalf("compiled function instructions not cleared")
+	}
+}
+
+func TestCleanupRuntimeSensitiveDataCanPreserveConstants(t *testing.T) {
+	compiled := &object.CompiledFunction{Instructions: []byte{1, 2, 3}}
+	vm := New(&compiler.ByteCode{
+		Instructions: []byte{0},
+		Constants:    []object.Object{compiled},
+	})
+	vm.stack = []object.Object{&object.Encrypted{EncType: object.INTEGER_OBJ, Value: []byte{1}}}
+	vm.stackPointer = 1
+
+	vm.CleanupRuntimeSensitiveData(false, false)
+
+	if vm.stackPointer != 0 {
+		t.Fatalf("stack pointer not reset: got=%d", vm.stackPointer)
+	}
+	if vm.constants[0] == nil {
+		t.Fatalf("constant should have been preserved when clearConstants=false")
+	}
+	if compiled.Instructions == nil {
+		t.Fatalf("compiled function instructions should be preserved when clearConstants=false")
+	}
+}
+
 func TestFramesGrowBeyondInitialCapacity(t *testing.T) {
 	mainClosure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{}}}
 	vm := &VM{

@@ -73,6 +73,7 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		encObj = &object.Encrypted{
 			EncType: object.INTEGER_OBJ,
 			Value:   xored,
+			Seed:    int64(length),
 		}
 
 	case object.STRING_OBJ:
@@ -85,6 +86,7 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		encObj = &object.Encrypted{
 			EncType: object.STRING_OBJ,
 			Value:   xored,
+			Seed:    int64(length),
 		}
 
 	case object.BOOLEAN_OBJ:
@@ -98,6 +100,7 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		encObj = &object.Encrypted{
 			EncType: object.BOOLEAN_OBJ,
 			Value:   xored,
+			Seed:    int64(length),
 		}
 
 	case object.FLOAT_OBJ:
@@ -112,12 +115,14 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		encObj = &object.Encrypted{
 			EncType: object.FLOAT_OBJ,
 			Value:   xored,
+			Seed:    int64(length),
 		}
 
 	case object.NULL_OBJ:
 		encObj = &object.Encrypted{
 			EncType: object.NULL_OBJ,
 			Value:   []byte{},
+			Seed:    int64(length),
 		}
 
 	case object.ARRAY_OBJ:
@@ -179,19 +184,25 @@ func DecryptObject(obj object.Object, length int, password string) (object.Objec
 	var err error
 
 	if decObj.Type() == object.ENCRYPTED_OBJ {
-		if decObj.(*object.Encrypted).EncType == object.NULL_OBJ {
+		encrypted := decObj.(*object.Encrypted)
+		if encrypted.EncType == object.NULL_OBJ {
 			return global.Null, nil
 		}
 
-		biteVal := decObj.(*object.Encrypted).Value
+		seed := int64(length)
+		if encrypted.Seed != 0 {
+			seed = encrypted.Seed
+		}
+
+		biteVal := encrypted.Value
 		bite := make([]byte, len(biteVal))
 		copy(bite, biteVal)
-		xored, err := security.SecureXOR(bite, int64(length), password)
+		xored, err := security.SecureXOR(bite, seed, password)
 		if err != nil {
 			return nil, err
 		}
 
-		switch decObj.(*object.Encrypted).EncType {
+		switch encrypted.EncType {
 		case object.INTEGER_OBJ:
 			val := binary.LittleEndian.Uint64(xored)
 			decObj = &object.Integer{Value: int64(val)}

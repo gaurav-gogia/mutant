@@ -14,7 +14,6 @@ import (
 	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
-	"mutant/security"
 	"mutant/vm"
 	"os"
 	"os/exec"
@@ -51,6 +50,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 
 	constants := []object.Object{}
 	globals := make([]object.Object, global.GlobalSize)
+	replPassword := mutil.GetPwd()
 	symbolTable := compiler.NewSymbolTable()
 	for i, v := range builtin.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
@@ -95,12 +95,13 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		}
 
 		byteCode := comp.ByteCode()
-		replPassword := fmt.Sprint(security.DerivePasswordFromInstructions(byteCode.Instructions))
 		byteCode = mutil.EncryptByteCode(byteCode, replPassword)
 		constants = byteCode.Constants
 
 		machine := vm.NewWithGlobalStoreAndPassword(byteCode, globals, replPassword)
 		if err := machine.Run(); err != nil {
+			globals = machine.GlobalStore()
+			machine.CleanupRuntimeSensitiveData(false, false)
 			errrs.PrintMachineError(out, err.Error())
 			continue
 		}
@@ -108,6 +109,8 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		last := machine.LastPoppedStackElement()
 		io.WriteString(out, last.Inspect())
 		io.WriteString(out, "\n")
+		globals = machine.GlobalStore()
+		machine.CleanupRuntimeSensitiveData(false, false)
 	}
 }
 
