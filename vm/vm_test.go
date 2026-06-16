@@ -9,6 +9,7 @@ import (
 	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
+	"mutant/security"
 	"testing"
 )
 
@@ -41,9 +42,10 @@ func runVMTests(t *testing.T, tests []vmTestCase) {
 			fmt.Println()
 		}
 
-		byteCode = mutil.EncryptByteCode(byteCode, "")
+		password := fmt.Sprint(security.DerivePasswordFromInstructions(byteCode.Instructions))
+		byteCode = mutil.EncryptByteCode(byteCode, password)
 
-		vm := New(comp.ByteCode())
+		vm := NewWithGlobalStoreAndPassword(byteCode, make([]object.Object, global.GlobalSize), password)
 		if err := vm.Run(); err != nil {
 			t.Fatalf("vm error: %s", err)
 		}
@@ -51,6 +53,26 @@ func runVMTests(t *testing.T, tests []vmTestCase) {
 		stackElem := vm.LastPoppedStackElement()
 		testExpectedObject(t, tt.expected, stackElem)
 	}
+}
+
+func runEncryptedVM(input string) (*VM, error) {
+	program := parse(input)
+	comp := compiler.New()
+
+	if err := comp.Compile(program); err != nil {
+		return nil, err
+	}
+
+	byteCode := comp.ByteCode()
+	password := fmt.Sprint(security.DerivePasswordFromInstructions(byteCode.Instructions))
+	byteCode = mutil.EncryptByteCode(byteCode, password)
+
+	vm := NewWithGlobalStoreAndPassword(byteCode, make([]object.Object, global.GlobalSize), password)
+	if err := vm.Run(); err != nil {
+		return nil, err
+	}
+
+	return vm, nil
 }
 
 func parse(input string) *ast.Program {
@@ -476,9 +498,10 @@ func TestCallingFunctionsWithWrongArguments(t *testing.T) {
 		}
 
 		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode, "")
+		password := fmt.Sprint(security.DerivePasswordFromInstructions(byteCode.Instructions))
+		byteCode = mutil.EncryptByteCode(byteCode, password)
 
-		vm := New(byteCode)
+		vm := NewWithGlobalStoreAndPassword(byteCode, make([]object.Object, global.GlobalSize), password)
 
 		if err := vm.Run(); err == nil {
 			t.Fatalf("expected VM error but resulted in none.")
@@ -498,7 +521,7 @@ func TestBuiltinFunctions(t *testing.T) {
 		{`len(1)`, &object.Error{Message: "argument to `len` not supported, got INTEGER"}},
 		{`len("one", "two")`, &object.Error{Message: "wrong number of arguments. got=2, want=1"}},
 		{`len([])`, 0},
-		{`puts("hello", "world!")`, global.Null},
+		{`putf("hello", "world!")`, global.Null},
 		{`first([1, 2, 3])`, 1},
 		{`first([])`, global.Null},
 		{`first(1)`, &object.Error{Message: "argument to `first` must be ARRAY, got INTEGER"}},
@@ -509,10 +532,100 @@ func TestBuiltinFunctions(t *testing.T) {
 		{`rest([])`, global.Null},
 		{`push([], 1)`, []int{1}},
 		{`push(1, 1)`, &object.Error{Message: "argument to `push` must be ARRAY, got=INTEGER"}},
-		{`puts("four")`, global.Null},
+		{`putf("four")`, global.Null},
 		{`putln("four")`, global.Null},
 	}
 	runVMTests(t, tests)
+}
+
+func TestEncryptedVMWithDerivedPassword(t *testing.T) {
+	vm, err := runEncryptedVM("1")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	if err := testIntegerObject(1, vm.LastPoppedStackElement()); err != nil {
+		t.Fatalf("wrong result: %s", err)
+	}
+}
+
+func TestStackGrowsBeyondInitialCapacity(t *testing.T) {
+	vm := &VM{
+		stack:        make([]object.Object, 1),
+		stackPointer: 0,
+		inslen:       1,
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := vm.push(&object.Integer{Value: int64(i)}); err != nil {
+			t.Fatalf("push %d failed: %s", i, err)
+		}
+	}
+
+	if got := len(vm.stack); got < 3 {
+		t.Fatalf("stack did not grow enough: got capacity %d", got)
+	}
+
+	if got := vm.stackPointer; got != 3 {
+		t.Fatalf("wrong stack pointer: got=%d, want=3", got)
+	}
+
+	if err := testIntegerObject(2, vm.pop()); err != nil {
+		t.Fatalf("wrong top element after growth: %s", err)
+	}
+}
+
+func TestGlobalsGrowBeyondInitialCapacity(t *testing.T) {
+	vm := &VM{globals: make([]object.Object, 1)}
+	vm.ensureGlobalCapacity(3)
+	vm.globals[3] = &object.Integer{Value: 99}
+
+	if got := len(vm.globals); got < 4 {
+		t.Fatalf("globals did not grow enough: got capacity %d", got)
+	}
+
+	if err := testIntegerObject(99, vm.globals[3]); err != nil {
+		t.Fatalf("wrong global element after growth: %s", err)
+	}
+}
+
+func TestFramesGrowBeyondInitialCapacity(t *testing.T) {
+	mainClosure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{}}}
+	vm := &VM{
+		frames:     make([]*Frame, 1),
+		frameIndex: 1,
+	}
+	vm.frames[0] = NewFrame(mainClosure, 0)
+
+	nextClosure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{}}}
+	vm.pushFrame(NewFrame(nextClosure, 0))
+
+	if got := len(vm.frames); got < 2 {
+		t.Fatalf("frames did not grow enough: got capacity %d", got)
+	}
+
+	if got := vm.frameIndex; got != 2 {
+		t.Fatalf("wrong frame index after growth: got=%d, want=2", got)
+	}
+}
+
+func TestCallClosureReservesStackForLocals(t *testing.T) {
+	vm := New(&compiler.ByteCode{Instructions: []byte{}})
+	vm.stack = make([]object.Object, 1)
+	vm.stackPointer = 1
+
+	closure := &object.Closure{Fn: &object.CompiledFunction{NumLocals: 4}}
+	if err := vm.callClosure(closure, 0); err != nil {
+		t.Fatalf("callClosure failed: %s", err)
+	}
+
+	if got := len(vm.stack); got < 5 {
+		t.Fatalf("stack did not reserve local slots: got capacity %d", got)
+	}
+
+	if got := vm.stackPointer; got != 5 {
+		t.Fatalf("wrong stack pointer after local reservation: got=%d, want=5", got)
+	}
 }
 
 func TestClosures(t *testing.T) {

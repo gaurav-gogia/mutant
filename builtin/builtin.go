@@ -17,7 +17,7 @@ var Builtins = []struct {
 	Builtin *BuiltIn
 }{
 	{"len", &BuiltIn{Len}},
-	{"putf", &BuiltIn{Puts}},
+	{"putf", &BuiltIn{Putf}},
 	{"putln", &BuiltIn{Putln}},
 	{"gets", &BuiltIn{Gets}},
 	{"first", &BuiltIn{First}},

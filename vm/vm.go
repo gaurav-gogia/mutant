@@ -41,9 +41,15 @@ var (
 	}
 )
 
+const (
+	initialStackCapacity   = global.StackSize
+	initialGlobalsCapacity = global.GlobalSize
+	initialFrameCapacity   = global.MaxFrames
+)
+
 func New(bc *compiler.ByteCode) *VM {
 	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
-	frames := make([]*Frame, global.MaxFrames)
+	frames := make([]*Frame, initialFrameCapacity)
 
 	mainClosure := &object.Closure{Fn: mainfn}
 	mainFrame := NewFrame(mainClosure, 0)
@@ -54,9 +60,9 @@ func New(bc *compiler.ByteCode) *VM {
 
 	return &VM{
 		constants:       bc.Constants,
-		stack:           make([]object.Object, global.StackSize),
+		stack:           make([]object.Object, initialStackCapacity),
 		stackPointer:    0,
-		globals:         make([]object.Object, global.GlobalSize),
+		globals:         make([]object.Object, initialGlobalsCapacity),
 		frames:          frames,
 		frameIndex:      1,
 		inslen:          len(bc.Instructions),
@@ -69,6 +75,60 @@ func New(bc *compiler.ByteCode) *VM {
 
 		enforceSecurityCheckOpcodes: false,
 	}
+}
+
+func growSize(current, required, fallback int) int {
+	if required <= current {
+		return current
+	}
+
+	newSize := current
+	if newSize == 0 {
+		newSize = fallback
+	}
+	if newSize == 0 {
+		newSize = 1
+	}
+
+	for newSize < required {
+		newSize *= 2
+	}
+
+	return newSize
+}
+
+func (vm *VM) ensureStackCapacity(required int) {
+	if required <= len(vm.stack) {
+		return
+	}
+
+	newSize := growSize(len(vm.stack), required, initialStackCapacity)
+	resized := make([]object.Object, newSize)
+	copy(resized, vm.stack)
+	vm.stack = resized
+}
+
+func (vm *VM) ensureGlobalCapacity(index int) {
+	required := index + 1
+	if required <= len(vm.globals) {
+		return
+	}
+
+	newSize := growSize(len(vm.globals), required, initialGlobalsCapacity)
+	resized := make([]object.Object, newSize)
+	copy(resized, vm.globals)
+	vm.globals = resized
+}
+
+func (vm *VM) ensureFrameCapacity(required int) {
+	if required <= len(vm.frames) {
+		return
+	}
+
+	newSize := growSize(len(vm.frames), required, initialFrameCapacity)
+	resized := make([]*Frame, newSize)
+	copy(resized, vm.frames)
+	vm.frames = resized
 }
 
 func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
@@ -87,20 +147,30 @@ func NewWithGlobalStore(bc *compiler.ByteCode, globals []object.Object) *VM {
 	return NewWithGlobalStoreMode(bc, globals, true)
 }
 
+func NewWithGlobalStoreAndPassword(bc *compiler.ByteCode, globals []object.Object, password string) *VM {
+	vm := NewWithGlobalStore(bc, globals)
+	vm.password = password
+	return vm
+}
+
 func NewWithPasswordAndGlobalStore(bc *compiler.ByteCode, password string, globals []object.Object) *VM {
 	return NewWithPasswordAndGlobalStoreMode(bc, password, globals, true)
 }
 
 func NewWithGlobalStoreMode(bc *compiler.ByteCode, globals []object.Object, secureMode bool) *VM {
 	vm := New(bc)
-	vm.globals = globals
+	if globals != nil {
+		vm.globals = globals
+	}
 	vm.secureMode = secureMode
 	return vm
 }
 
 func NewWithPasswordAndGlobalStoreMode(bc *compiler.ByteCode, password string, globals []object.Object, secureMode bool) *VM {
 	vm := NewWithPasswordMode(bc, password, secureMode)
-	vm.globals = globals
+	if globals != nil {
+		vm.globals = globals
+	}
 	return vm
 }
 
@@ -251,6 +321,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 			vm.currentFrame().ip += 2
+			vm.ensureGlobalCapacity(int(globalIndex))
 			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
 			if ip+2 >= len(ins) {
@@ -261,6 +332,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 			vm.currentFrame().ip += 2
+			vm.ensureGlobalCapacity(int(globalIndex))
 			if err := vm.push(vm.globals[globalIndex]); err != nil {
 				return err
 			}
@@ -523,9 +595,7 @@ func (vm *VM) pushClosure(constIndex, numFree int) error {
 }
 
 func (vm *VM) push(obj object.Object) error {
-	if vm.stackPointer >= global.StackSize {
-		return fmt.Errorf("stack overflow")
-	}
+	vm.ensureStackCapacity(vm.stackPointer + 1)
 
 	if encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password); err == nil {
 		obj = encObj
@@ -820,6 +890,7 @@ func (vm *VM) buildHash(startIndex, endIndex int) (object.Object, error) {
 
 func (vm *VM) currentFrame() *Frame { return vm.frames[vm.frameIndex-1] }
 func (vm *VM) pushFrame(f *Frame) {
+	vm.ensureFrameCapacity(vm.frameIndex + 1)
 	vm.frames[vm.frameIndex] = f
 	vm.frameIndex++
 	if f != nil && f.cl != nil && f.cl.Fn != nil {
@@ -857,6 +928,7 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 
 	frame := NewFrame(cl, vm.stackPointer-numArgs)
 	vm.pushFrame(frame)
+	vm.ensureStackCapacity(frame.bp + cl.Fn.NumLocals)
 	vm.stackPointer = frame.bp + cl.Fn.NumLocals
 	return nil
 }

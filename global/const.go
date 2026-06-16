@@ -1,10 +1,10 @@
 package global
 
-// Constants for VM
+// Initial capacities for VM storage. The VM grows these slices dynamically at runtime.
 const (
-	StackSize  = 2048 * 10
-	GlobalSize = 65536 * 10
-	MaxFrames  = 2048 * 10
+	StackSize  = 2048
+	GlobalSize = 65536
+	MaxFrames  = 2048
 
 	MutantSourceCodeFileExtention       = ".mut"
 	MutantByteCodeCompiledFileExtension = ".mu"

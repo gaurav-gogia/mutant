@@ -95,9 +95,9 @@ func TestExpandMacros(t *testing.T) {
                 });
             };
 
-            unless(10 > 5, puts("not greater"), puts("greater"));
+            unless(10 > 5, putf("not greater"), putf("greater"));
             `,
-			`if (!(10 > 5)) { puts("not greater") } else { puts("greater") }`,
+			`if (!(10 > 5)) { putf("not greater") } else { putf("greater") }`,
 		},
 	}
 

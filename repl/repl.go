@@ -13,6 +13,7 @@ import (
 	"mutant/mutil"
 	"mutant/object"
 	"mutant/parser"
+	"mutant/security"
 	"mutant/vm"
 	"os"
 	"os/exec"
@@ -90,9 +91,11 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		}
 
 		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode, "") // Empty password for REPL (deterministic encryption based on instructions)
+		replPassword := fmt.Sprint(security.DerivePasswordFromInstructions(byteCode.Instructions))
+		byteCode = mutil.EncryptByteCode(byteCode, replPassword)
+		constants = byteCode.Constants
 
-		machine := vm.NewWithGlobalStore(byteCode, globals)
+		machine := vm.NewWithGlobalStoreAndPassword(byteCode, globals, replPassword)
 		if err := machine.Run(); err != nil {
 			errrs.PrintMachineError(out, err.Error())
 			continue

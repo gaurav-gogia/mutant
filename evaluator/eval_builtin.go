@@ -11,6 +11,7 @@ var builtins = map[string]*builtin.BuiltIn{
 	"rest":           builtin.GetBuiltinByName("rest"),
 	"push":           builtin.GetBuiltinByName("push"),
 	"putf":           builtin.GetBuiltinByName("putf"),
+	"putln":          builtin.GetBuiltinByName("putln"),
 	"debug_status":   builtin.GetBuiltinByName("debug_status"),
 	"sandbox_status": builtin.GetBuiltinByName("sandbox_status"),
 }
