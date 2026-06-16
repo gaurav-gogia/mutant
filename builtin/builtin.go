@@ -27,6 +27,10 @@ var Builtins = []struct {
 	{"pop", &BuiltIn{Pop}},
 	{"debug_status", &BuiltIn{DebugStatus}},
 	{"sandbox_status", &BuiltIn{SandboxStatus}},
+	{"exec_string", &BuiltIn{ExecString}},
+	{"cmd_builder", &BuiltIn{CmdBuilder}},
+	{"cmd_add", &BuiltIn{CmdAdd}},
+	{"cmd_run", &BuiltIn{CmdRun}},
 }
 
 func GetBuiltinByName(name string) *BuiltIn {

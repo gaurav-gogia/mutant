@@ -18,6 +18,10 @@ var (
 	telemetrySandboxDetected  uint64
 	telemetryRustProbeInvoked uint64
 	telemetryRustProbeError   uint64
+	telemetryCommandAttempt   uint64
+	telemetryCommandBlocked   uint64
+	telemetryCommandSucceeded uint64
+	telemetryCommandFailed    uint64
 )
 
 func RecordDebuggerDetected(stage string) {
@@ -86,6 +90,10 @@ func ResetSecurityTelemetry() {
 	atomic.StoreUint64(&telemetrySandboxDetected, 0)
 	atomic.StoreUint64(&telemetryRustProbeInvoked, 0)
 	atomic.StoreUint64(&telemetryRustProbeError, 0)
+	atomic.StoreUint64(&telemetryCommandAttempt, 0)
+	atomic.StoreUint64(&telemetryCommandBlocked, 0)
+	atomic.StoreUint64(&telemetryCommandSucceeded, 0)
+	atomic.StoreUint64(&telemetryCommandFailed, 0)
 }
 
 func auditEvent(event, stage string) {
