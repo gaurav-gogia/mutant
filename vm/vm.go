@@ -131,6 +131,82 @@ func (vm *VM) ensureFrameCapacity(required int) {
 	vm.frames = resized
 }
 
+func (vm *VM) encryptForStorage(obj object.Object) object.Object {
+	encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password)
+	if err == nil {
+		return encObj
+	}
+	return obj
+}
+
+func (vm *VM) decryptForUse(obj object.Object) object.Object {
+	decObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password)
+	if err == nil {
+		return decObj
+	}
+	return obj
+}
+
+func (vm *VM) clearObjectSensitiveData(obj object.Object) {
+	if obj == nil {
+		return
+	}
+
+	switch o := obj.(type) {
+	case *object.Encrypted:
+		security.SecureZero(o.Value)
+		o.Value = nil
+	case *object.Array:
+		for i := range o.Elements {
+			vm.clearObjectSensitiveData(o.Elements[i])
+			o.Elements[i] = nil
+		}
+	case *object.Hash:
+		for key, pair := range o.Pairs {
+			vm.clearObjectSensitiveData(pair.Key)
+			vm.clearObjectSensitiveData(pair.Value)
+			delete(o.Pairs, key)
+		}
+	case *object.Closure:
+		for i := range o.Free {
+			vm.clearObjectSensitiveData(o.Free[i])
+			o.Free[i] = nil
+		}
+	}
+}
+
+// CleanupSensitiveData clears encrypted runtime data buffers after execution.
+// If clearGlobals is false, globals are preserved (useful for REPL stateful sessions).
+func (vm *VM) CleanupSensitiveData(clearGlobals bool) {
+	for i := range vm.stack {
+		vm.clearObjectSensitiveData(vm.stack[i])
+		vm.stack[i] = nil
+	}
+	vm.stackPointer = 0
+
+	if clearGlobals {
+		for i := range vm.globals {
+			vm.clearObjectSensitiveData(vm.globals[i])
+			vm.globals[i] = nil
+		}
+	}
+
+	for i := range vm.constants {
+		if compiledFn, ok := vm.constants[i].(*object.CompiledFunction); ok {
+			security.SecureZero(compiledFn.Instructions)
+			compiledFn.Instructions = nil
+		}
+		vm.clearObjectSensitiveData(vm.constants[i])
+		vm.constants[i] = nil
+	}
+
+	for i := range vm.frames {
+		vm.frames[i] = nil
+	}
+	vm.frameIndex = 0
+	vm.password = ""
+}
+
 func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
 	return NewWithPasswordMode(bc, password, true)
 }
@@ -322,7 +398,7 @@ func (vm *VM) Run() error {
 			}
 			vm.currentFrame().ip += 2
 			vm.ensureGlobalCapacity(int(globalIndex))
-			vm.globals[globalIndex] = vm.pop()
+			vm.globals[globalIndex] = vm.encryptForStorage(vm.pop())
 		case code.OpGetGlobal:
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpGetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
@@ -333,7 +409,7 @@ func (vm *VM) Run() error {
 			}
 			vm.currentFrame().ip += 2
 			vm.ensureGlobalCapacity(int(globalIndex))
-			if err := vm.push(vm.globals[globalIndex]); err != nil {
+			if err := vm.push(vm.decryptForUse(vm.globals[globalIndex])); err != nil {
 				return err
 			}
 		case code.OpSetLocal:
@@ -347,12 +423,7 @@ func (vm *VM) Run() error {
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
 			obj := vm.pop()
-			encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password)
-			if err != nil {
-				vm.stack[frame.bp+int(localIndex)] = obj
-			} else {
-				vm.stack[frame.bp+int(localIndex)] = encObj
-			}
+			vm.stack[frame.bp+int(localIndex)] = vm.encryptForStorage(obj)
 		case code.OpGetLocal:
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
@@ -363,7 +434,7 @@ func (vm *VM) Run() error {
 			}
 			vm.currentFrame().ip++
 			frame := vm.currentFrame()
-			if err := vm.push(vm.stack[frame.bp+int(localIndex)]); err != nil {
+			if err := vm.push(vm.decryptForUse(vm.stack[frame.bp+int(localIndex)])); err != nil {
 				return err
 			}
 		case code.OpGetBuiltin:
@@ -392,7 +463,7 @@ func (vm *VM) Run() error {
 			}
 			vm.currentFrame().ip++
 			currentClosure := vm.currentFrame().cl
-			if err := vm.push(currentClosure.Free[freeIndex]); err != nil {
+			if err := vm.push(vm.decryptForUse(currentClosure.Free[freeIndex])); err != nil {
 				return err
 			}
 		case code.OpIndex:
@@ -419,7 +490,7 @@ func (vm *VM) Run() error {
 			}
 		case code.OpCurrentClosure:
 			currentClosure := vm.currentFrame().cl
-			if err := vm.push(currentClosure); err != nil {
+			if err := vm.push(vm.decryptForUse(currentClosure)); err != nil {
 				return err
 			}
 		case code.OpCall:
@@ -566,15 +637,11 @@ func (vm *VM) StackTop() object.Object {
 		return nil
 	}
 
-	return vm.stack[vm.stackPointer-1]
+	return vm.decryptForUse(vm.stack[vm.stackPointer-1])
 }
 
 func (vm *VM) LastPoppedStackElement() object.Object {
-	obj := vm.stack[vm.stackPointer]
-	if decObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password); err == nil {
-		obj = decObj
-	}
-	return obj
+	return vm.decryptForUse(vm.stack[vm.stackPointer])
 }
 
 func (vm *VM) pushClosure(constIndex, numFree int) error {
@@ -596,10 +663,7 @@ func (vm *VM) pushClosure(constIndex, numFree int) error {
 
 func (vm *VM) push(obj object.Object) error {
 	vm.ensureStackCapacity(vm.stackPointer + 1)
-
-	if encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password); err == nil {
-		obj = encObj
-	}
+	obj = vm.encryptForStorage(obj)
 
 	vm.stack[vm.stackPointer] = obj
 	vm.stackPointer++
@@ -608,10 +672,7 @@ func (vm *VM) push(obj object.Object) error {
 }
 
 func (vm *VM) pop() object.Object {
-	obj := vm.stack[vm.stackPointer-1]
-	if newObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password); err == nil {
-		obj = newObj
-	}
+	obj := vm.decryptForUse(vm.stack[vm.stackPointer-1])
 
 	vm.stackPointer--
 	return obj
@@ -853,11 +914,7 @@ func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) e
 func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
 	elements := make([]object.Object, endIndex-startIndex)
 	for i := startIndex; i < endIndex; i++ {
-		elements[i-startIndex] = vm.stack[i]
-		element, err := mutil.DecryptObject(elements[i-startIndex], vm.inslen, vm.password)
-		if err == nil {
-			elements[i-startIndex] = element
-		}
+		elements[i-startIndex] = vm.decryptForUse(vm.stack[i])
 	}
 	return &object.Array{Elements: elements}
 }
@@ -865,18 +922,8 @@ func (vm *VM) buildArray(startIndex, endIndex int) object.Object {
 func (vm *VM) buildHash(startIndex, endIndex int) (object.Object, error) {
 	hashedPairs := make(map[object.HashKey]object.HashPair)
 	for i := startIndex; i < endIndex; i += 2 {
-		key := vm.stack[i]
-		value := vm.stack[i+1]
-
-		hkey, err := mutil.DecryptObject(key, vm.inslen, vm.password)
-		if err == nil {
-			key = hkey
-		}
-
-		hvalue, err := mutil.DecryptObject(value, vm.inslen, vm.password)
-		if err == nil {
-			value = hvalue
-		}
+		key := vm.decryptForUse(vm.stack[i])
+		value := vm.decryptForUse(vm.stack[i+1])
 
 		pair := object.HashPair{Key: key, Value: value}
 		hashKey, ok := key.(object.Hashable)
@@ -979,12 +1026,10 @@ func (vm *VM) verifyFrameIntegrity(frame *Frame, stage string) error {
 }
 
 func (vm *VM) callBuiltin(builtin *builtin.BuiltIn, numArgs int) error {
-	args := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
-	for i := range args {
-		dec, err := mutil.DecryptObject(args[i], vm.inslen, vm.password)
-		if err == nil {
-			args[i] = dec
-		}
+	storedArgs := vm.stack[vm.stackPointer-numArgs : vm.stackPointer]
+	args := make([]object.Object, len(storedArgs))
+	for i, arg := range storedArgs {
+		args[i] = vm.decryptForUse(arg)
 	}
 	result := builtin.Fn(args...)
 

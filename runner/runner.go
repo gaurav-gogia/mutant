@@ -122,6 +122,7 @@ func decode(data []byte, password string) (*compiler.ByteCode, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer security.SecureZero(decodedData)
 	reader := bytes.NewReader(decodedData)
 
 	var bytecode *compiler.ByteCode
@@ -145,6 +146,7 @@ func decryptCode(signedCode []byte, password string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer security.SecureZero(xorEncryptedData)
 
 	// Decrypt the XOR layer (key is embedded in the data)
 	decodedData, err := security.SecureXORDecrypt(xorEncryptedData)
@@ -224,6 +226,7 @@ func HasStandalonePayload(srcpath string) (bool, error) {
 func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error, errrs.ErrorType) {
 	globals := make([]object.Object, global.GlobalSize)
 	machine := vm.NewWithPasswordAndGlobalStoreMode(bytecode, password, globals, secureMode)
+	defer machine.CleanupSensitiveData(true)
 
 	if err := machine.Run(); err != nil {
 		return err, errrs.VM_ERROR

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math"
 	"mutant/compiler"
 	"mutant/global"
 	"mutant/object"
@@ -49,10 +50,17 @@ func EncryptByteCode(byteCode *compiler.ByteCode, password string) *compiler.Byt
 }
 
 func EncryptObject(obj object.Object, length int, password string) (object.Object, error) {
+	if obj == nil {
+		return nil, errors.New("nil obj")
+	}
+
 	var encObj object.Object
 	var err error
 
 	switch obj.Type() {
+	case object.ENCRYPTED_OBJ:
+		encObj = obj
+
 	case object.INTEGER_OBJ:
 		val := obj.(*object.Integer).Value
 		bite := make([]byte, 8)
@@ -92,6 +100,69 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 			Value:   xored,
 		}
 
+	case object.FLOAT_OBJ:
+		val := obj.(*object.Float).Value
+		bite := make([]byte, 8)
+		binary.LittleEndian.PutUint64(bite, math.Float64bits(val))
+		xored, err := security.SecureXOR(bite, int64(length), password)
+		if err != nil {
+			return nil, err
+		}
+
+		encObj = &object.Encrypted{
+			EncType: object.FLOAT_OBJ,
+			Value:   xored,
+		}
+
+	case object.NULL_OBJ:
+		encObj = &object.Encrypted{
+			EncType: object.NULL_OBJ,
+			Value:   []byte{},
+		}
+
+	case object.ARRAY_OBJ:
+		arrayObj := obj.(*object.Array)
+		elements := make([]object.Object, len(arrayObj.Elements))
+		for i, element := range arrayObj.Elements {
+			encElement, encErr := EncryptObject(element, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			elements[i] = encElement
+		}
+		encObj = &object.Array{Elements: elements}
+
+	case object.HASH_OBJ:
+		hashObj := obj.(*object.Hash)
+		pairs := make(map[object.HashKey]object.HashPair, len(hashObj.Pairs))
+		for hashKey, pair := range hashObj.Pairs {
+			encKey, encErr := EncryptObject(pair.Key, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			encValue, encErr := EncryptObject(pair.Value, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			pairs[hashKey] = object.HashPair{Key: encKey, Value: encValue}
+		}
+		encObj = &object.Hash{Pairs: pairs}
+
+	case object.CLOSURE_OBJ:
+		closureObj := obj.(*object.Closure)
+		free := make([]object.Object, len(closureObj.Free))
+		for i, freeObj := range closureObj.Free {
+			encFree, encErr := EncryptObject(freeObj, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			free[i] = encFree
+		}
+		encObj = &object.Closure{Fn: closureObj.Fn, Free: free}
+
+	case object.COMPILED_FN_OBJ, object.BUILTIN_OBJ:
+		encObj = obj
+
 	default:
 		err = errors.New("wrong obj type")
 	}
@@ -100,10 +171,18 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 }
 
 func DecryptObject(obj object.Object, length int, password string) (object.Object, error) {
+	if obj == nil {
+		return nil, errors.New("nil obj")
+	}
+
 	decObj := obj
 	var err error
 
 	if decObj.Type() == object.ENCRYPTED_OBJ {
+		if decObj.(*object.Encrypted).EncType == object.NULL_OBJ {
+			return global.Null, nil
+		}
+
 		biteVal := decObj.(*object.Encrypted).Value
 		bite := make([]byte, len(biteVal))
 		copy(bite, biteVal)
@@ -127,8 +206,60 @@ func DecryptObject(obj object.Object, length int, password string) (object.Objec
 			} else {
 				decObj = global.False
 			}
+
+		case object.FLOAT_OBJ:
+			val := binary.LittleEndian.Uint64(xored)
+			decObj = &object.Float{Value: math.Float64frombits(val)}
+
+		case object.NULL_OBJ:
+			decObj = global.Null
 		}
 
+		return decObj, nil
+	}
+
+	switch decObj.Type() {
+	case object.ARRAY_OBJ:
+		arrayObj := decObj.(*object.Array)
+		elements := make([]object.Object, len(arrayObj.Elements))
+		for i, element := range arrayObj.Elements {
+			decElement, decErr := DecryptObject(element, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			elements[i] = decElement
+		}
+		return &object.Array{Elements: elements}, nil
+
+	case object.HASH_OBJ:
+		hashObj := decObj.(*object.Hash)
+		pairs := make(map[object.HashKey]object.HashPair, len(hashObj.Pairs))
+		for hashKey, pair := range hashObj.Pairs {
+			decKey, decErr := DecryptObject(pair.Key, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			decValue, decErr := DecryptObject(pair.Value, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			pairs[hashKey] = object.HashPair{Key: decKey, Value: decValue}
+		}
+		return &object.Hash{Pairs: pairs}, nil
+
+	case object.CLOSURE_OBJ:
+		closureObj := decObj.(*object.Closure)
+		free := make([]object.Object, len(closureObj.Free))
+		for i, freeObj := range closureObj.Free {
+			decFree, decErr := DecryptObject(freeObj, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			free[i] = decFree
+		}
+		return &object.Closure{Fn: closureObj.Fn, Free: free}, nil
+
+	case object.COMPILED_FN_OBJ, object.BUILTIN_OBJ:
 		return decObj, nil
 	}
 

@@ -589,6 +589,184 @@ func TestGlobalsGrowBeyondInitialCapacity(t *testing.T) {
 	}
 }
 
+func TestEncryptObjectSupportsCompositeRuntimeObjects(t *testing.T) {
+	array := &object.Array{Elements: []object.Object{&object.Integer{Value: 7}, &object.Float{Value: 2.5}, global.Null}}
+	hashKey := (&object.String{Value: "k"}).HashKey()
+	hash := &object.Hash{Pairs: map[object.HashKey]object.HashPair{
+		hashKey: {Key: &object.String{Value: "k"}, Value: &object.Integer{Value: 9}},
+	}}
+	closure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{1, 2, 3}}, Free: []object.Object{&object.Integer{Value: 11}, hash}}
+
+	for name, value := range map[string]object.Object{
+		"float":   &object.Float{Value: 3.25},
+		"null":    global.Null,
+		"array":   array,
+		"hash":    hash,
+		"closure": closure,
+	} {
+		enc, err := mutil.EncryptObject(value, 3, "pwd")
+		if err != nil {
+			t.Fatalf("encrypt %s failed: %s", name, err)
+		}
+		dec, err := mutil.DecryptObject(enc, 3, "pwd")
+		if err != nil {
+			t.Fatalf("decrypt %s failed: %s", name, err)
+		}
+		if dec.Type() != value.Type() {
+			t.Fatalf("wrong decrypted %s type: got=%s want=%s", name, dec.Type(), value.Type())
+		}
+		if name == "closure" {
+			decryptedClosure := dec.(*object.Closure)
+			if len(decryptedClosure.Free) != 2 {
+				t.Fatalf("wrong decrypted closure free count: got=%d want=2", len(decryptedClosure.Free))
+			}
+			if err := testIntegerObject(11, decryptedClosure.Free[0]); err != nil {
+				t.Fatalf("wrong decrypted closure free value: %s", err)
+			}
+			continue
+		}
+		if got, want := dec.Inspect(), value.Inspect(); got != want {
+			t.Fatalf("wrong decrypted %s: got=%q want=%q", name, got, want)
+		}
+	}
+}
+
+func TestStoredGlobalsRemainEncryptedAtRest(t *testing.T) {
+	vm, err := runEncryptedVM("let secret = 42; secret;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	stored := vm.globals[0]
+	if stored.Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("global stored decrypted: got=%s", stored.Type())
+	}
+
+	if err := testIntegerObject(42, vm.LastPoppedStackElement()); err != nil {
+		t.Fatalf("wrong result: %s", err)
+	}
+}
+
+func TestClosureFreeVarsRemainEncryptedAtRest(t *testing.T) {
+	vm, err := runEncryptedVM("let newClosure = fn(a) { fn() { a; }; }; let closure = newClosure(99); closure;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	closure, ok := vm.stack[vm.stackPointer].(*object.Closure)
+	if !ok {
+		t.Fatalf("expected stored closure result, got=%T", vm.stack[vm.stackPointer])
+	}
+
+	if len(closure.Free) != 1 {
+		t.Fatalf("wrong number of free vars: got=%d want=1", len(closure.Free))
+	}
+
+	if closure.Free[0].Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("closure free var stored decrypted: got=%s", closure.Free[0].Type())
+	}
+}
+
+func TestArrayAndHashElementsRemainEncryptedAtRest(t *testing.T) {
+	vm, err := runEncryptedVM("let array = [1, 2]; let hash = {" + "\"a\"" + ": 3}; [array, hash];")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	result, ok := vm.stack[vm.stackPointer].(*object.Array)
+	if !ok {
+		t.Fatalf("expected stored array result, got=%T", vm.stack[vm.stackPointer])
+	}
+
+	storedArray, ok := result.Elements[0].(*object.Array)
+	if !ok {
+		t.Fatalf("expected nested array, got=%T", result.Elements[0])
+	}
+	if storedArray.Elements[0].Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("array element stored decrypted: got=%s", storedArray.Elements[0].Type())
+	}
+
+	storedHash, ok := result.Elements[1].(*object.Hash)
+	if !ok {
+		t.Fatalf("expected nested hash, got=%T", result.Elements[1])
+	}
+	for _, pair := range storedHash.Pairs {
+		if pair.Key.Type() != object.ENCRYPTED_OBJ {
+			t.Fatalf("hash key stored decrypted: got=%s", pair.Key.Type())
+		}
+		if pair.Value.Type() != object.ENCRYPTED_OBJ {
+			t.Fatalf("hash value stored decrypted: got=%s", pair.Value.Type())
+		}
+	}
+}
+
+func TestBuiltinArgsDoNotOverwriteEncryptedStackStorage(t *testing.T) {
+	vm, err := runEncryptedVM("len(\"four\")")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	storedArg := vm.stack[0]
+	if storedArg == nil {
+		t.Fatalf("expected builtin call stack slot to retain prior storage")
+	}
+	if storedArg.Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("builtin arg slot overwritten with decrypted object: got=%s", storedArg.Type())
+	}
+}
+
+func TestCleanupSensitiveDataWipesRuntimeBuffers(t *testing.T) {
+	vm, err := runEncryptedVM("let secret = [1, 2, 3]; secret;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	if vm.stackPointer == 0 {
+		t.Fatalf("expected stack to have entries before cleanup")
+	}
+
+	vm.CleanupSensitiveData(true)
+
+	if vm.stackPointer != 0 {
+		t.Fatalf("stack pointer not reset: got=%d", vm.stackPointer)
+	}
+
+	for i, entry := range vm.stack {
+		if entry != nil {
+			t.Fatalf("stack entry %d not cleared", i)
+		}
+	}
+
+	for i, c := range vm.constants {
+		if c != nil {
+			t.Fatalf("constant entry %d not cleared", i)
+		}
+	}
+
+	for i, g := range vm.globals {
+		if g != nil {
+			t.Fatalf("global entry %d not cleared", i)
+		}
+	}
+}
+
+func TestCleanupSensitiveDataCanPreserveGlobals(t *testing.T) {
+	vm, err := runEncryptedVM("let secret = 42; secret;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	if vm.globals[0] == nil {
+		t.Fatalf("expected global to be populated before cleanup")
+	}
+
+	vm.CleanupSensitiveData(false)
+
+	if vm.globals[0] == nil {
+		t.Fatalf("global should have been preserved when clearGlobals=false")
+	}
+}
+
 func TestFramesGrowBeyondInitialCapacity(t *testing.T) {
 	mainClosure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{}}}
 	vm := &VM{
