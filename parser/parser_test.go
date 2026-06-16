@@ -637,6 +637,34 @@ func TestParsingHashLiteralsStringKeys(t *testing.T) {
 	}
 }
 
+func TestParsingHashLiteralsFloatVals(t *testing.T) {
+	input := `{"a": 1.5, "b": 2.4141, "c": 355.25511}`
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+
+	checkParserErrors(t, p)
+
+	stmt := program.Statements[0].(*ast.ExpressionStatement)
+	hash, ok := stmt.Expression.(*ast.HashLiteral)
+	if !ok {
+		t.Fatalf("exp is not ast.HashLiteral. got=%T", stmt.Expression)
+	}
+	if len(hash.Pairs) != 3 {
+		t.Errorf("hash.Pairs has wrong length. got=%d", len(hash.Pairs))
+	}
+
+	epxected := map[string]float64{"a": 1.500000, "b": 2.4141, "c": 355.25511}
+	for key, value := range hash.Pairs {
+		literal, ok := key.(*ast.StringLiteral)
+		if !ok {
+			t.Errorf("key is not ast.StringLiteral. got=%T", key)
+		}
+		expectedValue := epxected[literal.String()]
+		testFloatLiteral(t, value, expectedValue)
+	}
+}
+
 func TestParsingEmptyHashLiteral(t *testing.T) {
 	input := "{}"
 	l := lexer.New(input)

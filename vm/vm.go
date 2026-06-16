@@ -3,6 +3,7 @@ package vm
 import (
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"mutant/builtin"
 	"mutant/code"
 	"mutant/compiler"
@@ -162,11 +163,11 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpBang:
-			if err := vm.executeBangOperation(); err != nil {
+			if err := vm.execBangOperation(); err != nil {
 				return err
 			}
 		case code.OpMinus:
-			if err := vm.executeMinusOperation(); err != nil {
+			if err := vm.execMinusOperation(); err != nil {
 				return err
 			}
 		case code.OpAdd, code.OpSub, code.OpMul, code.OpDiv:
@@ -214,7 +215,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpEqual, code.OpUnEqual, code.OpGreater:
-			if err := vm.executeComparison(op); err != nil {
+			if err := vm.execComparison(op); err != nil {
 				return err
 			}
 		case code.OpJump:
@@ -358,7 +359,7 @@ func (vm *VM) Run() error {
 				return err
 			}
 			vm.currentFrame().ip++
-			if err := vm.executeCall(int(numArgs)); err != nil {
+			if err := vm.execCall(int(numArgs)); err != nil {
 				return err
 			}
 		case code.OpReturnValue:
@@ -564,6 +565,12 @@ func (vm *VM) execBinaryOperation(op code.Opcode) error {
 		return vm.execBinaryStringOperation(op, left, right)
 	}
 
+	ans1 := mutil.AssertObjectTypes(string(rtype), object.INTEGER_OBJ, object.FLOAT_OBJ)
+	ans2 := mutil.AssertObjectTypes(string(ltype), object.INTEGER_OBJ, object.FLOAT_OBJ)
+	if ans1 && ans2 {
+		return vm.execBinaryFloatOperation(op, left, right)
+	}
+
 	return fmt.Errorf("Unsupported types for binary operation: %s, %s", ltype, rtype)
 }
 
@@ -586,6 +593,36 @@ func (vm *VM) execBinaryIntegerOperation(op code.Opcode, left, right object.Obje
 	}
 
 	return vm.push(&object.Integer{Value: result})
+}
+
+func getFloatVal(obj object.Object) float64 {
+	if obj.Type() == object.INTEGER_OBJ {
+		val := obj.(*object.Integer).Value
+		return float64(val)
+	}
+	return obj.(*object.Float).Value
+}
+func (vm *VM) execBinaryFloatOperation(op code.Opcode, left, right object.Object) error {
+	rval := getFloatVal(right)
+	lval := getFloatVal(left)
+	var result float64
+
+	switch op {
+	case code.OpAdd:
+		result = lval + rval
+	case code.OpSub:
+		result = lval - rval
+	case code.OpMul:
+		result = lval * rval
+	case code.OpDiv:
+		result = lval / rval
+	case code.OpMod:
+		result = math.Mod(lval, rval)
+	default:
+		return fmt.Errorf("Unknown float operator: %d", op)
+	}
+
+	return vm.push(&object.Float{Value: result})
 }
 
 func (vm *VM) execBinaryStringOperation(op code.Opcode, left, right object.Object) error {
@@ -654,7 +691,7 @@ func (vm *VM) execHashIndex(hash, index object.Object) error {
 	return vm.push(pair.Value)
 }
 
-func (vm *VM) executeBangOperation() error {
+func (vm *VM) execBangOperation() error {
 	operand := vm.pop()
 
 	switch operand {
@@ -669,21 +706,39 @@ func (vm *VM) executeBangOperation() error {
 	}
 }
 
-func (vm *VM) executeMinusOperation() error {
+func (vm *VM) execMinusOperation() error {
 	operand := vm.pop()
-	if operand.Type() != object.INTEGER_OBJ {
+	assertion := mutil.AssertObjectTypes(string(operand.Type()), object.INTEGER_OBJ, object.FLOAT_OBJ)
+	if !assertion {
 		return fmt.Errorf("unsupported object type for negation: %s", operand.Type())
 	}
-	value := operand.(*object.Integer).Value
-	return vm.push(&object.Integer{Value: -value})
+
+	switch operand.Type() {
+	case object.INTEGER_OBJ:
+		value := operand.(*object.Integer).Value
+		return vm.push(&object.Integer{Value: -value})
+	case object.FLOAT_OBJ:
+		value := operand.(*object.Float).Value
+		return vm.push(&object.Float{Value: -value})
+	}
+
+	return fmt.Errorf("unknown object: %s", operand.Type())
 }
 
-func (vm *VM) executeComparison(op code.Opcode) error {
+func (vm *VM) execComparison(op code.Opcode) error {
 	right := vm.pop()
 	left := vm.pop()
 
-	if left.Type() == object.INTEGER_OBJ || right.Type() == object.INTEGER_OBJ {
-		return vm.executeIntegerComparison(op, left, right)
+	if left.Type() == object.INTEGER_OBJ && right.Type() == object.INTEGER_OBJ {
+		return vm.execIntegerComparison(op, left, right)
+	}
+
+	rtype := right.Type()
+	ltype := left.Type()
+	ans1 := mutil.AssertObjectTypes(string(rtype), object.INTEGER_OBJ, object.FLOAT_OBJ)
+	ans2 := mutil.AssertObjectTypes(string(ltype), object.INTEGER_OBJ, object.FLOAT_OBJ)
+	if ans1 && ans2 {
+		return vm.execFloatComparison(op, left, right)
 	}
 
 	switch op {
@@ -696,7 +751,21 @@ func (vm *VM) executeComparison(op code.Opcode) error {
 	}
 }
 
-func (vm *VM) executeIntegerComparison(op code.Opcode, left, right object.Object) error {
+func (vm *VM) execFloatComparison(op code.Opcode, left, right object.Object) error {
+	leftValue := getFloatVal(left)
+	rightValue := getFloatVal(right)
+	switch op {
+	case code.OpEqual:
+		return vm.push(nativeBoolToBooleanObject(rightValue == leftValue))
+	case code.OpUnEqual:
+		return vm.push(nativeBoolToBooleanObject(rightValue != leftValue))
+	case code.OpGreater:
+		return vm.push(nativeBoolToBooleanObject(leftValue > rightValue))
+	default:
+		return fmt.Errorf("unknown operator: %d", op)
+	}
+}
+func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) error {
 	leftValue := left.(*object.Integer).Value
 	rightValue := right.(*object.Integer).Value
 	switch op {
@@ -762,7 +831,7 @@ func (vm *VM) popFrame() *Frame {
 	return vm.frames[vm.frameIndex]
 }
 
-func (vm *VM) executeCall(numArgs int) error {
+func (vm *VM) execCall(numArgs int) error {
 	var callee object.Object
 	if vm.stack[vm.stackPointer-1-numArgs].Type() == object.CLOSURE_OBJ || vm.stack[vm.stackPointer-1-numArgs].Type() == object.BUILTIN_OBJ {
 		callee = vm.stack[vm.stackPointer-1-numArgs]

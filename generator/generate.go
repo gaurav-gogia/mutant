@@ -174,6 +174,7 @@ func encryptCode(b64ByteCode []byte, password string, privateKey []byte) ([]byte
 }
 
 func registerTypes() {
+	gob.Register(&object.Float{})
 	gob.Register(&object.Integer{})
 	gob.Register(&object.Boolean{})
 	gob.Register(&object.Null{})

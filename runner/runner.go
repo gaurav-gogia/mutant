@@ -237,6 +237,7 @@ func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error
 }
 
 func registerTypes() {
+	gob.Register(&object.Float{})
 	gob.Register(&object.Integer{})
 	gob.Register(&object.Boolean{})
 	gob.Register(&object.Null{})

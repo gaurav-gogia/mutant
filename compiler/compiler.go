@@ -180,6 +180,9 @@ func (c *Compiler) Compile(node ast.Node) error {
 			return err
 		}
 		c.emit(code.OpIndex)
+	case *ast.FloatLiteral:
+		float := &object.Float{Value: node.Value}
+		c.emit(code.OpConstant, c.addConstant(float))
 	case *ast.IntegerLiteral:
 		integer := &object.Integer{Value: node.Value}
 		c.emit(code.OpConstant, c.addConstant(integer))

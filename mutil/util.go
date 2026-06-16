@@ -9,6 +9,7 @@ import (
 	"mutant/global"
 	"mutant/object"
 	"mutant/security"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -151,4 +152,10 @@ func GetPwd() string {
 		return "mutant-default-security-key-v1"
 	}
 	return hex.EncodeToString(derivedKey)
+}
+
+// AssertObjectTypes checks if the given input type is one of the expected object types.
+// It returns true if the input type matches any of the expected types, false otherwise.
+func AssertObjectTypes(inType string, objTypes ...string) bool {
+	return slices.Contains(objTypes, inType)
 }

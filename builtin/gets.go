@@ -10,6 +10,9 @@ func getType(in string) (string, any) {
 	if val, err := strconv.ParseInt(in, 10, 64); err == nil {
 		return "int", val
 	}
+	if val, err := strconv.ParseFloat(in, 64); err == nil {
+		return "float", val
+	}
 	if val, err := strconv.ParseBool(in); err == nil {
 		return "bool", val
 	}
@@ -35,6 +38,9 @@ func Gets(args ...object.Object) object.Object {
 	case "int":
 		inVal := inVal.(int64)
 		return &object.Integer{Value: inVal}
+	case "float":
+		inVal := inVal.(float64)
+		return &object.Float{Value: inVal}
 	case "str":
 		inVal := inVal.(string)
 		return &object.String{Value: inVal}

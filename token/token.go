@@ -15,6 +15,7 @@ const (
 	// ex: add, foobar, x, y, ....
 	IDENT  = "IDENT"
 	INT    = "INT"
+	FLOAT  = "FLOAT"
 	STRING = "STRING"
 
 	// Operators
@@ -23,6 +24,7 @@ const (
 	MINUS      = "-"
 	ASTERISK   = "*"
 	FSLASH     = "/"
+	MODULO     = "%"
 	BSLASH     = "\\"
 	LT         = "<"
 	GT         = ">"

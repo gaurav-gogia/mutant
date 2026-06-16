@@ -3,6 +3,7 @@ package object
 type ObjectType string
 
 const (
+	FLOAT_OBJ        = "FLOAT"
 	INTEGER_OBJ      = "INTEGER"
 	BOOLEAN_OBJ      = "BOOLEAN"
 	NULL_OBJ         = "NULL"

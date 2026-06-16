@@ -60,6 +60,20 @@ func parse(input string) *ast.Program {
 	return p.ParseProgram()
 }
 
+func testFoatObject(expected float64, actual object.Object) error {
+	result, ok := actual.(*object.Float)
+
+	if !ok {
+		return fmt.Errorf("object is not Float. got=%T (%+v)", actual, actual)
+	}
+
+	if result.Value != expected {
+		return fmt.Errorf("object has wrong value. got=%g, want=%g", result.Value, expected)
+	}
+
+	return nil
+}
+
 func testIntegerObject(expected int64, actual object.Object) error {
 	result, ok := actual.(*object.Integer)
 
