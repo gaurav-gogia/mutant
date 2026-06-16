@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"mutant/builtin"
 	"mutant/compiler"
 	"mutant/errrs"
@@ -42,6 +43,9 @@ const PROMPT = ">> "
 func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 	welcome(version, enableMacros)
 	scanner := bufio.NewScanner(in)
+	if scanner.Err() != nil {
+		log.Fatalln(scanner.Err())
+	}
 	env := object.NewEnvironment()
 	macroEnv := object.NewEnvironment()
 

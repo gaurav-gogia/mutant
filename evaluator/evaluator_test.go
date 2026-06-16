@@ -82,7 +82,7 @@ func TestBangOperator(t *testing.T) {
 	}
 }
 
-func TestiFElseExpressions(t *testing.T) {
+func TestIFElseExpressions(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected interface{}
