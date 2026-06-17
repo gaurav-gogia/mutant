@@ -1,3 +1,5 @@
+github.com/Shopify/go-lua v0.0.0-20250718183320-1e37f32ad7d0 h1:oGlw/+ndlFMn8KWLjEX5nULcDwOC4tJy3Kk1Pm84Cys=
+github.com/Shopify/go-lua v0.0.0-20250718183320-1e37f32ad7d0/go.mod h1:M4CxjVc/1Nwka5atBv7G/sb7Ac2BDe3+FxbiT9iVNIQ=
 github.com/aoiflux/graphene v0.1.3 h1:epba9RwpuSaegr1l3v+AjANhfP5ntHIqdTZCen8f9sQ=
 github.com/aoiflux/graphene v0.1.3/go.mod h1:cajlcsc421LNejLmlagk0tn85Oh+usSf7MpGl7uNEJo=
 golang.org/x/crypto v0.52.0 h1:RMs7fP2rXdep0CftQlK8Uf+kibLm7qkCcradZWYz988=
