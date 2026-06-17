@@ -1,4 +1,5 @@
 .vscode/
 mutant
+mutant.exe
 **/.DS_Store
 native/rustffi/lib/target/
