@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"mutant/compiler"
 	"mutant/errrs"
+	"mutant/object"
 	"mutant/security"
 )
 
@@ -247,6 +249,65 @@ func TestEnforceAntiSandboxCompatModeWarnsAndContinues(t *testing.T) {
 	err := enforceAntiSandbox(false, "test-stage")
 	if err != nil {
 		t.Fatalf("expected compat warn mode to continue, got: %v", err)
+	}
+}
+
+func TestExecuteLuaPatchesBeforeVMSucceeds(t *testing.T) {
+	plaintext := []byte("return mutant.version()")
+	password := "runner-lua-success"
+	inslen := 128
+	encrypted, err := security.SecureXOR(plaintext, int64(inslen), password)
+	if err != nil {
+		t.Fatalf("failed to encrypt test patch: %v", err)
+	}
+
+	bytecode := &compiler.ByteCode{
+		Instructions: make([]byte, inslen),
+		LuaPatches: map[string]*object.LuaPatch{
+			"ok": {
+				Name:             "ok",
+				EncryptedPayload: encrypted,
+				ChecksumExpected: object.ComputeChecksum(plaintext),
+			},
+		},
+	}
+
+	err = executeLuaPatchesBeforeVM(bytecode, password, true)
+	if err != nil {
+		t.Fatalf("expected patch execution to succeed, got: %v", err)
+	}
+}
+
+func TestExecuteLuaPatchesBeforeVMEnforcesTamperPolicy(t *testing.T) {
+	plaintext := []byte("return os.getenv('HOME')")
+	password := "runner-lua-fail"
+	inslen := 64
+	encrypted, err := security.SecureXOR(plaintext, int64(inslen), password)
+	if err != nil {
+		t.Fatalf("failed to encrypt test patch: %v", err)
+	}
+
+	bytecode := &compiler.ByteCode{
+		Instructions: make([]byte, inslen),
+		LuaPatches: map[string]*object.LuaPatch{
+			"bad": {
+				Name:             "bad",
+				EncryptedPayload: encrypted,
+				ChecksumExpected: object.ComputeChecksum(plaintext),
+			},
+		},
+	}
+
+	t.Setenv(security.TamperResponseEnv, security.TamperResponseTerminate)
+	err = executeLuaPatchesBeforeVM(bytecode, password, true)
+	if err == nil {
+		t.Fatalf("expected secure mode terminate policy to fail")
+	}
+
+	t.Setenv(security.TamperResponseEnv, security.TamperResponseWarn)
+	err = executeLuaPatchesBeforeVM(bytecode, password, false)
+	if err != nil {
+		t.Fatalf("expected compat warn policy to continue, got: %v", err)
 	}
 }
 

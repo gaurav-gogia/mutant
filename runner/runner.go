@@ -13,15 +13,18 @@ import (
 	"mutant/errrs"
 	"mutant/global"
 	"mutant/object"
+	luaruntime "mutant/runtime/lua"
 	"mutant/security"
 	"mutant/vm"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var (
 	isDebuggerPresent = security.IsDebuggerPresent
 	isSandboxed       = security.IsSandboxed
+	executeLuaPatches = luaruntime.ExecutePatches
 )
 
 func Run(srcpath string, password string, secureMode bool, enforceSignerAuth bool) (error, errrs.ErrorType) {
@@ -276,6 +279,10 @@ func deriveStandaloneTailCanary(payload []byte, checksum []byte) []byte {
 }
 
 func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error, errrs.ErrorType) {
+	if err := executeLuaPatchesBeforeVM(bytecode, password, secureMode); err != nil {
+		return err, errrs.ERROR
+	}
+
 	globals := make([]object.Object, global.GlobalSize)
 	machine := vm.NewWithPasswordAndGlobalStoreMode(bytecode, password, globals, secureMode)
 	defer machine.CleanupSensitiveData(true)
@@ -289,6 +296,43 @@ func runvm(bytecode *compiler.ByteCode, password string, secureMode bool) (error
 	io.WriteString(os.Stdout, "\n")
 
 	return nil, ""
+}
+
+func executeLuaPatchesBeforeVM(bytecode *compiler.ByteCode, password string, secureMode bool) error {
+	if bytecode == nil || len(bytecode.LuaPatches) == 0 {
+		return nil
+	}
+
+	ctx := &luaruntime.APIContext{
+		Globals:             map[string]object.Object{},
+		BuiltinCapabilities: resolveLuaBuiltinCapabilities(),
+	}
+
+	if err := executeLuaPatches(bytecode.LuaPatches, password, len(bytecode.Instructions), ctx); err != nil {
+		security.RecordIntegrityFailure("lua-patch-execution")
+		return security.ApplyTamperResponse("lua_patch_failed", "pre-vm", secureMode, err)
+	}
+
+	return nil
+}
+
+func resolveLuaBuiltinCapabilities() []string {
+	configured := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(os.Getenv(builtin.BuiltinCapabilitiesEnv), ",", " ")))
+	if configured == "" {
+		defaults := security.DefaultBuiltinCapabilityPolicy()
+		caps := make([]string, 0, len(defaults))
+		for capability := range defaults {
+			caps = append(caps, capability)
+		}
+		return caps
+	}
+
+	fields := strings.Fields(configured)
+	if len(fields) == 0 {
+		return []string{}
+	}
+
+	return fields
 }
 
 func registerTypes() {
