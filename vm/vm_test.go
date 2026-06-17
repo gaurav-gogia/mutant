@@ -595,6 +595,8 @@ func TestEncryptObjectSupportsCompositeRuntimeObjects(t *testing.T) {
 	hash := &object.Hash{Pairs: map[object.HashKey]object.HashPair{
 		hashKey: {Key: &object.String{Value: "k"}, Value: &object.Integer{Value: 9}},
 	}}
+	strct := &object.Struct{TypeName: "Point", Fields: map[string]object.Object{"x": &object.Integer{Value: 4}, "y": &object.Integer{Value: 5}}}
+	enumVal := &object.EnumValue{TypeName: "Color", Tag: "Green", Value: &object.Integer{Value: 7}}
 	closure := &object.Closure{Fn: &object.CompiledFunction{Instructions: []byte{1, 2, 3}}, Free: []object.Object{&object.Integer{Value: 11}, hash}}
 
 	for name, value := range map[string]object.Object{
@@ -602,6 +604,8 @@ func TestEncryptObjectSupportsCompositeRuntimeObjects(t *testing.T) {
 		"null":    global.Null,
 		"array":   array,
 		"hash":    hash,
+		"struct":  strct,
+		"enum":    enumVal,
 		"closure": closure,
 	} {
 		enc, err := mutil.EncryptObject(value, 3, "pwd")
@@ -625,9 +629,90 @@ func TestEncryptObjectSupportsCompositeRuntimeObjects(t *testing.T) {
 			}
 			continue
 		}
+		if name == "struct" {
+			decryptedStruct := dec.(*object.Struct)
+			if decryptedStruct.TypeName != "Point" {
+				t.Fatalf("wrong decrypted struct type name: got=%s", decryptedStruct.TypeName)
+			}
+			if err := testIntegerObject(4, decryptedStruct.Fields["x"]); err != nil {
+				t.Fatalf("wrong decrypted struct field x: %s", err)
+			}
+			if err := testIntegerObject(5, decryptedStruct.Fields["y"]); err != nil {
+				t.Fatalf("wrong decrypted struct field y: %s", err)
+			}
+			continue
+		}
 		if got, want := dec.Inspect(), value.Inspect(); got != want {
 			t.Fatalf("wrong decrypted %s: got=%q want=%q", name, got, want)
 		}
+	}
+}
+
+func TestEnumValuesRemainEncryptedAtRest(t *testing.T) {
+	vm, err := runEncryptedVM("enum Color { Red, Blue, Green }; let c = Color.Green; c;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	stored, ok := vm.globals[0].(*object.EnumValue)
+	if !ok {
+		t.Fatalf("expected stored enum in globals, got=%T", vm.globals[0])
+	}
+
+	if stored.TypeName != "Color" || stored.Tag != "Green" {
+		t.Fatalf("wrong stored enum identity: got=%s.%s", stored.TypeName, stored.Tag)
+	}
+
+	if stored.Value != nil {
+		t.Fatalf("expected tag-only enum value to have nil payload, got=%T", stored.Value)
+	}
+
+	last := vm.LastPoppedStackElement()
+	dec, ok := last.(*object.EnumValue)
+	if !ok {
+		t.Fatalf("expected enum result, got=%T", last)
+	}
+
+	if dec.TypeName != "Color" || dec.Tag != "Green" {
+		t.Fatalf("wrong decrypted enum identity: got=%s.%s", dec.TypeName, dec.Tag)
+	}
+}
+
+func TestStructFieldsRemainEncryptedAtRest(t *testing.T) {
+	vm, err := runEncryptedVM("struct Point { x; y; }; let p = Point { x: 10, y: 20 }; p;")
+	if err != nil {
+		t.Fatalf("vm error: %s", err)
+	}
+
+	storedStruct, ok := vm.stack[vm.stackPointer].(*object.Struct)
+	if !ok {
+		t.Fatalf("expected stored struct result, got=%T", vm.stack[vm.stackPointer])
+	}
+
+	x := storedStruct.Fields["x"]
+	y := storedStruct.Fields["y"]
+	if x == nil || y == nil {
+		t.Fatalf("expected struct fields x and y to exist")
+	}
+
+	if x.Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("struct field x stored decrypted: got=%s", x.Type())
+	}
+	if y.Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("struct field y stored decrypted: got=%s", y.Type())
+	}
+
+	decrypted := vm.LastPoppedStackElement()
+	point, ok := decrypted.(*object.Struct)
+	if !ok {
+		t.Fatalf("expected decrypted result to be STRUCT, got=%T", decrypted)
+	}
+
+	if err := testIntegerObject(10, point.Fields["x"]); err != nil {
+		t.Fatalf("wrong decrypted struct field x: %s", err)
+	}
+	if err := testIntegerObject(20, point.Fields["y"]); err != nil {
+		t.Fatalf("wrong decrypted struct field y: %s", err)
 	}
 }
 

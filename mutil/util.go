@@ -153,6 +153,30 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		}
 		encObj = &object.Hash{Pairs: pairs}
 
+	case object.STRUCT_OBJ:
+		structObj := obj.(*object.Struct)
+		fields := make(map[string]object.Object, len(structObj.Fields))
+		for name, value := range structObj.Fields {
+			encValue, encErr := EncryptObject(value, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			fields[name] = encValue
+		}
+		encObj = &object.Struct{TypeName: structObj.TypeName, Fields: fields}
+
+	case object.ENUM_VALUE_OBJ:
+		enumObj := obj.(*object.EnumValue)
+		var encValue object.Object
+		if enumObj.Value != nil {
+			encInner, encErr := EncryptObject(enumObj.Value, length, password)
+			if encErr != nil {
+				return nil, encErr
+			}
+			encValue = encInner
+		}
+		encObj = &object.EnumValue{TypeName: enumObj.TypeName, Tag: enumObj.Tag, Value: encValue}
+
 	case object.CLOSURE_OBJ:
 		closureObj := obj.(*object.Closure)
 		free := make([]object.Object, len(closureObj.Free))
@@ -257,6 +281,30 @@ func DecryptObject(obj object.Object, length int, password string) (object.Objec
 			pairs[hashKey] = object.HashPair{Key: decKey, Value: decValue}
 		}
 		return &object.Hash{Pairs: pairs}, nil
+
+	case object.STRUCT_OBJ:
+		structObj := decObj.(*object.Struct)
+		fields := make(map[string]object.Object, len(structObj.Fields))
+		for name, value := range structObj.Fields {
+			decValue, decErr := DecryptObject(value, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			fields[name] = decValue
+		}
+		return &object.Struct{TypeName: structObj.TypeName, Fields: fields}, nil
+
+	case object.ENUM_VALUE_OBJ:
+		enumObj := decObj.(*object.EnumValue)
+		var decValue object.Object
+		if enumObj.Value != nil {
+			inner, decErr := DecryptObject(enumObj.Value, length, password)
+			if decErr != nil {
+				return nil, decErr
+			}
+			decValue = inner
+		}
+		return &object.EnumValue{TypeName: enumObj.TypeName, Tag: enumObj.Tag, Value: decValue}, nil
 
 	case object.CLOSURE_OBJ:
 		closureObj := decObj.(*object.Closure)

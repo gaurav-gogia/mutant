@@ -1,4 +1,4 @@
-enum Color { Red, Blue, Green }
+enum Color { Red, Blue, Green };
 
 let active = Color.Green;
 

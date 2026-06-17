@@ -594,6 +594,23 @@ func (c *Compiler) compileAssignExpression(node *ast.AssignExpression) error {
 		}
 
 		c.emit(code.OpSetField, fieldNameIndex)
+
+		// If assigning to a named variable field (e.g., p.x = 1), persist the updated struct.
+		if ident, ok := fieldExpr.Left.(*ast.Identifier); ok {
+			symbol, resolved := c.symbolTable.Resolve(ident.Value)
+			if !resolved {
+				return fmt.Errorf("undefined variable: %s", ident.Value)
+			}
+
+			if symbol.Scope == GlobalScope {
+				c.emit(code.OpSetGlobal, symbol.Index)
+				c.emit(code.OpGetGlobal, symbol.Index)
+			} else {
+				c.emit(code.OpSetLocal, symbol.Index)
+				c.emit(code.OpGetLocal, symbol.Index)
+			}
+			c.emit(code.OpGetField, fieldNameIndex)
+		}
 		return nil
 	}
 
