@@ -30,13 +30,12 @@ func TestExecStringBuiltinDisabledByDefault(t *testing.T) {
 	if !ok {
 		t.Fatalf("policy_decision is not String")
 	}
-	if decisionObj.Value != "blocked_missing_capability" {
-		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_missing_capability")
+	if decisionObj.Value != "blocked_disabled" {
+		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
 	}
 }
 
 func TestCommandBuilderRoundTrip(t *testing.T) {
-	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
 	builder := CmdBuilder(&object.String{Value: "powershell"})
 	builder = CmdAdd(builder, &object.String{Value: "$x='a'"})
 	builder = CmdAdd(builder, &object.String{Value: "Write-Output $x"})
@@ -57,7 +56,6 @@ func TestCommandBuilderRoundTrip(t *testing.T) {
 }
 
 func TestCmdRunEmptyBuilderErrors(t *testing.T) {
-	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
 	builder := CmdBuilder()
 	result := CmdRun(builder)
 	if _, ok := result.(*object.Error); !ok {
@@ -65,9 +63,8 @@ func TestCmdRunEmptyBuilderErrors(t *testing.T) {
 	}
 }
 
-func TestExecStringBlockedWhenCapabilityGrantedButExecutionDisabled(t *testing.T) {
-	t.Setenv(BuiltinCapabilitiesEnv, CapabilityCommandExec)
-	t.Setenv(security.CommandExecEnabledEnv, "")
+func TestExecStringBlockedWhenExecutionExplicitlyDisabled(t *testing.T) {
+	t.Setenv(security.CommandExecEnabledEnv, "0")
 
 	result := ExecString(&object.String{Value: "Write-Output 'mutant'"})
 	hash, ok := result.(*object.Hash)
@@ -81,5 +78,13 @@ func TestExecStringBlockedWhenCapabilityGrantedButExecutionDisabled(t *testing.T
 	}
 	if decisionObj.Value != "blocked_disabled" {
 		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
+	}
+
+	errObj, ok := hashValueByKey(hash, "error").(*object.String)
+	if !ok {
+		t.Fatalf("error is not String")
+	}
+	if errObj.Value != "command execution disabled" {
+		t.Fatalf("unexpected error message. got=%q, want=%q", errObj.Value, "command execution disabled")
 	}
 }

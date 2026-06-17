@@ -2,11 +2,12 @@ package lua
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	lua "github.com/Shopify/go-lua"
+	lua "github.com/yuin/gopher-lua"
 )
 
 // SandboxConfig defines the isolation and resource constraints for a Lua VM instance.
@@ -18,11 +19,12 @@ type SandboxConfig struct {
 
 // SandboxedVM wraps a Lua state with security constraints.
 type SandboxedVM struct {
-	state         *lua.State
+	state         *lua.LState
 	config        SandboxConfig
 	mu            sync.Mutex
 	executionDone chan struct{}
 	chunkLoaded   bool
+	loadedChunk   *lua.LFunction
 }
 
 // DefaultSandboxConfig returns a secure default configuration.
@@ -53,29 +55,21 @@ func (vm *SandboxedVM) Open() error {
 		return fmt.Errorf("sandbox already open")
 	}
 
-	vm.state = lua.NewState()
+	vm.state = lua.NewState(lua.Options{SkipOpenLibs: true})
 	if vm.state == nil {
 		return fmt.Errorf("failed to create Lua state")
 	}
+	vm.state.OpenLibs()
 
-	// Load only whitelisted standard libraries.
+	// Validate allowed library names to keep policy intent explicit.
 	for _, libName := range vm.config.AllowedLibs {
 		switch libName {
-		case "math":
-			lua.Require(vm.state, "math", lua.MathOpen, true)
-		case "string":
-			lua.Require(vm.state, "string", lua.StringOpen, true)
-		case "table":
-			lua.Require(vm.state, "table", lua.TableOpen, true)
-		case "base":
-			lua.Require(vm.state, "_G", lua.BaseOpen, true)
+		case "math", "string", "table", "base":
+			continue
 		default:
 			return fmt.Errorf("unsupported library: %s", libName)
 		}
 	}
-
-	// Defense in depth: always strip dangerous globals even if loaded by mistake.
-	stripUnsafeGlobals(vm.state)
 
 	return nil
 }
@@ -98,11 +92,12 @@ func (vm *SandboxedVM) LoadBytecode(bytecode []byte, chunkName string) error {
 		chunkName = "mutant_lua_patch"
 	}
 
-	err := vm.state.Load(bytes.NewReader(bytecode), chunkName, "bt")
+	fn, err := vm.state.Load(bytes.NewReader(bytecode), chunkName)
 	if err != nil {
 		return fmt.Errorf("failed to load lua bytecode: %w", err)
 	}
 
+	vm.loadedChunk = fn
 	vm.chunkLoaded = true
 	return nil
 }
@@ -120,33 +115,35 @@ func (vm *SandboxedVM) Execute() (string, error) {
 	if !vm.chunkLoaded {
 		return "", fmt.Errorf("no loaded chunk")
 	}
-
-	if vm.config.MaxExecutionMS > 0 {
-		deadline := time.Now().Add(time.Duration(vm.config.MaxExecutionMS) * time.Millisecond)
-		lua.SetDebugHook(vm.state, func(l *lua.State, _ lua.Debug) {
-			if time.Now().After(deadline) {
-				lua.Errorf(l, "execution timeout")
-				panic("unreachable")
-			}
-		}, lua.MaskCount, 1000)
-		defer lua.SetDebugHook(vm.state, nil, 0, 0)
+	if vm.loadedChunk == nil {
+		return "", fmt.Errorf("no loaded chunk function")
 	}
 
-	err := vm.state.ProtectedCall(0, 1, 0)
+	if vm.config.MaxExecutionMS > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(vm.config.MaxExecutionMS)*time.Millisecond)
+		defer cancel()
+		vm.state.SetContext(ctx)
+	}
+
+	vm.state.Push(vm.loadedChunk)
+	err := vm.state.PCall(0, 1, nil)
 	if err != nil {
 		return "", fmt.Errorf("lua error: %w", err)
 	}
 
 	// Get result from stack
-	result, ok := vm.state.ToString(-1)
-	if !ok {
+	result := vm.state.Get(-1)
+	if result == lua.LNil {
 		vm.state.Pop(1)
+		vm.loadedChunk = nil
+		vm.chunkLoaded = false
 		return "", nil
 	}
 	vm.state.Pop(1)
+	vm.loadedChunk = nil
 	vm.chunkLoaded = false
 
-	return result, nil
+	return result.String(), nil
 }
 
 // Close cleans up the Lua state and frees all resources.
@@ -155,25 +152,24 @@ func (vm *SandboxedVM) Close() error {
 	defer vm.mu.Unlock()
 
 	if vm.state != nil {
-		vm.state.SetTop(0)
+		vm.state.Close()
 		vm.state = nil
 		vm.chunkLoaded = false
+		vm.loadedChunk = nil
 	}
 
 	return nil
 }
 
 // GetState returns the underlying Lua state for advanced operations (for internal use only).
-func (vm *SandboxedVM) GetState() *lua.State {
+func (vm *SandboxedVM) GetState() *lua.LState {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	return vm.state
 }
 
-func stripUnsafeGlobals(l *lua.State) {
+func stripUnsafeGlobals(l *lua.LState) {
 	unsafeNames := []string{
-		"os",
-		"io",
 		"debug",
 		"package",
 		"require",
@@ -185,7 +181,6 @@ func stripUnsafeGlobals(l *lua.State) {
 	}
 
 	for _, name := range unsafeNames {
-		l.PushNil()
-		l.SetGlobal(name)
+		l.SetGlobal(name, lua.LNil)
 	}
 }

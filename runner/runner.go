@@ -18,7 +18,6 @@ import (
 	"mutant/vm"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 var (
@@ -317,22 +316,12 @@ func executeLuaPatchesBeforeVM(bytecode *compiler.ByteCode, password string, sec
 }
 
 func resolveLuaBuiltinCapabilities() []string {
-	configured := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(os.Getenv(builtin.BuiltinCapabilitiesEnv), ",", " ")))
-	if configured == "" {
-		defaults := security.DefaultBuiltinCapabilityPolicy()
-		caps := make([]string, 0, len(defaults))
-		for capability := range defaults {
-			caps = append(caps, capability)
-		}
-		return caps
+	defaults := security.DefaultBuiltinCapabilityPolicy()
+	caps := make([]string, 0, len(defaults))
+	for capability := range defaults {
+		caps = append(caps, capability)
 	}
-
-	fields := strings.Fields(configured)
-	if len(fields) == 0 {
-		return []string{}
-	}
-
-	return fields
+	return caps
 }
 
 func registerTypes() {

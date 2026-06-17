@@ -2,10 +2,9 @@ module mutant
 
 go 1.26
 
-require (
-	github.com/Shopify/go-lua v0.0.0-20250718183320-1e37f32ad7d0
-	golang.org/x/crypto v0.52.0
-)
+require golang.org/x/crypto v0.52.0
+
+require github.com/yuin/gopher-lua v1.1.2
 
 require (
 	github.com/aoiflux/graphene v0.1.3

@@ -50,6 +50,10 @@ var Builtins = []struct {
 	{"http_get", &BuiltIn{HttpGet}, "network"},
 	{"http_post", &BuiltIn{HttpPost}, "network"},
 	{"http_request", &BuiltIn{HttpRequest}, "network"},
+	// lua
+	{"lua_run_string", &BuiltIn{LuaRunString}, ""},
+	{"lua_run_file", &BuiltIn{LuaRunFile}, "filesystem"},
+	{"lua_run_http", &BuiltIn{LuaRunHTTP}, "network"},
 	// graph db
 	{"db_open", &BuiltIn{DbOpen}, ""},
 	{"db_open_disk", &BuiltIn{DbOpenDisk}, ""},

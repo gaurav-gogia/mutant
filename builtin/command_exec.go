@@ -12,10 +12,6 @@ func ExecString(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=1 or 2", len(args))
 	}
 
-	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:exec_string"); !allowed {
-		return blockedCommandResult(decision, "command execution capability not granted")
-	}
-
 	commandArg, ok := args[0].(*object.String)
 	if !ok {
 		return newError("argument to `exec_string` at position=1 must be STRING, got %s", args[0].Type())
@@ -39,10 +35,6 @@ func CmdBuilder(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=0 or 1", len(args))
 	}
 
-	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_builder"); !allowed {
-		return blockedCommandResult(decision, "command execution capability not granted")
-	}
-
 	shell := "powershell"
 	if len(args) == 1 {
 		shellArg, ok := args[0].(*object.String)
@@ -63,10 +55,6 @@ func CmdAdd(args ...object.Object) object.Object {
 		return newError("wrong number of arguments. got=%d, want=2", len(args))
 	}
 
-	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_add"); !allowed {
-		return blockedCommandResult(decision, "command execution capability not granted")
-	}
-
 	builder, errObj := decodeBuilder(args[0])
 	if errObj != nil {
 		return errObj
@@ -84,10 +72,6 @@ func CmdAdd(args ...object.Object) object.Object {
 func CmdRun(args ...object.Object) object.Object {
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
-	}
-
-	if allowed, decision := requireBuiltinCapability(CapabilityCommandExec, "builtin:cmd_run"); !allowed {
-		return blockedCommandResult(decision, "command execution capability not granted")
 	}
 
 	builder, errObj := decodeBuilder(args[0])

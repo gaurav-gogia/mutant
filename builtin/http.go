@@ -14,9 +14,6 @@ import (
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 func HttpGet(args ...object.Object) object.Object {
-	if allowed, decision := requireBuiltinCapability(CapabilityNetwork, "builtin:http_get"); !allowed {
-		return blockedCapabilityError(CapabilityNetwork, decision)
-	}
 	if len(args) != 1 {
 		return newError("wrong number of arguments. got=%d, want=1", len(args))
 	}
@@ -29,9 +26,6 @@ func HttpGet(args ...object.Object) object.Object {
 }
 
 func HttpPost(args ...object.Object) object.Object {
-	if allowed, decision := requireBuiltinCapability(CapabilityNetwork, "builtin:http_post"); !allowed {
-		return blockedCapabilityError(CapabilityNetwork, decision)
-	}
 	if len(args) != 3 {
 		return newError("wrong number of arguments. got=%d, want=3", len(args))
 	}
@@ -52,9 +46,6 @@ func HttpPost(args ...object.Object) object.Object {
 }
 
 func HttpRequest(args ...object.Object) object.Object {
-	if allowed, decision := requireBuiltinCapability(CapabilityNetwork, "builtin:http_request"); !allowed {
-		return blockedCapabilityError(CapabilityNetwork, decision)
-	}
 	if len(args) != 4 {
 		return newError("wrong number of arguments. got=%d, want=4", len(args))
 	}

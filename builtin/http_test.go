@@ -10,8 +10,6 @@ import (
 )
 
 func TestHttpRequestAcceptsStructHeaders(t *testing.T) {
-	t.Setenv(BuiltinCapabilitiesEnv, CapabilityNetwork)
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("XToken"); got != "abc123" {
 			t.Fatalf("unexpected header XToken=%q", got)
@@ -47,8 +45,6 @@ func TestHttpRequestAcceptsStructHeaders(t *testing.T) {
 }
 
 func TestHttpPostAcceptsStructBodyAsJSON(t *testing.T) {
-	t.Setenv(BuiltinCapabilitiesEnv, CapabilityNetwork)
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 

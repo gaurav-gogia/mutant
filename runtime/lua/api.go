@@ -2,10 +2,11 @@ package lua
 
 import (
 	"fmt"
+	"math"
 
 	"mutant/object"
 
-	lua "github.com/Shopify/go-lua"
+	lua "github.com/yuin/gopher-lua"
 )
 
 // APIContext holds Mutant runtime data passed to Lua environment.
@@ -34,33 +35,30 @@ func RegisterMutantAPI(vm *SandboxedVM, ctx *APIContext) error {
 	}
 
 	// Create "mutant" table in Lua
-	state.NewTable()
+	mutantTable := state.NewTable()
 
 	// Register mutant.get_global(name) - read-only access to Mutant globals
-	state.PushGoFunction(func(l *lua.State) int {
-		name := lua.CheckString(l, 1)
+	state.SetField(mutantTable, "get_global", state.NewFunction(func(l *lua.LState) int {
+		name := l.CheckString(1)
 		if obj, ok := ctx.Globals[name]; ok {
 			// Convert object to Lua value
-			luaValue := objectToLua(l, obj)
-			if luaValue {
+			if objectToLua(l, obj) {
 				return 1
 			}
 		}
-		l.PushNil()
+		l.Push(lua.LNil)
 		return 1
-	})
-	state.SetField(-2, "get_global")
+	}))
 
 	// Register mutant.patch_name() - returns current patch name
-	state.PushGoFunction(func(l *lua.State) int {
-		l.PushString(ctx.PatchName)
+	state.SetField(mutantTable, "patch_name", state.NewFunction(func(l *lua.LState) int {
+		l.Push(lua.LString(ctx.PatchName))
 		return 1
-	})
-	state.SetField(-2, "patch_name")
+	}))
 
 	// Register mutant.can_use_builtin(name) - check if patch has capability
-	state.PushGoFunction(func(l *lua.State) int {
-		name := lua.CheckString(l, 1)
+	state.SetField(mutantTable, "can_use_builtin", state.NewFunction(func(l *lua.LState) int {
+		name := l.CheckString(1)
 		hasCapability := false
 		for _, cap := range ctx.BuiltinCapabilities {
 			if cap == name {
@@ -68,163 +66,156 @@ func RegisterMutantAPI(vm *SandboxedVM, ctx *APIContext) error {
 				break
 			}
 		}
-		l.PushBoolean(hasCapability)
+		l.Push(lua.LBool(hasCapability))
 		return 1
-	})
-	state.SetField(-2, "can_use_builtin")
+	}))
 
 	// Register mutant.version() - returns Mutant version for compatibility checks
-	state.PushGoFunction(func(l *lua.State) int {
-		l.PushString("2.1.0")
+	state.SetField(mutantTable, "version", state.NewFunction(func(l *lua.LState) int {
+		l.Push(lua.LString("2.1.0"))
 		return 1
-	})
-	state.SetField(-2, "version")
+	}))
 
 	// Set mutant table as global
-	state.SetGlobal("mutant")
+	state.SetGlobal("mutant", mutantTable)
 
 	return nil
 }
 
 // objectToLua converts a Mutant object.Object to a Lua value on the stack.
 // Returns true if conversion succeeded, false otherwise.
-func objectToLua(l *lua.State, obj object.Object) bool {
+func objectToLua(l *lua.LState, obj object.Object) bool {
+	value, ok := objectToLuaValue(obj)
+	if !ok {
+		return false
+	}
+	l.Push(value)
+	return true
+}
+
+func objectToLuaValue(obj object.Object) (lua.LValue, bool) {
 	if obj == nil {
-		l.PushNil()
-		return true
+		return lua.LNil, true
 	}
 
 	switch obj.Type() {
 	case object.INTEGER_OBJ:
 		intObj := obj.(*object.Integer)
-		l.PushInteger(int(intObj.Value))
-		return true
+		return lua.LNumber(float64(intObj.Value)), true
 
 	case object.FLOAT_OBJ:
 		floatObj := obj.(*object.Float)
-		l.PushNumber(floatObj.Value)
-		return true
+		return lua.LNumber(floatObj.Value), true
 
 	case object.BOOLEAN_OBJ:
 		boolObj := obj.(*object.Boolean)
-		l.PushBoolean(boolObj.Value)
-		return true
+		return lua.LBool(boolObj.Value), true
 
 	case object.STRING_OBJ:
 		strObj := obj.(*object.String)
-		l.PushString(strObj.Value)
-		return true
+		return lua.LString(strObj.Value), true
 
 	case object.NULL_OBJ:
-		l.PushNil()
-		return true
+		return lua.LNil, true
 
 	case object.ARRAY_OBJ:
 		arrObj := obj.(*object.Array)
-		l.NewTable()
+		table := &lua.LTable{}
 		for i, elem := range arrObj.Elements {
-			l.PushInteger(i + 1) // Lua arrays are 1-indexed
-			if !objectToLua(l, elem) {
-				l.PushNil()
+			value, ok := objectToLuaValue(elem)
+			if !ok {
+				value = lua.LNil
 			}
-			l.SetTable(-3)
+			table.RawSetInt(i+1, value)
 		}
-		return true
+		return table, true
 
 	case object.HASH_OBJ:
 		hashObj := obj.(*object.Hash)
-		l.NewTable()
+		table := &lua.LTable{}
 		for _, pair := range hashObj.Pairs {
-			// Push key
-			if !objectToLua(l, pair.Key) {
-				l.PushNil()
+			key, ok := objectToLuaValue(pair.Key)
+			if !ok {
+				key = lua.LNil
 			}
-			// Push value
-			if !objectToLua(l, pair.Value) {
-				l.PushNil()
+			value, ok := objectToLuaValue(pair.Value)
+			if !ok {
+				value = lua.LNil
 			}
-			l.SetTable(-3)
+			table.RawSet(key, value)
 		}
-		return true
+		return table, true
 
 	case object.STRUCT_OBJ:
 		structObj := obj.(*object.Struct)
-		l.NewTable()
+		table := &lua.LTable{}
 		for name, value := range structObj.Fields {
-			l.PushString(name)
-			if !objectToLua(l, value) {
-				l.PushNil()
+			fieldValue, ok := objectToLuaValue(value)
+			if !ok {
+				fieldValue = lua.LNil
 			}
-			l.SetTable(-3)
+			table.RawSetString(name, fieldValue)
 		}
-		return true
+		return table, true
 
 	case object.ENUM_VALUE_OBJ:
 		enumObj := obj.(*object.EnumValue)
-		l.NewTable()
-		l.PushString("_type_name")
-		l.PushString(enumObj.TypeName)
-		l.SetTable(-3)
-		l.PushString("_tag")
-		l.PushString(enumObj.Tag)
-		l.SetTable(-3)
+		table := &lua.LTable{}
+		table.RawSetString("_type_name", lua.LString(enumObj.TypeName))
+		table.RawSetString("_tag", lua.LString(enumObj.Tag))
 		if enumObj.Value != nil {
-			l.PushString("_value")
-			objectToLua(l, enumObj.Value)
-			l.SetTable(-3)
+			value, ok := objectToLuaValue(enumObj.Value)
+			if !ok {
+				value = lua.LNil
+			}
+			table.RawSetString("_value", value)
 		}
-		return true
+		return table, true
 
 	default:
 		// Unsupported types (functions, closures, etc.) cannot be converted
-		return false
+		return nil, false
 	}
 }
 
 // luaToObject converts a Lua value to a Mutant object.Object.
 // Only safe conversions are performed; complex types are rejected.
-func luaToObject(l *lua.State, index int) object.Object {
-	switch l.TypeOf(index) {
-	case lua.TypeNil:
+func luaToObject(l *lua.LState, index int) object.Object {
+	return luaToObjectValue(l.Get(index))
+}
+
+func luaToObjectValue(value lua.LValue) object.Object {
+	switch typed := value.(type) {
+	case *lua.LNilType:
 		return &object.Null{}
 
-	case lua.TypeBoolean:
-		return &object.Boolean{Value: l.ToBoolean(index)}
+	case lua.LBool:
+		return &object.Boolean{Value: bool(typed)}
 
-	case lua.TypeNumber:
-		if n, ok := l.ToInteger(index); ok {
+	case lua.LNumber:
+		n := float64(typed)
+		if math.Trunc(n) == n {
 			return &object.Integer{Value: int64(n)}
 		}
-		if f, ok := l.ToNumber(index); ok {
-			return &object.Float{Value: f}
-		}
-		return &object.Null{}
+		return &object.Float{Value: n}
 
-	case lua.TypeString:
-		if s, ok := l.ToString(index); ok {
-			return &object.String{Value: s}
-		}
-		return &object.Null{}
+	case lua.LString:
+		return &object.String{Value: string(typed)}
 
-	case lua.TypeTable:
+	case *lua.LTable:
 		// Convert table to either Array or Hash depending on structure
 		// For now, convert to Hash for safety
 		hashObj := &object.Hash{Pairs: make(map[object.HashKey]object.HashPair)}
-
-		absIndex := l.AbsIndex(index)
-		l.PushNil()
-		for l.Next(absIndex) {
-			// Stack: table, key, value
-			key := luaToObject(l, -2)
-			value := luaToObject(l, -1)
+		typed.ForEach(func(k lua.LValue, v lua.LValue) {
+			key := luaToObjectValue(k)
+			value := luaToObjectValue(v)
 
 			hashKey, ok := key.(object.Hashable)
 			if ok {
 				pair := object.HashPair{Key: key, Value: value}
 				hashObj.Pairs[hashKey.HashKey()] = pair
 			}
-			l.Pop(1) // Remove value, keep key for next iteration
-		}
+		})
 		return hashObj
 
 	default:
