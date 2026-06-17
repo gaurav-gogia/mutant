@@ -19,6 +19,10 @@ const (
 	COMPILED_FN_OBJ  = "COMPILED_FN_OBJ"
 	CLOSURE_OBJ      = "CLOSURE"
 	ENCRYPTED_OBJ    = "ENCRYPTED"
+	STRUCT_OBJ       = "STRUCT"
+	ENUM_VALUE_OBJ   = "ENUM_VALUE"
+	BREAK_OBJ        = "BREAK"
+	CONTINUE_OBJ     = "CONTINUE"
 )
 
 type Object interface {

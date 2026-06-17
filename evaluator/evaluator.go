@@ -20,7 +20,7 @@ func Eval(n ast.Node, env *object.Environment) object.Object {
 		return &object.Integer{Value: node.Value}
 
 	case *ast.Boolean:
-		return &object.Boolean{Value: node.Value}
+		return nativeBoolToBoolObject(node.Value)
 
 	case *ast.PrefixExpression:
 		right := Eval(node.Right, env)
@@ -107,6 +107,30 @@ func Eval(n ast.Node, env *object.Environment) object.Object {
 			return val
 		}
 		env.Set(node.Name.Value, val)
+
+	case *ast.ForStatement:
+		return evalForStatement(node, env)
+
+	case *ast.BreakStatement:
+		return &object.Break{}
+
+	case *ast.ContinueStatement:
+		return &object.Continue{}
+
+	case *ast.StructStatement:
+		return evalStructStatement(node, env)
+
+	case *ast.EnumStatement:
+		return evalEnumStatement(node, env)
+
+	case *ast.AssignExpression:
+		return evalAssignExpression(node, env)
+
+	case *ast.FieldExpression:
+		return evalFieldExpression(node, env)
+
+	case *ast.StructLiteral:
+		return evalStructLiteral(node, env)
 	}
 	return nil
 }
@@ -132,7 +156,8 @@ func evalBlockStatement(block *ast.BlockStatement, env *object.Environment) obje
 		res = Eval(stmt, env)
 		if res != nil {
 			rt := res.Type()
-			if rt == object.RETURN_VALUE_OBJ || rt == object.ERROR_OBJ {
+			if rt == object.RETURN_VALUE_OBJ || rt == object.ERROR_OBJ ||
+				rt == object.BREAK_OBJ || rt == object.CONTINUE_OBJ {
 				return res
 			}
 		}
@@ -220,4 +245,180 @@ func evalHashLiteral(node *ast.HashLiteral, env *object.Environment) object.Obje
 		pairs[hashed] = object.HashPair{Key: key, Value: value}
 	}
 	return &object.Hash{Pairs: pairs}
+}
+
+func evalForStatement(node *ast.ForStatement, env *object.Environment) object.Object {
+	// Create a new scope for the loop to isolate init variable
+	loopEnv := object.NewEnclosedEnvironement(env)
+
+	// Execute init statement once
+	if node.Init != nil {
+		Eval(node.Init, loopEnv)
+	}
+
+	var result object.Object
+
+	// Loop: check condition, execute body, execute post
+	for {
+		if node.Condition != nil {
+			condition := Eval(node.Condition, loopEnv)
+			if isError(condition) {
+				return condition
+			}
+			if !isTruthy(condition) {
+				break
+			}
+		}
+
+		result = Eval(node.Body, loopEnv)
+
+		// Handle break: unwrap and return NULL
+		if result != nil && result.Type() == object.BREAK_OBJ {
+			return NULL
+		}
+
+		// Handle continue: skip post and go to next iteration
+		if result != nil && result.Type() == object.CONTINUE_OBJ {
+			// Continue with post execution
+		} else if result != nil {
+			// Handle return or error
+			if result.Type() == object.RETURN_VALUE_OBJ || result.Type() == object.ERROR_OBJ {
+				return result
+			}
+		}
+
+		// Execute post expression
+		if node.Post != nil {
+			postResult := Eval(node.Post, loopEnv)
+			if isError(postResult) {
+				return postResult
+			}
+		}
+	}
+
+	return NULL
+}
+
+func evalStructStatement(node *ast.StructStatement, env *object.Environment) object.Object {
+	// Store struct definition as a special marker object in environment
+	// We'll use a simple approach: store field names in environment with prefix
+	structDefKey := "__struct_" + node.Name.Value
+	fieldNames := []string{}
+	for _, field := range node.Fields {
+		fieldNames = append(fieldNames, field.Value)
+	}
+
+	// Create a simple marker to track this is a struct definition
+	defMarker := &object.String{Value: "struct:" + node.Name.Value}
+	env.Set(structDefKey, defMarker)
+
+	// Store field list
+	for i, fieldName := range fieldNames {
+		fieldKey := structDefKey + "_field_" + string(rune(i))
+		env.Set(fieldKey, &object.String{Value: fieldName})
+	}
+
+	return NULL
+}
+
+func evalEnumStatement(node *ast.EnumStatement, env *object.Environment) object.Object {
+	// Store enum definition in environment
+	enumDefKey := "__enum_" + node.Name.Value
+	defMarker := &object.String{Value: "enum:" + node.Name.Value}
+	env.Set(enumDefKey, defMarker)
+
+	// Store each variant as accessible through enum name
+	for i, variant := range node.Variants {
+		variantKey := enumDefKey + "_variant_" + string(rune(i))
+		env.Set(variantKey, &object.String{Value: variant.Value})
+
+		// Also create enum value accessible as EnumName.VariantName
+		enumValKey := node.Name.Value + "." + variant.Value
+		env.Set(enumValKey, &object.EnumValue{
+			TypeName: node.Name.Value,
+			Tag:      variant.Value,
+			Value:    NULL,
+		})
+	}
+
+	return NULL
+}
+
+func evalAssignExpression(node *ast.AssignExpression, env *object.Environment) object.Object {
+	value := Eval(node.Value, env)
+	if isError(value) {
+		return value
+	}
+
+	// Handle simple identifier assignment: x = value
+	if ident, ok := node.Left.(*ast.Identifier); ok {
+		if _, updated := env.Update(ident.Value, value); !updated {
+			env.Set(ident.Value, value)
+		}
+		return value
+	}
+
+	// Handle field assignment: struct.field = value
+	if fieldExpr, ok := node.Left.(*ast.FieldExpression); ok {
+		// Evaluate the left side (should be a struct)
+		obj := Eval(fieldExpr.Left, env)
+		if isError(obj) {
+			return obj
+		}
+
+		// Check if it's a struct
+		structObj, ok := obj.(*object.Struct)
+		if !ok {
+			return newError("cannot assign field on non-struct: %s", obj.Type())
+		}
+
+		// Assign the field
+		structObj.Fields[fieldExpr.Field.Value] = value
+		return value
+	}
+
+	return newError("invalid assignment target")
+}
+
+func evalFieldExpression(node *ast.FieldExpression, env *object.Environment) object.Object {
+	// Handle enum variant access without evaluating the left identifier first.
+	if ident, ok := node.Left.(*ast.Identifier); ok {
+		enumValKey := ident.Value + "." + node.Field.Value
+		if val, ok := env.Get(enumValKey); ok {
+			return val
+		}
+	}
+
+	// Evaluate the left side
+	left := Eval(node.Left, env)
+	if isError(left) {
+		return left
+	}
+
+	// Handle struct field access
+	if structObj, ok := left.(*object.Struct); ok {
+		if val, ok := structObj.Fields[node.Field.Value]; ok {
+			return val
+		}
+		return NULL
+	}
+
+	return newError("cannot access field %s on type %s", node.Field.Value, left.Type())
+}
+
+func evalStructLiteral(node *ast.StructLiteral, env *object.Environment) object.Object {
+	// Evaluate all field values
+	fields := make(map[string]object.Object)
+	for _, fieldVal := range node.Fields {
+		val := Eval(fieldVal.Value, env)
+		if isError(val) {
+			return val
+		}
+		fields[fieldVal.Name.Value] = val
+	}
+
+	return &object.Struct{
+		TypeName: node.Name.Value,
+		Fields:   fields,
+	}
 }

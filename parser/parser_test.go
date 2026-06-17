@@ -794,3 +794,171 @@ func TestFunctionLiteralWithName(t *testing.T) {
 			function.Name)
 	}
 }
+
+func TestForStatementParsing(t *testing.T) {
+	input := `for (let i = 0; i < 5; i = i + 1) { i; }`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	if len(program.Statements) != 1 {
+		t.Fatalf("program.Statements does not contain 1 statement. got=%d", len(program.Statements))
+	}
+
+	stmt, ok := program.Statements[0].(*ast.ForStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not ast.ForStatement. got=%T", program.Statements[0])
+	}
+
+	if stmt.Init == nil {
+		t.Fatalf("for init should not be nil")
+	}
+	if stmt.Condition == nil {
+		t.Fatalf("for condition should not be nil")
+	}
+	if stmt.Post == nil {
+		t.Fatalf("for post should not be nil")
+	}
+	if len(stmt.Body.Statements) != 1 {
+		t.Fatalf("for body should have 1 statement. got=%d", len(stmt.Body.Statements))
+	}
+}
+
+func TestBreakAndContinueParsing(t *testing.T) {
+	input := `for (; true; ) { continue; break; }`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	stmt := program.Statements[0].(*ast.ForStatement)
+	if len(stmt.Body.Statements) != 2 {
+		t.Fatalf("for body should have 2 statements. got=%d", len(stmt.Body.Statements))
+	}
+
+	if _, ok := stmt.Body.Statements[0].(*ast.ContinueStatement); !ok {
+		t.Fatalf("body statement[0] is not ast.ContinueStatement. got=%T", stmt.Body.Statements[0])
+	}
+	if _, ok := stmt.Body.Statements[1].(*ast.BreakStatement); !ok {
+		t.Fatalf("body statement[1] is not ast.BreakStatement. got=%T", stmt.Body.Statements[1])
+	}
+}
+
+func TestStructStatementParsing(t *testing.T) {
+	input := `struct Point { x; y; };`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	stmt, ok := program.Statements[0].(*ast.StructStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not ast.StructStatement. got=%T", program.Statements[0])
+	}
+
+	if stmt.Name.Value != "Point" {
+		t.Fatalf("expected struct name Point, got=%s", stmt.Name.Value)
+	}
+	if len(stmt.Fields) != 2 {
+		t.Fatalf("expected 2 struct fields, got=%d", len(stmt.Fields))
+	}
+	if stmt.Fields[0].Value != "x" || stmt.Fields[1].Value != "y" {
+		t.Fatalf("unexpected struct fields: %s, %s", stmt.Fields[0].Value, stmt.Fields[1].Value)
+	}
+}
+
+func TestEnumStatementParsing(t *testing.T) {
+	input := `enum Color { Red, Green, Blue };`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	stmt, ok := program.Statements[0].(*ast.EnumStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not ast.EnumStatement. got=%T", program.Statements[0])
+	}
+
+	if stmt.Name.Value != "Color" {
+		t.Fatalf("expected enum name Color, got=%s", stmt.Name.Value)
+	}
+	if len(stmt.Variants) != 3 {
+		t.Fatalf("expected 3 enum variants, got=%d", len(stmt.Variants))
+	}
+}
+
+func TestFieldExpressionParsing(t *testing.T) {
+	input := `Color.Red;`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	stmt := program.Statements[0].(*ast.ExpressionStatement)
+	field, ok := stmt.Expression.(*ast.FieldExpression)
+	if !ok {
+		t.Fatalf("expression is not ast.FieldExpression. got=%T", stmt.Expression)
+	}
+
+	if !testIdentifier(t, field.Left, "Color") {
+		return
+	}
+	if field.Field.Value != "Red" {
+		t.Fatalf("expected field Red, got=%s", field.Field.Value)
+	}
+}
+
+func TestStructLiteralParsing(t *testing.T) {
+	input := `Point { x: 1, y: 2 };`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	stmt := program.Statements[0].(*ast.ExpressionStatement)
+	lit, ok := stmt.Expression.(*ast.StructLiteral)
+	if !ok {
+		t.Fatalf("expression is not ast.StructLiteral. got=%T", stmt.Expression)
+	}
+
+	if lit.Name.Value != "Point" {
+		t.Fatalf("expected struct literal name Point, got=%s", lit.Name.Value)
+	}
+	if len(lit.Fields) != 2 {
+		t.Fatalf("expected 2 struct literal fields, got=%d", len(lit.Fields))
+	}
+}
+
+func TestAssignmentExpressionParsing(t *testing.T) {
+	input := `x = y + 1; point.x = 3;`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	if len(program.Statements) != 2 {
+		t.Fatalf("expected 2 statements, got=%d", len(program.Statements))
+	}
+
+	first := program.Statements[0].(*ast.ExpressionStatement)
+	if _, ok := first.Expression.(*ast.AssignExpression); !ok {
+		t.Fatalf("first expression is not ast.AssignExpression. got=%T", first.Expression)
+	}
+
+	second := program.Statements[1].(*ast.ExpressionStatement)
+	assign, ok := second.Expression.(*ast.AssignExpression)
+	if !ok {
+		t.Fatalf("second expression is not ast.AssignExpression. got=%T", second.Expression)
+	}
+	if _, ok := assign.Left.(*ast.FieldExpression); !ok {
+		t.Fatalf("assignment target should be ast.FieldExpression. got=%T", assign.Left)
+	}
+}

@@ -44,6 +44,12 @@ const (
 	OpCurrentClosure
 	OpChkDbg
 	OpChkSnd
+	OpBreak
+	OpContinue
+	OpMakeStruct
+	OpGetField
+	OpSetField
+	OpEnumValue
 )
 
 type Definition struct {
@@ -84,6 +90,12 @@ var definitions = map[Opcode]*Definition{
 	OpCurrentClosure: {"OpCurrentClosure", []int{}},
 	OpChkDbg:         {"OpChkDbg", []int{}},
 	OpChkSnd:         {"OpChkSnd", []int{}},
+	OpBreak:          {"OpBreak", []int{}},
+	OpContinue:       {"OpContinue", []int{}},
+	OpMakeStruct:     {"OpMakeStruct", []int{2, 1}},
+	OpGetField:       {"OpGetField", []int{2}},
+	OpSetField:       {"OpSetField", []int{2}},
+	OpEnumValue:      {"OpEnumValue", []int{2, 2}},
 }
 
 func Lookup(op byte) (*Definition, error) {

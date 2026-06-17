@@ -19,6 +19,7 @@ var (
 	procNtQueryInformationProcess  = ntdll.NewProc("NtQueryInformationProcess")
 	procGetParentProcess           = kernel32.NewProc("CreateToolhelp32Snapshot")
 	procCheckRemoteDebuggerPresent = kernel32.NewProc("CheckRemoteDebuggerPresent")
+	procCheckSystemDebugControl    = ntdll.NewProc("NtSystemDebugControl")
 )
 
 // ProcessDebugPort is used with NtQueryInformationProcess

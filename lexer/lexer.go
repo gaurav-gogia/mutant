@@ -80,6 +80,8 @@ func (l *Lexer) NextToken() token.Token {
 		tok = newToken(token.COMMA, l.ch)
 	case ':':
 		tok = newToken(token.COLON, l.ch)
+	case '.':
+		tok = newToken(token.DOT, l.ch)
 	case ';':
 		tok = newToken(token.SEMICOLON, l.ch)
 	case 0:
@@ -161,7 +163,7 @@ func newToken(tokenType token.TokenType, ch rune) token.Token {
 
 func (l *Lexer) readIdentifier() string {
 	position := l.position
-	for unicode.IsLetter(l.ch) || unicode.IsDigit(l.ch) || l.ch == '_' || l.ch == '.' {
+	for unicode.IsLetter(l.ch) || unicode.IsDigit(l.ch) || l.ch == '_' {
 		l.readRune()
 	}
 	return l.input[position:l.position]

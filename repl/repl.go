@@ -176,8 +176,10 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool) {
 		}
 
 		last := machine.LastPoppedStackElement()
-		io.WriteString(out, last.Inspect())
-		io.WriteString(out, "\n")
+		if last != nil {
+			io.WriteString(out, last.Inspect())
+			io.WriteString(out, "\n")
+		}
 		if tinyTask(line) {
 			io.WriteString(out, "  ")
 			io.WriteString(out, randomTinyTaskMessage())

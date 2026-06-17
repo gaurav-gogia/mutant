@@ -8,21 +8,21 @@ import (
 
 func TestNextToken(t *testing.T) {
 	input := `
-	let five = 5; 
-	let ten = 10; 
-	
+	let five = 5;
+	let ten = 10;
+
 	let add = fn(x, y) {
-		x + y; 
-	}; 
-	
-	let result = add(five, ten); 
-	!-/*5; 5 < 10 > 5; 
-	
+		x + y;
+	};
+
+	let result = add(five, ten);
+	!-/*5; 5 < 10 > 5;
+
 	if (5 < 10) { return true; } else { return false; }
 
-	10 == 10; 
-	10 != 9; 
-	"foobar" 
+	10 == 10;
+	10 != 9;
+	"foobar"
 	"foo bar"
 
 	[1, 2];
@@ -30,6 +30,11 @@ func TestNextToken(t *testing.T) {
 	{"foo": "bar"};
 
 	macro(x, y) {x + y; };
+
+	for (let i = 0; i < 3; i = i + 1) { continue; break; }
+	struct Point { x; y; }
+	enum Color { Red, Green, Blue }
+	Point.x;
 	`
 
 	tests := []struct {
@@ -148,6 +153,54 @@ func TestNextToken(t *testing.T) {
 		{token.IDENT, "y"},
 		{token.SEMICOLON, ";"},
 		{token.RBRACE, "}"},
+		{token.SEMICOLON, ";"},
+
+		{token.FOR, "for"},
+		{token.LPAREN, "("},
+		{token.LET, "let"},
+		{token.IDENT, "i"},
+		{token.ASSIGN, "="},
+		{token.INT, "0"},
+		{token.SEMICOLON, ";"},
+		{token.IDENT, "i"},
+		{token.LT, "<"},
+		{token.INT, "3"},
+		{token.SEMICOLON, ";"},
+		{token.IDENT, "i"},
+		{token.ASSIGN, "="},
+		{token.IDENT, "i"},
+		{token.PLUS, "+"},
+		{token.INT, "1"},
+		{token.RPAREN, ")"},
+		{token.LBRACE, "{"},
+		{token.CONTINUE, "continue"},
+		{token.SEMICOLON, ";"},
+		{token.BREAK, "break"},
+		{token.SEMICOLON, ";"},
+		{token.RBRACE, "}"},
+
+		{token.STRUCT, "struct"},
+		{token.IDENT, "Point"},
+		{token.LBRACE, "{"},
+		{token.IDENT, "x"},
+		{token.SEMICOLON, ";"},
+		{token.IDENT, "y"},
+		{token.SEMICOLON, ";"},
+		{token.RBRACE, "}"},
+
+		{token.ENUM, "enum"},
+		{token.IDENT, "Color"},
+		{token.LBRACE, "{"},
+		{token.IDENT, "Red"},
+		{token.COMMA, ","},
+		{token.IDENT, "Green"},
+		{token.COMMA, ","},
+		{token.IDENT, "Blue"},
+		{token.RBRACE, "}"},
+
+		{token.IDENT, "Point"},
+		{token.DOT, "."},
+		{token.IDENT, "x"},
 		{token.SEMICOLON, ";"},
 
 		{token.EOF, "\x00"},

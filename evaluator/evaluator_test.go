@@ -291,6 +291,8 @@ func TestSecurityStatusBuiltins(t *testing.T) {
 }
 
 func TestCommandExecutionBuiltins(t *testing.T) {
+	t.Setenv("MUTANT_BUILTIN_CAPABILITIES", "command_exec")
+
 	evaluated := testEval(`exec_string("Write-Output 'mutant'")`)
 	hash, ok := evaluated.(*object.Hash)
 	if !ok {

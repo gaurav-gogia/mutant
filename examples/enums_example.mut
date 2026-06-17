@@ -1,0 +1,13 @@
+enum Color { Red, Blue, Green }
+
+let active = Color.Green;
+
+putln("enum value demo:");
+putf("active = ", active);
+putln("");
+
+if (active) {
+    putln("enum values are truthy in conditionals");
+} else {
+    putln("this branch should not run");
+}

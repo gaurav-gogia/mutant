@@ -931,3 +931,67 @@ func TestRecursiveFibonacci(t *testing.T) {
 
 	runVMTests(t, tests)
 }
+
+func TestPhase3LoopStructEnumFeatures(t *testing.T) {
+	tests := []vmTestCase{
+		{
+			input: `
+			let sum = 0;
+			for (let i = 0; i < 4; i = i + 1) {
+				sum = sum + i;
+			}
+			sum;
+			`,
+			expected: 6,
+		},
+		{
+			input: `
+			let out = 0;
+			for (let i = 0; i < 10; i = i + 1) {
+				if (i == 5) { break; }
+				out = out + i;
+			}
+			out;
+			`,
+			expected: 10,
+		},
+		{
+			input: `
+			let out = 0;
+			for (let i = 0; i < 5; i = i + 1) {
+				if (i == 2) { continue; }
+				out = out + i;
+			}
+			out;
+			`,
+			expected: 8,
+		},
+		{
+			input: `
+			struct Point { x; y; }
+			let p = Point { x: 10, y: 20 };
+			p.x;
+			`,
+			expected: 10,
+		},
+		{
+			input: `
+			struct Point { x; y; }
+			let p = Point { x: 10, y: 20 };
+			p.y = 99;
+			p.y;
+			`,
+			expected: 99,
+		},
+		{
+			input: `
+			enum Color { Red, Blue }
+			let c = Color.Red;
+			if (c) { 1 } else { 0 };
+			`,
+			expected: 1,
+		},
+	}
+
+	runVMTests(t, tests)
+}

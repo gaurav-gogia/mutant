@@ -26,6 +26,7 @@ const (
 	FSLASH     = "/"
 	MODULO     = "%"
 	BSLASH     = "\\"
+	DOT        = "."
 	LT         = "<"
 	GT         = ">"
 	BANG       = "!"
@@ -52,17 +53,27 @@ const (
 	ELSE     = "ELSE"
 	RETURN   = "RETURN"
 	MACRO    = "MACRO"
+	FOR      = "FOR"
+	BREAK    = "BREAK"
+	CONTINUE = "CONTINUE"
+	STRUCT   = "STRUCT"
+	ENUM     = "ENUM"
 )
 
 var keywords = map[string]TokenType{
-	"fn":     FUNCTION,
-	"let":    LET,
-	"true":   TRUE,
-	"false":  FALSE,
-	"if":     IF,
-	"else":   ELSE,
-	"return": RETURN,
-	"macro":  MACRO,
+	"fn":       FUNCTION,
+	"let":      LET,
+	"true":     TRUE,
+	"false":    FALSE,
+	"if":       IF,
+	"else":     ELSE,
+	"return":   RETURN,
+	"macro":    MACRO,
+	"for":      FOR,
+	"break":    BREAK,
+	"continue": CONTINUE,
+	"struct":   STRUCT,
+	"enum":     ENUM,
 }
 
 // LookupIdent function takes in an identifier(string)

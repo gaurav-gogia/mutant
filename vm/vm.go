@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"mutant/ast"
 	"mutant/builtin"
 	"mutant/code"
 	"mutant/compiler"
@@ -32,6 +33,8 @@ type VM struct {
 	frameIntegrity  map[*object.CompiledFunction][32]byte
 	frameBoundaries map[*object.CompiledFunction]map[int]struct{}
 	secureMode      bool
+	structDefs      map[string]any // Struct definitions (field names)
+	enumDefs        map[string]any // Enum definitions (tag names)
 
 	enforceSecurityCheckOpcodes bool
 }
@@ -121,12 +124,30 @@ func New(bc *compiler.ByteCode) *VM {
 		integrityJitter: integritySeed,
 		frameIntegrity:  frameIntegrity,
 		secureMode:      true,
+		structDefs:      convertStructDefs(bc.StructDefs),
+		enumDefs:        convertEnumDefs(bc.EnumDefs),
 
 		enforceSecurityCheckOpcodes: false,
 	}
 	vm.nextIntegrityAt = 0
 	vm.nextSweepAt = vm.nextSweepInterval()
 	return vm
+}
+
+func convertStructDefs(structDefs map[string][]*ast.Identifier) map[string]interface{} {
+	result := make(map[string]interface{})
+	for key, val := range structDefs {
+		result[key] = val
+	}
+	return result
+}
+
+func convertEnumDefs(enumDefs map[string][]string) map[string]interface{} {
+	result := make(map[string]interface{})
+	for key, val := range enumDefs {
+		result[key] = val
+	}
+	return result
 }
 
 func growSize(current, required, fallback int) int {
@@ -390,6 +411,10 @@ func (vm *VM) verifyFrameControlFlow(frame *Frame, stage string) error {
 	}
 
 	if _, ok := boundaries[frame.ip]; !ok {
+		// Jump opcodes set ip to target-1 so the fetch loop can increment before reading the next opcode.
+		if _, nextOk := boundaries[frame.ip+1]; nextOk {
+			return nil
+		}
 		security.RecordIntegrityFailure(stage)
 		return security.ApplyTamperResponse("integrity_failed", stage, vm.secureMode, fmt.Errorf("control-flow integrity check failed at ip=%d", frame.ip))
 	}
@@ -672,6 +697,165 @@ func (vm *VM) Run() error {
 			}
 		case code.OpPop:
 			vm.pop()
+		case code.OpBreak:
+			// Push break sentinel value
+			if err := vm.push(&object.Break{}); err != nil {
+				return err
+			}
+		case code.OpContinue:
+			// Push continue sentinel value
+			if err := vm.push(&object.Continue{}); err != nil {
+				return err
+			}
+		case code.OpMakeStruct:
+			if ip+3 >= len(ins) {
+				return fmt.Errorf("OpMakeStruct: not enough bytes for operands at ip=%d, len=%d", ip, len(ins))
+			}
+			typeIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
+			if err != nil {
+				return err
+			}
+			fieldCountRaw, err := code.ReadUint8(ins[ip+3:], int64(vm.inslen), vm.password, int64(ip+3))
+			if err != nil {
+				return err
+			}
+			fieldCount := int(fieldCountRaw)
+			vm.currentFrame().ip += 3
+
+			typeObj, ok := vm.decryptForUse(vm.constants[typeIndex]).(*object.String)
+			if !ok {
+				return fmt.Errorf("OpMakeStruct: type constant is not string at index=%d", typeIndex)
+			}
+			typeName := typeObj.Value
+
+			// Get field names from struct definition
+			fieldNames := []string{}
+			if structDefVal, exists := vm.structDefs[typeName]; exists {
+				if structDef, ok := structDefVal.([]*ast.Identifier); ok {
+					for _, ident := range structDef {
+						fieldNames = append(fieldNames, ident.Value)
+					}
+				}
+			}
+
+			// If no definition found, this will cause an error in Inspect but allow execution
+			if len(fieldNames) != fieldCount {
+				return fmt.Errorf("struct %s expects %d fields, got %d", typeName, len(fieldNames), fieldCount)
+			}
+
+			fields := make(map[string]object.Object)
+			for i := 0; i < fieldCount; i++ {
+				fieldValue := vm.pop()
+				// Pop in reverse order (last field popped first)
+				fieldName := fieldNames[fieldCount-1-i]
+				fields[fieldName] = fieldValue
+			}
+
+			structObj := &object.Struct{
+				TypeName: typeName,
+				Fields:   fields,
+			}
+			if err := vm.push(structObj); err != nil {
+				return err
+			}
+		case code.OpGetField:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpGetField: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
+			fieldNameIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
+			if err != nil {
+				return err
+			}
+			vm.currentFrame().ip += 2
+
+			fieldObj, ok := vm.decryptForUse(vm.constants[fieldNameIndex]).(*object.String)
+			if !ok {
+				return fmt.Errorf("OpGetField: field constant is not string at index=%d", fieldNameIndex)
+			}
+			fieldName := fieldObj.Value
+			obj := vm.pop()
+			if structObj, ok := obj.(*object.Struct); ok {
+				if val, exists := structObj.Fields[fieldName]; exists {
+					if err := vm.push(val); err != nil {
+						return err
+					}
+				} else {
+					if err := vm.push(global.Null); err != nil {
+						return err
+					}
+				}
+			} else {
+				return fmt.Errorf("cannot access field on non-struct: %s", obj.Type())
+			}
+		case code.OpSetField:
+			if ip+2 >= len(ins) {
+				return fmt.Errorf("OpSetField: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
+			}
+			fieldNameIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
+			if err != nil {
+				return err
+			}
+			vm.currentFrame().ip += 2
+
+			fieldObj, ok := vm.decryptForUse(vm.constants[fieldNameIndex]).(*object.String)
+			if !ok {
+				return fmt.Errorf("OpSetField: field constant is not string at index=%d", fieldNameIndex)
+			}
+			fieldName := fieldObj.Value
+			value := vm.pop()
+			obj := vm.pop()
+			if structObj, ok := obj.(*object.Struct); ok {
+				structObj.Fields[fieldName] = value
+				if err := vm.push(structObj); err != nil {
+					return err
+				}
+			} else {
+				return fmt.Errorf("cannot set field on non-struct: %s", obj.Type())
+			}
+		case code.OpEnumValue:
+			if ip+4 >= len(ins) {
+				return fmt.Errorf("OpEnumValue: not enough bytes for operands at ip=%d, len=%d", ip, len(ins))
+			}
+			typeIndex, err := code.ReadUint16(ins[ip+1:], int64(vm.inslen), vm.password, int64(ip+1))
+			if err != nil {
+				return err
+			}
+			tagIndex, err := code.ReadUint16(ins[ip+3:], int64(vm.inslen), vm.password, int64(ip+3))
+			if err != nil {
+				return err
+			}
+			vm.currentFrame().ip += 4
+
+			typeObj, ok := vm.decryptForUse(vm.constants[typeIndex]).(*object.String)
+			if !ok {
+				return fmt.Errorf("OpEnumValue: type constant is not string at index=%d", typeIndex)
+			}
+			tagObj, ok := vm.decryptForUse(vm.constants[tagIndex]).(*object.String)
+			if !ok {
+				return fmt.Errorf("OpEnumValue: tag constant is not string at index=%d", tagIndex)
+			}
+			typeName := typeObj.Value
+			tagName := tagObj.Value
+
+			if tagsVal, ok := vm.enumDefs[typeName]; ok {
+				if tags, ok := tagsVal.([]string); ok {
+					found := false
+					for _, t := range tags {
+						if t == tagName {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("unknown enum tag %s.%s", typeName, tagName)
+					}
+				}
+			}
+
+			enumObj := &object.EnumValue{TypeName: typeName, Tag: tagName, Value: nil}
+			if err := vm.push(enumObj); err != nil {
+				return err
+			}
 		}
 	}
 
