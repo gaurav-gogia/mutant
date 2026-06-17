@@ -23,6 +23,7 @@ const (
 	ENUM_VALUE_OBJ   = "ENUM_VALUE"
 	BREAK_OBJ        = "BREAK"
 	CONTINUE_OBJ     = "CONTINUE"
+	LUA_PATCH_OBJ    = "LUA_PATCH"
 )
 
 type Object interface {

@@ -189,6 +189,18 @@ func EncryptObject(obj object.Object, length int, password string) (object.Objec
 		}
 		encObj = &object.Closure{Fn: closureObj.Fn, Free: free}
 
+	case object.LUA_PATCH_OBJ:
+		patchObj := obj.(*object.LuaPatch)
+		xored, err := security.SecureXOR(patchObj.EncryptedPayload, int64(length), password)
+		if err != nil {
+			return nil, err
+		}
+		encObj = &object.LuaPatch{
+			Name:             patchObj.Name,
+			EncryptedPayload: xored,
+			ChecksumExpected: patchObj.ChecksumExpected,
+		}
+
 	case object.COMPILED_FN_OBJ, object.BUILTIN_OBJ:
 		encObj = obj
 
@@ -306,6 +318,18 @@ func DecryptObject(obj object.Object, length int, password string) (object.Objec
 		}
 		return &object.EnumValue{TypeName: enumObj.TypeName, Tag: enumObj.Tag, Value: decValue}, nil
 
+	case object.LUA_PATCH_OBJ:
+		patchObj := decObj.(*object.LuaPatch)
+		xored, err := security.SecureXOR(patchObj.EncryptedPayload, int64(length), password)
+		if err != nil {
+			return nil, err
+		}
+		return &object.LuaPatch{
+			Name:             patchObj.Name,
+			EncryptedPayload: xored,
+			ChecksumExpected: patchObj.ChecksumExpected,
+		}, nil
+
 	case object.CLOSURE_OBJ:
 		closureObj := decObj.(*object.Closure)
 		free := make([]object.Object, len(closureObj.Free))
@@ -342,6 +366,20 @@ func GetPwd() string {
 		return "mutant-default-security-key-v1"
 	}
 	return hex.EncodeToString(derivedKey)
+}
+
+// DecryptLuaPatch decrypts a Lua patch's encrypted payload using the same pipeline as runtime objects.
+func DecryptLuaPatch(patch *object.LuaPatch, length int, password string) ([]byte, error) {
+	if patch == nil {
+		return nil, errors.New("patch is nil")
+	}
+
+	xored, err := security.SecureXOR(patch.EncryptedPayload, int64(length), password)
+	if err != nil {
+		return nil, err
+	}
+
+	return xored, nil
 }
 
 // AssertObjectTypes checks if the given input type is one of the expected object types.

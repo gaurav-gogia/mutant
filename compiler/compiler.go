@@ -30,6 +30,7 @@ type ByteCode struct {
 	Constants    []object.Object
 	StructDefs   map[string][]*ast.Identifier
 	EnumDefs     map[string][]string
+	LuaPatches   map[string]*object.LuaPatch
 }
 
 type EmittedInstruction struct {
@@ -360,6 +361,7 @@ func (c *Compiler) ByteCode() *ByteCode {
 		Constants:    c.constants,
 		StructDefs:   c.structDefinitions,
 		EnumDefs:     c.enumDefinitions,
+		LuaPatches:   make(map[string]*object.LuaPatch),
 	}
 }
 

@@ -308,4 +308,7 @@ func registerTypes() {
 	gob.Register(&object.CompiledFunction{})
 	gob.Register(&object.Closure{})
 	gob.Register(&object.Encrypted{})
+	gob.Register(&object.Struct{})
+	gob.Register(&object.EnumValue{})
+	gob.Register(&object.LuaPatch{})
 }
