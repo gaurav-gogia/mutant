@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
+
+const defaultPolymorphicLevel = 3
 
 const (
 	RELEASECMD = "release"
@@ -92,6 +95,8 @@ func main() {
 			fmt.Println()
 			fmt.Println("\tmutant gen <FILENAME>.mut [-password|-pwd]")
 			fmt.Println("\t\tCompile mutant source code into bytecode with optional password.")
+			fmt.Println("\t\tOptional: -mutation <0-10> to control polymorphism level (default: 3).")
+			fmt.Println("\t\tOptional: -seed <INT64> to set polymorphism seed (default: current timestamp).")
 			fmt.Println("\tmutant gen --release-assets [-out <DIR>]")
 			fmt.Println("\t\tGenerate embedded release runtime assets files (index + data/*.bin).")
 			fmt.Println("\t\tAlso supported: mutant gen assets [-out <DIR>].")
@@ -101,6 +106,8 @@ func main() {
 			fmt.Println("\t\tRelease requires embedded runtime assets for target OS/ARCH.")
 			fmt.Println("")
 			fmt.Println("\t\tOptional: -password|-pwd <STRING> to encrypt output with a password.")
+			fmt.Println("\t\tOptional: -mutation <0-10> to control polymorphism level (default: 3).")
+			fmt.Println("\t\tOptional: -seed <INT64> to set polymorphism seed (default: current timestamp).")
 			fmt.Println("\t\tIf omitted, deterministic compatibility mode (weaker obfuscation) is used.")
 			fmt.Println("")
 			fmt.Println("\t\tPossible values for -os: darwin | linux | windows.")
@@ -125,7 +132,7 @@ func main() {
 
 		if strings.HasSuffix(os.Args[1], global.MutantSourceCodeFileExtention) {
 			pwd := mutil.GetPwd()
-			cli.CompileCode(os.Args[1], "", "", false, pwd)
+			cli.CompileCode(os.Args[1], "", "", false, pwd, defaultPolymorphicLevel, time.Now().UnixNano())
 			return
 		}
 
@@ -157,7 +164,7 @@ func main() {
 				secureMode = false
 			}
 			if strings.HasSuffix(fileArg, global.MutantSourceCodeFileExtention) {
-				cli.CompileCode(fileArg, "", "", false, password)
+				cli.CompileCode(fileArg, "", "", false, password, defaultPolymorphicLevel, time.Now().UnixNano())
 				return
 			}
 			if strings.HasSuffix(fileArg, global.MutantByteCodeCompiledFileExtension) {
@@ -183,26 +190,26 @@ func main() {
 	}
 
 	if len(os.Args) >= 2 && (os.Args[1] == GENCMD || os.Args[1] == RUNCMD) {
-		src, password, err := prepareGenRun(os.Args)
+		src, password, mutationLevel, mutationSeed, err := prepareGenRun(os.Args)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
 		fmt.Println("Generating Bytecode....")
-		cli.CompileCode(src, "", "", false, password)
+		cli.CompileCode(src, "", "", false, password, mutationLevel, mutationSeed)
 		return
 	}
 
 	if len(os.Args) >= 2 && os.Args[1] == RELEASECMD {
-		src, goos, goarch, password, err := prepareRelease(os.Args)
+		src, goos, goarch, password, mutationLevel, mutationSeed, err := prepareRelease(os.Args)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
 
 		fmt.Println("Compiling Release Build....")
-		cli.CompileCode(src, goos, goarch, true, password)
+		cli.CompileCode(src, goos, goarch, true, password, mutationLevel, mutationSeed)
 		return
 	}
 }
@@ -286,8 +293,10 @@ func extractPasswordArg(args []string) string {
 	return ""
 }
 
-func prepareRelease(args []string) (string, string, string, string, error) {
+func prepareRelease(args []string) (string, string, string, string, int, int64, error) {
 	var goos, goarch, src, password string
+	var mutationLevel int
+	var mutationSeed int64
 
 	releasecmd := flag.NewFlagSet(RELEASECMD, flag.ExitOnError)
 
@@ -296,9 +305,11 @@ func prepareRelease(args []string) (string, string, string, string, error) {
 	releasecmd.StringVar(&goarch, "arch", runtime.GOARCH, "Use thie flag to specify target Architecture for cross-compilation by using -arch flag")
 	releasecmd.StringVar(&password, "password", "", "Optional password for encryption (leave empty for deterministic encryption)")
 	releasecmd.StringVar(&password, "pwd", "", "Short for -password")
+	releasecmd.IntVar(&mutationLevel, "mutation", defaultPolymorphicLevel, "Polymorphic mutation level (0-10)")
+	releasecmd.Int64Var(&mutationSeed, "seed", 0, "Polymorphic seed (default: current timestamp)")
 
 	if err := releasecmd.Parse(args[2:]); err != nil {
-		return "", "", "", "", err
+		return "", "", "", "", 0, 0, err
 	}
 
 	if src == "" {
@@ -311,35 +322,39 @@ func prepareRelease(args []string) (string, string, string, string, error) {
 
 	if releasecmd.Parsed() {
 		if src == "" {
-			return "", "", "", "", errors.New("mutant source code file path is required, please use -src flag")
+			return "", "", "", "", 0, 0, errors.New("mutant source code file path is required, please use -src flag")
 		}
 
 		if !strings.HasSuffix(src, global.MutantSourceCodeFileExtention) {
-			return "", "", "", "", errors.New("incorrect file extension, this program only works for mutant source code files")
+			return "", "", "", "", 0, 0, errors.New("incorrect file extension, this program only works for mutant source code files")
 		}
 
 		absSrc, err := filepath.Abs(src)
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", 0, 0, err
 		}
 
-		return absSrc, goos, goarch, password, nil
+		return absSrc, goos, goarch, password, mutationLevel, mutationSeed, nil
 	}
 
-	return "", "", "", "", errors.New("could not parse values")
+	return "", "", "", "", 0, 0, errors.New("could not parse values")
 }
 
-func prepareGenRun(args []string) (string, string, error) {
+func prepareGenRun(args []string) (string, string, int, int64, error) {
 	var src, password string
+	var mutationLevel int
+	var mutationSeed int64
 
 	gencmd := flag.NewFlagSet(GENCMD, flag.ExitOnError)
 
 	gencmd.StringVar(&src, "src", "", "Mutant Source Code File Path by using -src flag")
 	gencmd.StringVar(&password, "password", "", "Optional password for encryption (leave empty for deterministic encryption)")
 	gencmd.StringVar(&password, "pwd", "", "Short for -password")
+	gencmd.IntVar(&mutationLevel, "mutation", defaultPolymorphicLevel, "Polymorphic mutation level (0-10)")
+	gencmd.Int64Var(&mutationSeed, "seed", 0, "Polymorphic seed (default: current timestamp)")
 
 	if err := gencmd.Parse(args[2:]); err != nil {
-		return "", "", err
+		return "", "", 0, 0, err
 	}
 
 	if src == "" {
@@ -352,22 +367,22 @@ func prepareGenRun(args []string) (string, string, error) {
 
 	if gencmd.Parsed() {
 		if src == "" {
-			return "", "", errors.New("mutant source code file path is required, please use -src flag")
+			return "", "", 0, 0, errors.New("mutant source code file path is required, please use -src flag")
 		}
 
 		if !strings.HasSuffix(src, global.MutantSourceCodeFileExtention) {
-			return "", "", errors.New("incorrect file extension, this program only works for mutant source code files")
+			return "", "", 0, 0, errors.New("incorrect file extension, this program only works for mutant source code files")
 		}
 
 		absSrc, err := filepath.Abs(src)
 		if err != nil {
-			return "", "", err
+			return "", "", 0, 0, err
 		}
 
-		return absSrc, password, nil
+		return absSrc, password, mutationLevel, mutationSeed, nil
 	}
 
-	return "", "", errors.New("could not parse values")
+	return "", "", 0, 0, errors.New("could not parse values")
 }
 
 func hasReleaseAssetsArg(args []string) bool {

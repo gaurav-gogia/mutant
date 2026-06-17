@@ -18,12 +18,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Generate function takes a `string`, it's the path for the source code
 // password: optional password for encryption (empty string for deterministic encryption)
 // privateKey: Ed25519 private key for signing (if nil, a temporary key is generated)
-func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, privateKey []byte) (error, errrs.ErrorType, []string) {
+func Generate(srcpath, dstpath, goos, goarch string, release bool, password string, mutationLevel int, mutationSeed int64, privateKey []byte) (error, errrs.ErrorType, []string) {
 	data, err := os.ReadFile(srcpath)
 	if err != nil {
 		return err, errrs.ERROR, nil
@@ -48,7 +49,7 @@ func Generate(srcpath, dstpath, goos, goarch string, release bool, password stri
 		}
 	}
 
-	bytecode, err, errtype, errors := compile(data, password, privateKey)
+	bytecode, err, errtype, errors := compile(data, password, mutationLevel, mutationSeed, privateKey)
 	if err != nil {
 		return err, errtype, errors
 	}
@@ -106,7 +107,7 @@ func loadSigningPrivateKeyFromEnv() ([]byte, error) {
 	return privateKey, nil
 }
 
-func compile(data []byte, password string, privateKey []byte) ([]byte, error, errrs.ErrorType, []string) {
+func compile(data []byte, password string, mutationLevel int, mutationSeed int64, privateKey []byte) ([]byte, error, errrs.ErrorType, []string) {
 	constants := []object.Object{}
 	symbolTable := compiler.NewSymbolTable()
 	for i, v := range builtin.Builtins {
@@ -123,6 +124,7 @@ func compile(data []byte, password string, privateKey []byte) ([]byte, error, er
 
 	comp := compiler.NewWithState(symbolTable, constants)
 	comp.EnableSecurityOpcodeInjection()
+	configureCompilerPolymorphism(comp, mutationLevel, mutationSeed)
 	if err := comp.Compile(program); err != nil {
 		return nil, err, errrs.COMPILER_ERROR, nil
 	}
@@ -135,8 +137,28 @@ func compile(data []byte, password string, privateKey []byte) ([]byte, error, er
 	return encodedByteCode, nil, "", nil
 }
 
+func configureCompilerPolymorphism(comp *compiler.Compiler, mutationLevel int, mutationSeed int64) {
+	if mutationLevel <= 0 {
+		return
+	}
+
+	comp.EnablePolymorphismWithSeed(mutationLevel, resolvePolymorphismSeed(mutationSeed))
+}
+
+func resolvePolymorphismSeed(seed int64) int64 {
+	if seed != 0 {
+		return seed
+	}
+	return time.Now().UnixNano()
+}
+
 func encode(compByteCode *compiler.ByteCode, password string, privateKey []byte) ([]byte, error) {
 	var content bytes.Buffer
+
+	// Polymorphic marker is compile-time metadata and must not be executed by VM.
+	if compiler.DetectPolymorphicLevel(compByteCode.Instructions) > 0 && len(compByteCode.Instructions) >= 2 {
+		compByteCode.Instructions = compByteCode.Instructions[:len(compByteCode.Instructions)-2]
+	}
 
 	compByteCode = mutil.EncryptByteCode(compByteCode, password)
 

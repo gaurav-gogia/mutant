@@ -23,6 +23,8 @@ type Compiler struct {
 	injectSecurityChecks bool
 	hasChkDbg            bool
 	hasChkSnd            bool
+
+	polymorphicEngine *PolymorphicEngine // Optional bytecode mutation engine
 }
 
 type ByteCode struct {
@@ -83,6 +85,27 @@ func NewWithState(st *SymbolTable, constants []object.Object) *Compiler {
 
 func (c *Compiler) EnableSecurityOpcodeInjection() {
 	c.injectSecurityChecks = true
+}
+
+// EnablePolymorphism enables bytecode polymorphism at the specified mutation level
+func (c *Compiler) EnablePolymorphism(level int) {
+	if level > 0 {
+		// Generate a random seed using crypto/rand
+		seedBytes := make([]byte, 8)
+		if _, err := rand.Read(seedBytes); err != nil {
+			// Fallback to a deterministic seed if random generation fails
+			seedBytes = []byte{0, 0, 0, 0, 0, 0, 0, 1}
+		}
+		seed := int64(binary.BigEndian.Uint64(seedBytes))
+		c.polymorphicEngine = NewPolymorphicEngine(level, seed)
+	}
+}
+
+// EnablePolymorphismWithSeed enables bytecode polymorphism with a specific seed for reproducibility
+func (c *Compiler) EnablePolymorphismWithSeed(level int, seed int64) {
+	if level > 0 {
+		c.polymorphicEngine = NewPolymorphicEngine(level, seed)
+	}
 }
 
 func (c *Compiler) Compile(node ast.Node) error {
@@ -356,13 +379,20 @@ func (c *Compiler) ByteCode() *ByteCode {
 		c.ensureRequiredSecurityCheckOpcodes()
 	}
 
-	return &ByteCode{
+	bytecode := &ByteCode{
 		Instructions: c.currentInstructions(),
 		Constants:    c.constants,
 		StructDefs:   c.structDefinitions,
 		EnumDefs:     c.enumDefinitions,
 		LuaPatches:   make(map[string]*object.LuaPatch),
 	}
+
+	// Apply polymorphic mutations if engine is enabled
+	if c.polymorphicEngine != nil {
+		bytecode = c.polymorphicEngine.Mutate(bytecode)
+	}
+
+	return bytecode
 }
 
 func (c *Compiler) maybeEmitRandomSecurityCheckOpcodes() {

@@ -1,17 +1,19 @@
 package compiler
 
 import (
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"encoding/binary"
 	"math/big"
+	mathrand "math/rand"
 	"mutant/code"
 	"mutant/object"
 )
 
 // PolymorphicEngine generates functionally equivalent but structurally different bytecode
 type PolymorphicEngine struct {
-	mutationLevel int   // 0-10: intensity of mutations
-	randomSeed    int64 // seed for reproducible builds
+	mutationLevel int            // 0-10: intensity of mutations
+	randomSeed    int64          // seed for reproducible builds
+	rng           *mathrand.Rand // deterministic RNG for reproducible opcode mapping
 }
 
 // MutationConfig controls which mutations are applied
@@ -36,6 +38,7 @@ func NewPolymorphicEngine(level int, seed int64) *PolymorphicEngine {
 	return &PolymorphicEngine{
 		mutationLevel: level,
 		randomSeed:    seed,
+		rng:           mathrand.New(mathrand.NewSource(seed)),
 	}
 }
 
@@ -60,17 +63,22 @@ func (pe *PolymorphicEngine) Mutate(bytecode *ByteCode) *ByteCode {
 		bytecode = pe.randomizeConstantPool(bytecode)
 	}
 
+	// Add polymorphic marker to indicate mutation level
+	bytecode.Instructions = pe.AddPolymorphicMarker(bytecode.Instructions)
+
 	return bytecode
 }
 
 // getConfig returns mutation configuration based on level
 func (pe *PolymorphicEngine) getConfig() MutationConfig {
 	return MutationConfig{
-		InsertNOPs:          pe.mutationLevel >= 3,
-		ReorderInstructions: pe.mutationLevel >= 5,
-		MutateOpcodes:       pe.mutationLevel >= 7,
-		InsertDeadCode:      pe.mutationLevel >= 8,
-		RandomizeConstants:  pe.mutationLevel >= 4,
+		// These transformations are intentionally gated off until instruction-boundary
+		// aware rewriting and opcode remap reversal are implemented in VM/runtime.
+		InsertNOPs:          false,
+		ReorderInstructions: false,
+		MutateOpcodes:       false,
+		InsertDeadCode:      false,
+		RandomizeConstants:  false,
 		Level:               pe.mutationLevel,
 	}
 }
@@ -100,17 +108,17 @@ func (pe *PolymorphicEngine) insertNOPs(instructions code.Instructions) code.Ins
 	return result
 }
 
-// shouldInsertNOP determines if a NOP should be inserted
+// shouldInsertNOP determines if a NOP should be inserted using cryptographic randomness
 func (pe *PolymorphicEngine) shouldInsertNOP(rate float64) bool {
 	max := big.NewInt(100)
-	n, _ := rand.Int(rand.Reader, max)
+	n, _ := cryptorand.Int(cryptorand.Reader, max)
 	return float64(n.Int64()) < rate*100
 }
 
 // generateNOP creates a no-operation instruction sequence
 func (pe *PolymorphicEngine) generateNOP() code.Instructions {
 	// Generate different types of NOPs randomly
-	nopType := pe.randomInt(4)
+	nopType := pe.randomIntCrypto(4)
 
 	switch nopType {
 	case 0:
@@ -165,13 +173,68 @@ func (pe *PolymorphicEngine) mutateOpcodes(bytecode *ByteCode) *ByteCode {
 	return bytecode
 }
 
-// generateOpcodeMapping creates a random but valid opcode remapping
+// generateOpcodeMapping creates a random but valid opcode remapping using deterministic RNG
 func (pe *PolymorphicEngine) generateOpcodeMapping() map[code.Opcode]code.Opcode {
-	// For now, return identity mapping (no change)
-	// In production, this would create a shuffled mapping
-	// Note: This requires storing the mapping in bytecode metadata
-	// for the VM to reverse it
-	return make(map[code.Opcode]code.Opcode)
+	// Define all valid opcodes from the code package
+	opcodes := []code.Opcode{
+		code.OpConstant,
+		code.OpPop,
+		code.OpAdd,
+		code.OpSub,
+		code.OpMul,
+		code.OpDiv,
+		code.OpMod,
+		code.OpTrue,
+		code.OpFalse,
+		code.OpEqual,
+		code.OpUnEqual,
+		code.OpGreater,
+		code.OpMinus,
+		code.OpBang,
+		code.OpJumpFalse,
+		code.OpJump,
+		code.OpNull,
+		code.OpGetGlobal,
+		code.OpSetGlobal,
+		code.OpGetLocal,
+		code.OpSetLocal,
+		code.OpArray,
+		code.OpHash,
+		code.OpIndex,
+		code.OpCall,
+		code.OpReturnValue,
+		code.OpReturn,
+		code.OpGetBuiltin,
+		code.OpClosure,
+		code.OpGetFree,
+		code.OpCurrentClosure,
+		code.OpChkDbg,
+		code.OpChkSnd,
+		code.OpBreak,
+		code.OpContinue,
+		code.OpMakeStruct,
+		code.OpGetField,
+		code.OpSetField,
+		code.OpEnumValue,
+	}
+
+	// Create a copy for shuffling
+	shuffled := make([]code.Opcode, len(opcodes))
+	copy(shuffled, opcodes)
+
+	// Fisher-Yates shuffle using deterministic RNG for reproducible opcode mapping
+	for i := len(shuffled) - 1; i > 0; i-- {
+		j := pe.rng.Intn(i + 1)
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	}
+
+	// Create mapping from original opcode to shuffled opcode
+	mapping := make(map[code.Opcode]code.Opcode)
+	for i, orig := range opcodes {
+		mapping[orig] = shuffled[i]
+	}
+
+	return mapping
 }
 
 // randomizeConstantPool shuffles constant pool indices
@@ -211,9 +274,9 @@ func (pe *PolymorphicEngine) generateShuffleMapping(size int) []int {
 		mapping[i] = i
 	}
 
-	// Fisher-Yates shuffle
+	// Fisher-Yates shuffle using deterministic RNG
 	for i := size - 1; i > 0; i-- {
-		j := pe.randomInt(i + 1)
+		j := pe.rng.Intn(i + 1)
 		mapping[i], mapping[j] = mapping[j], mapping[i]
 	}
 
@@ -227,6 +290,11 @@ func (pe *PolymorphicEngine) updateConstantReferences(instructions code.Instruct
 
 	for i := 0; i < len(result); i++ {
 		if code.Opcode(result[i]) == code.OpConstant {
+			// Safety check: ensure we have space for operand bytes
+			if i+2 >= len(result) {
+				break
+			}
+
 			// Read old index
 			oldIdx := binary.BigEndian.Uint16(result[i+1 : i+3])
 
@@ -243,13 +311,13 @@ func (pe *PolymorphicEngine) updateConstantReferences(instructions code.Instruct
 	return result
 }
 
-// randomInt generates a random integer in range [0, max)
-func (pe *PolymorphicEngine) randomInt(max int) int {
+// randomIntCrypto generates a random integer in range [0, max) using cryptographic randomness
+func (pe *PolymorphicEngine) randomIntCrypto(max int) int {
 	if max <= 0 {
 		return 0
 	}
 
-	n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	n, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(max)))
 	return int(n.Int64())
 }
 

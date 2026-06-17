@@ -99,7 +99,8 @@ func (vm *VM) nextSweepInterval() uint64 {
 }
 
 func New(bc *compiler.ByteCode) *VM {
-	mainfn := &object.CompiledFunction{Instructions: bc.Instructions}
+	mainInstructions := bc.Instructions
+	mainfn := &object.CompiledFunction{Instructions: mainInstructions}
 	frames := make([]*Frame, initialFrameCapacity)
 
 	mainClosure := &object.Closure{Fn: mainfn}
@@ -108,7 +109,7 @@ func New(bc *compiler.ByteCode) *VM {
 
 	frameIntegrity := make(map[*object.CompiledFunction][32]byte)
 	frameIntegrity[mainfn] = sha256.Sum256(mainfn.Instructions)
-	integritySeed := deriveIntegritySeed(bc.Instructions)
+	integritySeed := deriveIntegritySeed(mainInstructions)
 
 	vm := &VM{
 		constants:       bc.Constants,
@@ -299,10 +300,47 @@ func NewWithPassword(bc *compiler.ByteCode, password string) *VM {
 func NewWithPasswordMode(bc *compiler.ByteCode, password string, secureMode bool) *VM {
 	vm := New(bc)
 	vm.password = password
+	vm.stripEncryptedPolymorphicMarker()
 	vm.secureMode = secureMode
 	vm.enforceSecurityCheckOpcodes = true
 	vm.ensureFrameBoundaries()
 	return vm
+}
+
+func (vm *VM) stripEncryptedPolymorphicMarker() {
+	if vm == nil || vm.password == "" || vm.currentFrame() == nil || vm.currentFrame().cl == nil || vm.currentFrame().cl.Fn == nil {
+		return
+	}
+
+	ins := vm.currentFrame().Instructions()
+	if len(ins) < 2 {
+		return
+	}
+
+	markerPos := len(ins) - 2
+	levelPos := len(ins) - 1
+
+	markerByte, err := security.SecureXOROneAt(ins[markerPos], int64(vm.inslen), vm.password, int64(markerPos))
+	if err != nil {
+		return
+	}
+	levelByte, err := security.SecureXOROneAt(ins[levelPos], int64(vm.inslen), vm.password, int64(levelPos))
+	if err != nil {
+		return
+	}
+
+	validMarker := (markerByte == 0xFF && levelByte <= 10) || (levelByte == 0xFF && markerByte <= 10)
+	if !validMarker {
+		return
+	}
+
+	trimmed := ins[:len(ins)-2]
+	vm.currentFrame().cl.Fn.Instructions = trimmed
+
+	if vm.frameIntegrity == nil {
+		vm.frameIntegrity = make(map[*object.CompiledFunction][32]byte)
+	}
+	vm.frameIntegrity[vm.currentFrame().cl.Fn] = sha256.Sum256(trimmed)
 }
 
 func NewWithGlobalStore(bc *compiler.ByteCode, globals []object.Object) *VM {
