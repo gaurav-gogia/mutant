@@ -3,6 +3,7 @@ package builtin
 import (
 	"fmt"
 	"hash/fnv"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -20,13 +21,19 @@ var (
 func dbLabelToNodeType(label string) store.NodeType {
 	h := fnv.New32a()
 	h.Write([]byte(label))
-	return store.CustomNodeType(uint8(h.Sum32() % 200))
+	nodeType := int8(h.Sum32() % 200)
+	out := math.Abs(float64(nodeType))
+	nodeType = int8(out)
+	return store.CustomNodeType(uint8(nodeType))
 }
 
 func dbLabelToEdgeType(label string) store.EdgeType {
 	h := fnv.New32a()
 	h.Write([]byte("e:" + label))
-	return store.CustomEdgeType(uint8(h.Sum32() % 200))
+	nodeType := int8(h.Sum32() % 200)
+	out := math.Abs(float64(nodeType))
+	nodeType = int8(out)
+	return store.CustomEdgeType(uint8(nodeType))
 }
 
 func dbGet(handle int64) (*graphene.Graph, bool) {
