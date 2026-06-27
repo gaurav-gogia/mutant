@@ -4,7 +4,7 @@
 package rustffi
 
 /*
-#cgo windows LDFLAGS: -lmutant_rust
+#cgo windows LDFLAGS: -lmutant_rust -lntdll
 #cgo linux LDFLAGS: -lmutant_rust
 #cgo darwin LDFLAGS: -lmutant_rust
 
