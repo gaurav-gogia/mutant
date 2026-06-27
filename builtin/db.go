@@ -2,8 +2,7 @@ package builtin
 
 import (
 	"fmt"
-	"hash/fnv"
-	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -18,22 +17,60 @@ var (
 	dbHandles       sync.Map // int64 → *graphene.Graph
 )
 
-func dbLabelToNodeType(label string) store.NodeType {
-	h := fnv.New32a()
-	h.Write([]byte(label))
-	nodeType := int8(h.Sum32() % 200)
-	out := math.Abs(float64(nodeType))
-	nodeType = int8(out)
-	return store.CustomNodeType(uint8(nodeType))
+const DATA = 0
+
+func dbTypeFromEnumValue(enumValue *object.EnumValue, kind string) (int64, object.Object) {
+	if enumValue.Value == nil || enumValue.Value.Type() == object.NULL_OBJ {
+		if strings.EqualFold(enumValue.Tag, "DATA") {
+			return DATA, nil
+		}
+		return 0, newError("%s type enum value must carry INTEGER payload in range 0..127 or use tag DATA", kind)
+	}
+
+	intValue, ok := enumValue.Value.(*object.Integer)
+	if !ok {
+		return 0, newError("%s type enum payload must be INTEGER, got %s", kind, enumValue.Value.Type())
+	}
+	if intValue.Value < 0 || intValue.Value > 127 {
+		return 0, newError("%s type must be in range 0..127, got %d", kind, intValue.Value)
+	}
+	return intValue.Value, nil
 }
 
-func dbLabelToEdgeType(label string) store.EdgeType {
-	h := fnv.New32a()
-	h.Write([]byte("e:" + label))
-	nodeType := int8(h.Sum32() % 200)
-	out := math.Abs(float64(nodeType))
-	nodeType = int8(out)
-	return store.CustomEdgeType(uint8(nodeType))
+func dbNodeTypeFromObject(arg object.Object) (store.NodeType, object.Object) {
+	switch value := arg.(type) {
+	case *object.Integer:
+		if value.Value < 1 || value.Value > 127 {
+			return 0, newError("node type must be in range 1..127, got %d", value.Value)
+		}
+		return store.CustomNodeType(uint8(value.Value)), nil
+	case *object.EnumValue:
+		enumType, errObj := dbTypeFromEnumValue(value, "node")
+		if errObj != nil {
+			return 0, errObj
+		}
+		return store.CustomNodeType(uint8(enumType)), nil
+	default:
+		return 0, newError("node type must be INTEGER or ENUM_VALUE, got %s", arg.Type())
+	}
+}
+
+func dbEdgeTypeFromObject(arg object.Object) (store.EdgeType, object.Object) {
+	switch value := arg.(type) {
+	case *object.Integer:
+		if value.Value < 1 || value.Value > 127 {
+			return 0, newError("edge type must be in range 1..127, got %d", value.Value)
+		}
+		return store.CustomEdgeType(uint8(value.Value)), nil
+	case *object.EnumValue:
+		enumType, errObj := dbTypeFromEnumValue(value, "edge")
+		if errObj != nil {
+			return 0, errObj
+		}
+		return store.CustomEdgeType(uint8(enumType)), nil
+	default:
+		return 0, newError("edge type must be INTEGER or ENUM_VALUE, got %s", arg.Type())
+	}
 }
 
 func dbGet(handle int64) (*graphene.Graph, bool) {
@@ -89,23 +126,29 @@ func DbClose(args ...object.Object) object.Object {
 }
 
 func DbAddNode(args ...object.Object) object.Object {
-	if len(args) != 2 {
-		return newError("wrong number of arguments. got=%d, want=2", len(args))
+	if len(args) != 1 && len(args) != 2 {
+		return newError("wrong number of arguments. got=%d, want=1 or 2", len(args))
 	}
 	h, ok := args[0].(*object.Integer)
 	if !ok {
 		return newError("argument 1 to `db_add_node` must be INTEGER, got %s", args[0].Type())
 	}
-	label, ok := args[1].(*object.String)
-	if !ok {
-		return newError("argument 2 to `db_add_node` must be STRING, got %s", args[1].Type())
-	}
 	g, found := dbGet(h.Value)
 	if !found {
 		return newError("db_add_node: invalid handle %d", h.Value)
 	}
+
+	nodeType := store.CustomNodeType(uint8(DATA))
+	if len(args) == 2 {
+		parsedType, errObj := dbNodeTypeFromObject(args[1])
+		if errObj != nil {
+			return newError("argument 2 to `db_add_node`: %s", errObj.Inspect())
+		}
+		nodeType = parsedType
+	}
+
 	nodeID, err := g.AddNode(&store.Node{
-		Labels: []store.NodeType{dbLabelToNodeType(label.Value)},
+		Labels: []store.NodeType{nodeType},
 	})
 	if err != nil {
 		return newError("db_add_node: %s", err.Error())
@@ -114,8 +157,8 @@ func DbAddNode(args ...object.Object) object.Object {
 }
 
 func DbAddEdge(args ...object.Object) object.Object {
-	if len(args) != 4 {
-		return newError("wrong number of arguments. got=%d, want=4", len(args))
+	if len(args) != 3 && len(args) != 4 {
+		return newError("wrong number of arguments. got=%d, want=3 or 4", len(args))
 	}
 	h, ok := args[0].(*object.Integer)
 	if !ok {
@@ -129,18 +172,24 @@ func DbAddEdge(args ...object.Object) object.Object {
 	if !ok {
 		return newError("argument 3 to `db_add_edge` must be INTEGER, got %s", args[2].Type())
 	}
-	label, ok := args[3].(*object.String)
-	if !ok {
-		return newError("argument 4 to `db_add_edge` must be STRING, got %s", args[3].Type())
-	}
 	g, found := dbGet(h.Value)
 	if !found {
 		return newError("db_add_edge: invalid handle %d", h.Value)
 	}
+
+	edgeType := store.CustomEdgeType(uint8(DATA))
+	if len(args) == 4 {
+		parsedType, errObj := dbEdgeTypeFromObject(args[3])
+		if errObj != nil {
+			return newError("argument 4 to `db_add_edge`: %s", errObj.Inspect())
+		}
+		edgeType = parsedType
+	}
+
 	edgeID, err := g.AddEdge(&store.Edge{
 		Src:    store.NodeID(src.Value),
 		Dst:    store.NodeID(dst.Value),
-		Labels: []store.EdgeType{dbLabelToEdgeType(label.Value)},
+		Labels: []store.EdgeType{edgeType},
 	})
 	if err != nil {
 		return newError("db_add_edge: %s", err.Error())
@@ -177,22 +226,27 @@ func DbIndexProp(args ...object.Object) object.Object {
 }
 
 func DbQueryNodes(args ...object.Object) object.Object {
-	if len(args) != 2 {
-		return newError("wrong number of arguments. got=%d, want=2", len(args))
+	if len(args) != 1 && len(args) != 2 {
+		return newError("wrong number of arguments. got=%d, want=1 or 2", len(args))
 	}
 	h, ok := args[0].(*object.Integer)
 	if !ok {
 		return newError("argument 1 to `db_query_nodes` must be INTEGER, got %s", args[0].Type())
 	}
-	label, ok := args[1].(*object.String)
-	if !ok {
-		return newError("argument 2 to `db_query_nodes` must be STRING, got %s", args[1].Type())
-	}
 	g, found := dbGet(h.Value)
 	if !found {
 		return newError("db_query_nodes: invalid handle %d", h.Value)
 	}
-	nodeType := dbLabelToNodeType(label.Value)
+
+	nodeType := store.CustomNodeType(uint8(DATA))
+	if len(args) == 2 {
+		parsedType, errObj := dbNodeTypeFromObject(args[1])
+		if errObj != nil {
+			return newError("argument 2 to `db_query_nodes`: %s", errObj.Inspect())
+		}
+		nodeType = parsedType
+	}
+
 	ids, err := g.QueryNodeIDs(store.NodeQuery{
 		Types: []store.NodeType{nodeType},
 	})

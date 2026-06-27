@@ -874,23 +874,23 @@ func (vm *VM) Run() error {
 			}
 			typeName := typeObj.Value
 			tagName := tagObj.Value
+			ordinal := -1
 
 			if tagsVal, ok := vm.enumDefs[typeName]; ok {
 				if tags, ok := tagsVal.([]string); ok {
-					found := false
-					for _, t := range tags {
+					for idx, t := range tags {
 						if t == tagName {
-							found = true
+							ordinal = idx
 							break
 						}
 					}
-					if !found {
+					if ordinal < 0 {
 						return fmt.Errorf("unknown enum tag %s.%s", typeName, tagName)
 					}
 				}
 			}
 
-			enumObj := &object.EnumValue{TypeName: typeName, Tag: tagName, Value: nil}
+			enumObj := &object.EnumValue{TypeName: typeName, Tag: tagName, Value: &object.Integer{Value: int64(ordinal)}}
 			if err := vm.push(enumObj); err != nil {
 				return err
 			}

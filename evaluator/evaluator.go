@@ -337,7 +337,7 @@ func evalEnumStatement(node *ast.EnumStatement, env *object.Environment) object.
 		env.Set(enumValKey, &object.EnumValue{
 			TypeName: node.Name.Value,
 			Tag:      variant.Value,
-			Value:    NULL,
+			Value:    &object.Integer{Value: int64(i)},
 		})
 	}
 

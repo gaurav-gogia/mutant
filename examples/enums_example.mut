@@ -11,3 +11,13 @@ if (active) {
 } else {
     putln("this branch should not run");
 }
+
+putln("");
+active = Color.Red;
+putln(active);
+
+if (active == Color.Blue) {
+    putln("blue found");
+} else {
+    putln("this is not blue");
+}

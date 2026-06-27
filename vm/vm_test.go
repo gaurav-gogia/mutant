@@ -663,8 +663,11 @@ func TestEnumValuesRemainEncryptedAtRest(t *testing.T) {
 		t.Fatalf("wrong stored enum identity: got=%s.%s", stored.TypeName, stored.Tag)
 	}
 
-	if stored.Value != nil {
-		t.Fatalf("expected tag-only enum value to have nil payload, got=%T", stored.Value)
+	if stored.Value == nil {
+		t.Fatalf("expected stored enum payload to be encrypted, got nil")
+	}
+	if stored.Value.Type() != object.ENCRYPTED_OBJ {
+		t.Fatalf("expected stored enum payload to remain encrypted, got=%s", stored.Value.Type())
 	}
 
 	last := vm.LastPoppedStackElement()
@@ -675,6 +678,13 @@ func TestEnumValuesRemainEncryptedAtRest(t *testing.T) {
 
 	if dec.TypeName != "Color" || dec.Tag != "Green" {
 		t.Fatalf("wrong decrypted enum identity: got=%s.%s", dec.TypeName, dec.Tag)
+	}
+	decOrdinal, ok := dec.Value.(*object.Integer)
+	if !ok {
+		t.Fatalf("expected decrypted enum payload integer ordinal, got=%T", dec.Value)
+	}
+	if decOrdinal.Value != 2 {
+		t.Fatalf("wrong decrypted enum ordinal payload: got=%d want=2", decOrdinal.Value)
 	}
 }
 
