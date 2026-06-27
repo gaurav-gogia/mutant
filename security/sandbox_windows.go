@@ -103,11 +103,17 @@ func addWindowsProcessIndicators(procs string, add func(kind string, confidence 
 }
 
 func addWindowsEnvIndicators(lookupEnv func(string) (string, bool), add func(kind string, confidence int, indicator string)) {
-	for _, name := range []string{"WSL_INTEROP", "WSL_DISTRO_NAME", "WSLENV"} {
+	for _, name := range []string{"WSL_INTEROP", "WSL_DISTRO_NAME"} {
 		if value, ok := lookupEnv(name); ok && strings.TrimSpace(value) != "" {
 			add("WSL", 95, "windows:env:wsl_context")
 			return
 		}
+	}
+
+	// WSLENV can leak into host shells (for example via terminal profiles),
+	// so treat it as weak evidence unless corroborated by stronger signals.
+	if value, ok := lookupEnv("WSLENV"); ok && strings.TrimSpace(value) != "" {
+		add("WSL", 35, "windows:env:wslenv_only")
 	}
 }
 

@@ -53,8 +53,11 @@ func TestDetectSandboxWindowsFromEnvWSLENV(t *testing.T) {
 	if detection.Type != "WSL" {
 		t.Fatalf("expected WSL detection, got %q", detection.Type)
 	}
-	if detection.Confidence < 90 {
-		t.Fatalf("expected WSL confidence >= 90, got %d", detection.Confidence)
+	if detection.Confidence != 35 {
+		t.Fatalf("expected WSLENV-only confidence 35, got %d", detection.Confidence)
+	}
+	if detection.Confidence >= sandboxDetectedThreshold {
+		t.Fatalf("expected WSLENV-only signal to stay below sandbox threshold, got %d", detection.Confidence)
 	}
 }
 

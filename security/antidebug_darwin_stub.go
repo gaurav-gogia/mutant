@@ -7,3 +7,7 @@ package security
 func isDebuggerPresentDarwin() bool {
 	return false
 }
+
+func detectDebuggerDetailsDarwin() (bool, []string) {
+	return false, nil
+}

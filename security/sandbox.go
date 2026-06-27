@@ -1,6 +1,9 @@
 package security
 
-import "runtime"
+import (
+	"runtime"
+	"strings"
+)
 
 type sandboxDetection struct {
 	Type       string
@@ -24,6 +27,7 @@ func IsSandboxed() bool {
 func DetectSandboxType() (string, int, error) {
 	result, err := detectSandbox()
 	if err != nil {
+		securityDevLogf("sandbox detect error=%v", err)
 		return "none", 0, err
 	}
 	if result.Confidence < 0 {
@@ -33,8 +37,16 @@ func DetectSandboxType() (string, int, error) {
 		result.Confidence = 100
 	}
 	if result.Type == "" || result.Confidence == 0 {
+		securityDevLogf("sandbox detected=false type=none confidence=0 indicators=")
 		return "none", 0, nil
 	}
+	securityDevLogf(
+		"sandbox detected=%t type=%s confidence=%d indicators=%s",
+		result.Confidence >= sandboxDetectedThreshold,
+		result.Type,
+		result.Confidence,
+		strings.Join(result.Indicators, ","),
+	)
 	return result.Type, result.Confidence, err
 }
 

@@ -28,6 +28,7 @@ var Builtins = []struct {
 	{"pop", &BuiltIn{Pop}, ""},
 	{"debug_status", &BuiltIn{DebugStatus}, ""},
 	{"sandbox_status", &BuiltIn{SandboxStatus}, ""},
+	{"security_diagnostics", &BuiltIn{SecurityDiagnostics}, ""},
 	{"exec_string", &BuiltIn{ExecString}, "command_exec"},
 	{"cmd_builder", &BuiltIn{CmdBuilder}, "command_exec"},
 	{"cmd_add", &BuiltIn{CmdAdd}, "command_exec"},

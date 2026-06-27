@@ -7,3 +7,7 @@ package security
 func isDebuggerPresentLinux() bool {
 	return false
 }
+
+func detectDebuggerDetailsLinux() (bool, []string) {
+	return false, nil
+}

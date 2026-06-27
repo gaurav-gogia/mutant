@@ -15,22 +15,29 @@ import (
 // isDebuggerPresentDarwin performs multiple anti-debugging checks on macOS/Darwin
 // Uses techniques employed by security vendors like Objective-See
 func isDebuggerPresentDarwin() bool {
+	detected, _ := detectDebuggerDetailsDarwin()
+	return detected
+}
+
+func detectDebuggerDetailsDarwin() (bool, []string) {
+	methods := make([]string, 0, 3)
+
 	// Check 1: P_TRACED flag (ptrace-based debuggers like lldb, gdb)
 	if isProcessBeingTraced() {
-		return true
+		methods = append(methods, "darwin:p_traced")
 	}
 
 	// Check 2: Check parent process for known debuggers
 	if isParentDebuggerDarwin() {
-		return true
+		methods = append(methods, "darwin:parent_debugger_process")
 	}
 
 	// Check 3: Environment variables set by debugging tools
 	if hasDebuggerEnvironmentMarkersDarwin() {
-		return true
+		methods = append(methods, "darwin:debugger_environment")
 	}
 
-	return false
+	return len(methods) > 0, methods
 }
 
 // isProcessBeingTraced checks if the process is being traced via P_TRACED flag

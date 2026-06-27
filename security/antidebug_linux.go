@@ -13,22 +13,29 @@ import (
 // isDebuggerPresentLinux performs multiple anti-debugging checks on Linux
 // using techniques employed by major security firms and tech companies
 func isDebuggerPresentLinux() bool {
+	detected, _ := detectDebuggerDetailsLinux()
+	return detected
+}
+
+func detectDebuggerDetailsLinux() (bool, []string) {
+	methods := make([]string, 0, 3)
+
 	// Check 1: TracerPid detection (ptrace-based debuggers)
 	if isTracingDetected() {
-		return true
+		methods = append(methods, "linux:tracer_pid")
 	}
 
 	// Check 2: Debugger process detection via /proc/cmdline of parent
 	if isParentDebugger() {
-		return true
+		methods = append(methods, "linux:parent_debugger_process")
 	}
 
 	// Check 3: GDB specific markers in environment
 	if hasDebuggerEnvironmentMarkers() {
-		return true
+		methods = append(methods, "linux:debugger_environment")
 	}
 
-	return false
+	return len(methods) > 0, methods
 }
 
 // isTracingDetected checks if the process is being traced via ptrace

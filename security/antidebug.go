@@ -1,6 +1,9 @@
 package security
 
-import "runtime"
+import (
+	"runtime"
+	"strings"
+)
 
 // IsDebuggerPresent checks if a debugger is currently attached to the process.
 // It uses multiple platform-specific detection techniques:
@@ -27,14 +30,21 @@ import "runtime"
 //
 // Returns true if any debugger detection method triggers.
 func IsDebuggerPresent() bool {
+	detected, methods := DetectDebuggerDetails()
+	securityDevLogf("debugger detected=%t methods=%s", detected, strings.Join(methods, ","))
+	return detected
+}
+
+// DetectDebuggerDetails returns debugger detection status plus triggered methods.
+func DetectDebuggerDetails() (bool, []string) {
 	switch runtime.GOOS {
 	case "windows":
-		return isDebuggerPresentWindows()
+		return detectDebuggerDetailsWindows()
 	case "linux":
-		return isDebuggerPresentLinux()
+		return detectDebuggerDetailsLinux()
 	case "darwin":
-		return isDebuggerPresentDarwin()
+		return detectDebuggerDetailsDarwin()
 	default:
-		return false
+		return false, nil
 	}
 }

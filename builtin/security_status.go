@@ -99,6 +99,54 @@ func SandboxStatus(args ...object.Object) object.Object {
 	return makeHashObject(result)
 }
 
+func SecurityDiagnostics(args ...object.Object) object.Object {
+	if len(args) != 0 {
+		return newError("wrong number of arguments. got=%d, want=0", len(args))
+	}
+
+	debugDetected, debugMethods := security.DetectDebuggerDetails()
+	sandboxType, sandboxConfidence, sandboxErr := security.DetectSandboxType()
+	sandboxIndicators, indicatorsErr := security.GetSandboxIndicators()
+
+	sandboxDetected := sandboxConfidence >= 70
+	if sandboxType == "none" {
+		sandboxDetected = false
+	}
+
+	sandboxError := ""
+	if sandboxErr != nil {
+		sandboxError = sandboxErr.Error()
+	}
+	if indicatorsErr != nil {
+		if sandboxError != "" {
+			sandboxError += "; "
+		}
+		sandboxError += indicatorsErr.Error()
+	}
+
+	telemetry := security.SecurityTelemetrySnapshot()
+
+	return makeHashObject(map[string]object.Object{
+		"debugger": makeHashObject(map[string]object.Object{
+			"detected":       boolObj(debugDetected),
+			"methods":        stringArrayObj(debugMethods),
+			"event_count":    intObj(int64(telemetry["debugger_detected"])),
+			"schema_version": intObj(1),
+		}),
+		"sandbox": makeHashObject(map[string]object.Object{
+			"detected":       boolObj(sandboxDetected),
+			"type":           stringObj(sandboxType),
+			"confidence":     intObj(int64(sandboxConfidence)),
+			"indicators":     stringArrayObj(sandboxIndicators),
+			"event_count":    intObj(int64(telemetry["sandbox_detected"])),
+			"error":          stringObj(sandboxError),
+			"schema_version": intObj(1),
+		}),
+		"source":         stringObj("go-security"),
+		"schema_version": intObj(1),
+	})
+}
+
 func detectionType(detected bool, name string) string {
 	if detected {
 		return name

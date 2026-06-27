@@ -31,21 +31,42 @@ const (
 // isDebuggerPresentWindows performs multiple debugger detection techniques.
 // Uses a combination of methods inspired by Kaspersky, Symantec, and other security vendors.
 func isDebuggerPresentWindows() bool {
+	detected, _ := detectDebuggerDetailsWindows()
+	return detected
+}
+
+func detectDebuggerDetailsWindows() (bool, []string) {
+	methods := make([]string, 0, 6)
+
 	// High-confidence checks: a single hit is enough.
-	if checkBeingDebugged() || checkRemoteDebugger() || checkProcessDebugPort() || checkProcessDebugObjectHandle() {
-		return true
+	if checkBeingDebugged() {
+		methods = append(methods, "windows:is_debugger_present")
+	}
+	if checkRemoteDebugger() {
+		methods = append(methods, "windows:check_remote_debugger_present")
+	}
+	if checkProcessDebugPort() {
+		methods = append(methods, "windows:process_debug_port")
+	}
+	if checkProcessDebugObjectHandle() {
+		methods = append(methods, "windows:process_debug_object_handle")
+	}
+	if len(methods) > 0 {
+		return true, methods
 	}
 
 	// Lower-confidence heuristics: require multiple weak signals.
 	weakHits := 0
 	if checkOutputDebugStringTest() {
 		weakHits++
+		methods = append(methods, "windows:output_debug_string_timing")
 	}
 	if checkDebuggerDLLs() {
 		weakHits++
+		methods = append(methods, "windows:debugger_dll_loaded")
 	}
 
-	return shouldTriggerDebuggerByWeight(false, weakHits, 2)
+	return shouldTriggerDebuggerByWeight(false, weakHits, 2), methods
 }
 
 // checkBeingDebugged uses IsDebuggerPresent API

@@ -9,6 +9,10 @@ func isDebuggerPresentWindows() bool {
 	return false
 }
 
+func detectDebuggerDetailsWindows() (bool, []string) {
+	return false, nil
+}
+
 func CheckRemoteDebugger() bool {
 	return false
 }
