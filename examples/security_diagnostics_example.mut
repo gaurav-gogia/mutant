@@ -1,5 +1,5 @@
 putln("=== Security Diagnostics Example ===");
-putln("Tip: set MUTANT_SECURITY_DEV_LOG=1 to see detailed stderr logs from detector internals.");
+putln("Tip: run with --dev --security-log-level=debug (or --log-level=debug) to see detailed stderr logs.");
 putln("");
 
 let diag = security_diagnostics();

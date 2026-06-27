@@ -8,6 +8,7 @@ import (
 	"mutant/global"
 	"mutant/mutil"
 	"mutant/runner"
+	"mutant/security"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,7 @@ func main() {
 				if devMode {
 					secureMode = false
 				}
+				configureSecurityLogging(os.Args, devMode)
 				if password == "" && devMode {
 					password = mutil.GetPwd()
 				}
@@ -90,6 +92,8 @@ func main() {
 			fmt.Println("\t\tRun mutant bytecode using mutant VM.")
 			fmt.Println("\t\tOptional: --compat to allow compatibility mode (weaker security checks).")
 			fmt.Println("\t\tOptional: --dev for developer mode (compat mode + default local password fallback).")
+			fmt.Println("\t\tOptional: --security-log-level <none|error|info|debug|trace> (active in --dev mode).")
+			fmt.Println("\t\tAlias: --log-level <none|error|info|debug|trace> (active in --dev mode).")
 			fmt.Println("\t\tOptional: --signer-auth to enforce trusted signer key verification in secure mode.")
 			fmt.Println("\t\tDefault is --secure (fail-closed security behavior).")
 			fmt.Println()
@@ -163,6 +167,7 @@ func main() {
 			if devMode {
 				secureMode = false
 			}
+			configureSecurityLogging(os.Args, devMode)
 			if strings.HasSuffix(fileArg, global.MutantSourceCodeFileExtention) {
 				cli.CompileCode(fileArg, "", "", false, password, defaultPolymorphicLevel, time.Now().UnixNano())
 				return
@@ -258,6 +263,36 @@ func hasDevModeArg(args []string) bool {
 		}
 	}
 	return false
+}
+
+func extractSecurityLogLevelArg(args []string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--security-log-level" || args[i] == "-security-log-level" || args[i] == "--log-level" || args[i] == "-log-level" {
+			return strings.TrimSpace(args[i+1])
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "--security-log-level=") {
+			return strings.TrimSpace(strings.TrimPrefix(args[i], "--security-log-level="))
+		}
+		if strings.HasPrefix(args[i], "--log-level=") {
+			return strings.TrimSpace(strings.TrimPrefix(args[i], "--log-level="))
+		}
+	}
+	return ""
+}
+
+func configureSecurityLogging(args []string, devMode bool) {
+	if devMode {
+		_ = os.Setenv(security.SecurityDevModeEnv, "1")
+	} else {
+		_ = os.Unsetenv(security.SecurityDevModeEnv)
+	}
+
+	level := extractSecurityLogLevelArg(args)
+	if level != "" {
+		_ = os.Setenv(security.SecurityLogLevelEnv, level)
+	}
 }
 
 // extractSignerAuthArg scans args for explicit signer-auth flags.
