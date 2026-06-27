@@ -5,6 +5,30 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "windows")]
+use std::process::Command;
+
+#[cfg(target_os = "windows")]
+fn has_virtualization_marker(input: &str) -> Option<&'static str> {
+    let lower = input.to_lowercase();
+    let markers = [
+        ("vmware", "vmware"),
+        ("virtualbox", "virtualbox"),
+        ("qemu", "qemu"),
+        ("kvm", "kvm"),
+        ("xen", "xen"),
+        ("hyper-v", "hyper-v"),
+        ("virtual machine", "virtual machine"),
+        ("parallels", "parallels"),
+    ];
+
+    for (needle, label) in markers {
+        if lower.contains(needle) {
+            return Some(label);
+        }
+    }
+    None
+}
 
 #[derive(Debug, Deserialize)]
 struct ProbeRequest {
@@ -73,13 +97,261 @@ fn make_signal(
 fn detect_hardware_breakpoint() -> ProbeSignal {
     #[cfg(target_os = "windows")]
     {
-        // Placeholder until context inspection is added through Windows debug APIs.
-        return make_signal(
-            "hardware_breakpoint",
-            false,
-            0,
-            "not implemented on windows yet",
-        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            type WinBool = i32;
+
+            const CONTEXT_AMD64: u32 = 0x0010_0000;
+            const CONTEXT_DEBUG_REGISTERS: u32 = CONTEXT_AMD64 | 0x0000_0010;
+
+            #[repr(C, align(16))]
+            #[derive(Copy, Clone)]
+            struct M128A {
+                low: u64,
+                high: i64,
+            }
+
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct XmmSaveArea32 {
+                control_word: u16,
+                status_word: u16,
+                tag_word: u8,
+                reserved1: u8,
+                error_opcode: u16,
+                error_offset: u32,
+                error_selector: u16,
+                reserved2: u16,
+                data_offset: u32,
+                data_selector: u16,
+                reserved3: u16,
+                mx_csr: u32,
+                mx_csr_mask: u32,
+                float_registers: [M128A; 8],
+                xmm_registers: [M128A; 16],
+                reserved4: [u8; 96],
+            }
+
+            #[repr(C, align(16))]
+            struct Context {
+                p1_home: u64,
+                p2_home: u64,
+                p3_home: u64,
+                p4_home: u64,
+                p5_home: u64,
+                p6_home: u64,
+                context_flags: u32,
+                mx_csr: u32,
+                seg_cs: u16,
+                seg_ds: u16,
+                seg_es: u16,
+                seg_fs: u16,
+                seg_gs: u16,
+                seg_ss: u16,
+                eflags: u32,
+                dr0: u64,
+                dr1: u64,
+                dr2: u64,
+                dr3: u64,
+                dr6: u64,
+                dr7: u64,
+                rax: u64,
+                rcx: u64,
+                rdx: u64,
+                rbx: u64,
+                rsp: u64,
+                rbp: u64,
+                rsi: u64,
+                rdi: u64,
+                r8: u64,
+                r9: u64,
+                r10: u64,
+                r11: u64,
+                r12: u64,
+                r13: u64,
+                r14: u64,
+                r15: u64,
+                rip: u64,
+                flt_save: XmmSaveArea32,
+                vector_register: [M128A; 26],
+                vector_control: u64,
+                debug_control: u64,
+                last_branch_to_rip: u64,
+                last_branch_from_rip: u64,
+                last_exception_to_rip: u64,
+                last_exception_from_rip: u64,
+            }
+
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentThread() -> *mut core::ffi::c_void;
+                fn GetThreadContext(
+                    hthread: *mut core::ffi::c_void,
+                    lpcontext: *mut Context,
+                ) -> WinBool;
+            }
+
+            // SAFETY: Context is plain-old-data and zero initialization matches Win32 API expectations.
+            let mut ctx: Context = unsafe { std::mem::zeroed() };
+            ctx.context_flags = CONTEXT_DEBUG_REGISTERS;
+
+            // SAFETY: GetCurrentThread returns a pseudo-handle valid for the current thread,
+            // and GetThreadContext writes into the provided CONTEXT structure.
+            let ok = unsafe { GetThreadContext(GetCurrentThread(), &mut ctx as *mut Context) };
+            if ok == 0 {
+                return make_signal("hardware_breakpoint", false, 0, "GetThreadContext failed");
+            }
+
+            let enabled_mask = ctx.dr7 & 0xFF;
+            let addr_regs = [ctx.dr0, ctx.dr1, ctx.dr2, ctx.dr3];
+            let active_slots = addr_regs.iter().filter(|&&r| r != 0).count();
+
+            let suspicious = enabled_mask != 0 || active_slots > 0;
+            if suspicious {
+                let confidence = if enabled_mask != 0 && active_slots > 0 {
+                    95
+                } else if enabled_mask != 0 {
+                    85
+                } else {
+                    75
+                };
+
+                return make_signal(
+                    "hardware_breakpoint",
+                    true,
+                    confidence,
+                    format!(
+                        "dr0=0x{:x};dr1=0x{:x};dr2=0x{:x};dr3=0x{:x};dr7=0x{:x};enabled_mask=0x{:x};active_slots={}",
+                        ctx.dr0, ctx.dr1, ctx.dr2, ctx.dr3, ctx.dr7, enabled_mask, active_slots
+                    ),
+                );
+            }
+
+            return make_signal(
+                "hardware_breakpoint",
+                false,
+                0,
+                format!(
+                    "dr7=0x{:x};enabled_mask=0x{:x};active_slots=0",
+                    ctx.dr7, enabled_mask
+                ),
+            );
+        }
+
+        #[cfg(target_arch = "x86")]
+        {
+            type WinBool = i32;
+
+            const CONTEXT_I386: u32 = 0x0001_0000;
+            const CONTEXT_DEBUG_REGISTERS: u32 = CONTEXT_I386 | 0x0000_0010;
+
+            #[repr(C)]
+            struct FloatingSaveArea {
+                control_word: u32,
+                status_word: u32,
+                tag_word: u32,
+                error_offset: u32,
+                error_selector: u32,
+                data_offset: u32,
+                data_selector: u32,
+                register_area: [u8; 80],
+                cr0_npx_state: u32,
+            }
+
+            #[repr(C)]
+            struct Context32 {
+                context_flags: u32,
+                dr0: u32,
+                dr1: u32,
+                dr2: u32,
+                dr3: u32,
+                dr6: u32,
+                dr7: u32,
+                float_save: FloatingSaveArea,
+                seg_gs: u32,
+                seg_fs: u32,
+                seg_es: u32,
+                seg_ds: u32,
+                edi: u32,
+                esi: u32,
+                ebx: u32,
+                edx: u32,
+                ecx: u32,
+                eax: u32,
+                ebp: u32,
+                eip: u32,
+                seg_cs: u32,
+                eflags: u32,
+                esp: u32,
+                seg_ss: u32,
+                extended_registers: [u8; 512],
+            }
+
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentThread() -> *mut core::ffi::c_void;
+                fn GetThreadContext(
+                    hthread: *mut core::ffi::c_void,
+                    lpcontext: *mut Context32,
+                ) -> WinBool;
+            }
+
+            // SAFETY: Context is plain-old-data and zero initialization matches Win32 API expectations.
+            let mut ctx: Context32 = unsafe { std::mem::zeroed() };
+            ctx.context_flags = CONTEXT_DEBUG_REGISTERS;
+
+            // SAFETY: GetCurrentThread returns a pseudo-handle valid for the current thread,
+            // and GetThreadContext writes into the provided CONTEXT structure.
+            let ok = unsafe { GetThreadContext(GetCurrentThread(), &mut ctx as *mut Context32) };
+            if ok == 0 {
+                return make_signal("hardware_breakpoint", false, 0, "GetThreadContext failed");
+            }
+
+            let enabled_mask = ctx.dr7 & 0xFF;
+            let addr_regs = [ctx.dr0, ctx.dr1, ctx.dr2, ctx.dr3];
+            let active_slots = addr_regs.iter().filter(|&&r| r != 0).count();
+
+            let suspicious = enabled_mask != 0 || active_slots > 0;
+            if suspicious {
+                let confidence = if enabled_mask != 0 && active_slots > 0 {
+                    95
+                } else if enabled_mask != 0 {
+                    85
+                } else {
+                    75
+                };
+
+                return make_signal(
+                    "hardware_breakpoint",
+                    true,
+                    confidence,
+                    format!(
+                        "dr0=0x{:x};dr1=0x{:x};dr2=0x{:x};dr3=0x{:x};dr7=0x{:x};enabled_mask=0x{:x};active_slots={}",
+                        ctx.dr0, ctx.dr1, ctx.dr2, ctx.dr3, ctx.dr7, enabled_mask, active_slots
+                    ),
+                );
+            }
+
+            return make_signal(
+                "hardware_breakpoint",
+                false,
+                0,
+                format!(
+                    "dr7=0x{:x};enabled_mask=0x{:x};active_slots=0",
+                    ctx.dr7, enabled_mask
+                ),
+            );
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+        {
+            return make_signal(
+                "hardware_breakpoint",
+                false,
+                0,
+                "unsupported windows arch for debug register probe",
+            );
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -130,7 +402,48 @@ fn detect_syscall() -> ProbeSignal {
         return make_signal("syscall", false, 0, "no tracer pid detected");
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        type WinBool = i32;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn IsDebuggerPresent() -> WinBool;
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn CheckRemoteDebuggerPresent(
+                hprocess: *mut core::ffi::c_void,
+                debugger_present: *mut WinBool,
+            ) -> WinBool;
+        }
+
+        let mut reasons: Vec<&str> = vec![];
+
+        // SAFETY: These are leaf Win32 APIs without borrowed pointers except the output flag.
+        unsafe {
+            if IsDebuggerPresent() != 0 {
+                reasons.push("IsDebuggerPresent");
+            }
+
+            let mut remote: WinBool = 0;
+            let ok = CheckRemoteDebuggerPresent(GetCurrentProcess(), &mut remote as *mut WinBool);
+            if ok != 0 && remote != 0 {
+                reasons.push("CheckRemoteDebuggerPresent");
+            }
+        }
+
+        if reasons.is_empty() {
+            return make_signal("syscall", false, 0, "no debugger API signal detected");
+        }
+
+        return make_signal(
+            "syscall",
+            true,
+            80,
+            format!("api_hits={}", reasons.join(",")),
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         make_signal("syscall", false, 0, "unsupported on this platform")
     }
@@ -169,6 +482,24 @@ fn detect_frida_ptrace() -> ProbeSignal {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = Command::new("tasklist").output() {
+            let tasks = String::from_utf8_lossy(&out.stdout).to_lowercase();
+            let suspicious = ["frida", "frida-helper", "frida-server", "frida-agent"];
+            for marker in suspicious {
+                if tasks.contains(marker) {
+                    return make_signal(
+                        "frida_ptrace",
+                        true,
+                        85,
+                        format!("tasklist marker: {marker}"),
+                    );
+                }
+            }
+        }
+    }
+
     make_signal(
         "frida_ptrace",
         false,
@@ -178,12 +509,45 @@ fn detect_frida_ptrace() -> ProbeSignal {
 }
 
 fn detect_ld_preload() -> ProbeSignal {
-    let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
-    if preload.trim().is_empty() {
-        return make_signal("ld_preload", false, 0, "LD_PRELOAD empty");
+    #[cfg(target_os = "windows")]
+    {
+        let windows_injection_markers = [
+            "COR_ENABLE_PROFILING",
+            "COR_PROFILER",
+            "COR_PROFILER_PATH",
+            "__COMPAT_LAYER",
+        ];
+
+        let mut present: Vec<String> = vec![];
+        for name in windows_injection_markers {
+            if let Ok(value) = std::env::var(name) {
+                if !value.trim().is_empty() {
+                    present.push(format!("{name}={value}"));
+                }
+            }
+        }
+
+        if present.is_empty() {
+            return make_signal("ld_preload", false, 0, "no windows injection env markers");
+        }
+
+        return make_signal(
+            "ld_preload",
+            true,
+            55,
+            format!("windows_env_markers={}", present.join(";")),
+        );
     }
 
-    make_signal("ld_preload", true, 85, format!("LD_PRELOAD={preload}"))
+    #[cfg(not(target_os = "windows"))]
+    {
+        let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
+        if preload.trim().is_empty() {
+            return make_signal("ld_preload", false, 0, "LD_PRELOAD empty");
+        }
+
+        return make_signal("ld_preload", true, 85, format!("LD_PRELOAD={preload}"));
+    }
 }
 
 fn detect_cpuid_hypervisor() -> ProbeSignal {
@@ -264,7 +628,55 @@ fn detect_acpi_pci() -> ProbeSignal {
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let mut details: Vec<String> = vec![];
+
+        let commands = [
+            (
+                "wmic computersystem",
+                Command::new("wmic")
+                    .args(["computersystem", "get", "manufacturer,model"])
+                    .output(),
+            ),
+            ("systeminfo", Command::new("systeminfo").output()),
+        ];
+
+        let mut marker_hit: Option<&'static str> = None;
+        for (source, output) in commands {
+            if let Ok(out) = output {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                if !text.trim().is_empty() {
+                    details.push(format!("{source}={}", text.replace('\n', " ").trim()));
+                }
+                if marker_hit.is_none() {
+                    marker_hit = has_virtualization_marker(&text);
+                }
+            }
+        }
+
+        if let Some(marker) = marker_hit {
+            return make_signal(
+                "acpi_pci",
+                true,
+                60,
+                format!("windows_platform_marker={marker}"),
+            );
+        }
+
+        return make_signal(
+            "acpi_pci",
+            false,
+            0,
+            if details.is_empty() {
+                "no windows system metadata available".to_string()
+            } else {
+                "windows system metadata present without virtualization marker".to_string()
+            },
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         make_signal("acpi_pci", false, 0, "unsupported on this platform")
     }
