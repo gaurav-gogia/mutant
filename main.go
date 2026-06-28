@@ -22,7 +22,7 @@ const (
 	RELEASECMD = "release"
 	GENCMD     = "gen"
 	RUNCMD     = "run"
-	VERSION    = "Version: 2.1.0_dev"
+	VERSION    = "Version: 2.1.0"
 )
 
 func main() {
