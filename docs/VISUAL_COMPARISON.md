@@ -329,28 +329,28 @@ Only actively-used data is plaintext.
 
 ```
 ┌──────────────────────────────────┐
-│         USER CODE                 │
+│         USER CODE                │
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│         VM (No Protection)        │
-│  • No anti-debug                  │
-│  • No memory encryption           │
-│  • No integrity checks            │
+│         VM (No Protection)       │
+│  • No anti-debug                 │
+│  • No memory encryption          │
+│  • No integrity checks           │
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    Basic Encryption (Weak)        │
-│  • SHA256 key from data           │
-│  • Key stored in file             │
-│  • MD5 integrity (broken)         │
+│    Basic Encryption (Weak)       │
+│  • SHA256 key from data          │
+│  • Key stored in file            │
+│  • MD5 integrity (broken)        │
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│      BYTECODE FILE                │
-│  • Always same hash               │
-│  • Easy to detect                 │
-│  • Key included!                  │
+│      BYTECODE FILE               │
+│  • Always same hash              │
+│  • Easy to detect                │
+│  • Key included!                 │
 └──────────────────────────────────┘
 
 Weak against:
@@ -365,51 +365,51 @@ Weak against:
 
 ```
 ┌──────────────────────────────────┐
-│         USER CODE                 │
+│         USER CODE                │
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    Anti-Debugging Layer           │
-│  ✅ IsDebuggerPresent()           │
-│  ✅ Timing checks                 │
-│  ✅ Parent process check          │
+│    Anti-Debugging Layer
+│  ✅ IsDebuggerPresent()
+│  ✅ Timing checks
+│  ✅ Parent process check
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    Memory Security Layer          │
-│  ✅ Encrypted globals             │
-│  ✅ Auto-encrypt stack            │
-│  ✅ Secure constant pool          │
-│  ✅ Memory zeroing                │
+│    Memory Security Layer
+│  ✅ Encrypted globals
+│  ✅ Auto-encrypt stack
+│  ✅ Secure constant pool
+│  ✅ Memory zeroing
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    VM with Protection             │
-│  ✅ Encrypted execution           │
-│  ✅ Integrity checks              │
-│  ✅ Secure cleanup                │
+│    VM with Protection
+│  ✅ Encrypted execution
+│  ✅ Integrity checks
+│  ✅ Secure cleanup
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    Strong Encryption              │
-│  ✅ HKDF key derivation           │
-│  ✅ Key never stored              │
-│  ✅ SHA-256 integrity             │
-│  ✅ Ed25519 signatures            │
+│    Strong Encryption
+│  ✅ HKDF key derivation
+│  ✅ Key never stored
+│  ✅ SHA-256 integrity
+│  ✅ Ed25519 signatures
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│    Polymorphic Layer              │
-│  ✅ NOP insertion                 │
-│  ✅ Constant shuffling            │
-│  ✅ Different hash each time      │
+│    Polymorphic Layer
+│  ✅ NOP insertion
+│  ✅ Constant shuffling
+│  ✅ Different hash each time
 └──────────────────────────────────┘
                 ↓
 ┌──────────────────────────────────┐
-│      BYTECODE FILE                │
-│  • Different hash every compile   │
-│  • Signed & verified              │
-│  • Key NOT included               │
+│      BYTECODE FILE               │
+│  • Different hash every compile  │
+│  • Signed & verified             │
+│  • Key NOT included              │
 └──────────────────────────────────┘
 
 Strong against:
@@ -426,15 +426,16 @@ Strong against:
 
 ## Summary
 
-| Aspect | Old | New | Improvement |
-|--------|-----|-----|-------------|
-| **Key Derivation** | SHA256(data) | HKDF-SHA256 | ⭐⭐⭐⭐⭐ |
-| **Key Storage** | In file | Never stored | ⭐⭐⭐⭐⭐ |
-| **Bytecode Hash** | Always same | Different each time | ⭐⭐⭐⭐⭐ |
-| **Memory Security** | Plaintext | Encrypted | ⭐⭐⭐⭐ |
-| **Anti-Debugging** | None | Multi-technique | ⭐⭐⭐⭐⭐ |
-| **Random Gen** | math/rand | crypto/rand | ⭐⭐⭐⭐⭐ |
-| **Timing Safety** | None | Constant-time | ⭐⭐⭐⭐ |
-| **Code Signing** | MD5 | Ed25519 | ⭐⭐⭐⭐⭐ |
+| Aspect              | Old          | New                 | Improvement |
+| ------------------- | ------------ | ------------------- | ----------- |
+| **Key Derivation**  | SHA256(data) | HKDF-SHA256         | ⭐⭐⭐⭐⭐  |
+| **Key Storage**     | In file      | Never stored        | ⭐⭐⭐⭐⭐  |
+| **Bytecode Hash**   | Always same  | Different each time | ⭐⭐⭐⭐⭐  |
+| **Memory Security** | Plaintext    | Encrypted           | ⭐⭐⭐⭐    |
+| **Anti-Debugging**  | None         | Multi-technique     | ⭐⭐⭐⭐⭐  |
+| **Random Gen**      | math/rand    | crypto/rand         | ⭐⭐⭐⭐⭐  |
+| **Timing Safety**   | None         | Constant-time       | ⭐⭐⭐⭐    |
+| **Code Signing**    | MD5          | Ed25519             | ⭐⭐⭐⭐⭐  |
 
-**Bottom Line:** Your security went from "basic obfuscation" to "military-grade protection"! 🛡️
+**Bottom Line:** Your security went from "basic obfuscation" to "military-grade
+protection"! 🛡️
