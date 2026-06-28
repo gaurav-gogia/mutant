@@ -221,8 +221,8 @@ func TestSecurityTelemetryCounters(t *testing.T) {
 	RecordIntegrityFailure("test-stage")
 	RecordSignatureFailure("test-stage")
 	RecordSandboxDetected("test-stage")
-	RecordRustProbeInvoked("test-stage")
-	RecordRustProbeError("test-stage")
+	RecordProbeInvoked("test-stage")
+	RecordProbeError("test-stage")
 
 	snapshot := SecurityTelemetrySnapshot()
 	if snapshot["debugger_detected"] != 1 {
@@ -237,16 +237,22 @@ func TestSecurityTelemetryCounters(t *testing.T) {
 	if snapshot["sandbox_detected"] != 1 {
 		t.Fatalf("expected sandbox_detected=1, got %d", snapshot["sandbox_detected"])
 	}
-	if snapshot["rust_probe_invoked"] != 1 {
-		t.Fatalf("expected rust_probe_invoked=1, got %d", snapshot["rust_probe_invoked"])
+	if snapshot["anti_tamper_probe_invoked"] != 1 {
+		t.Fatalf("expected anti_tamper_probe_invoked=1, got %d", snapshot["anti_tamper_probe_invoked"])
 	}
-	if snapshot["rust_probe_error"] != 1 {
-		t.Fatalf("expected rust_probe_error=1, got %d", snapshot["rust_probe_error"])
+	if snapshot["anti_tamper_probe_error"] != 1 {
+		t.Fatalf("expected anti_tamper_probe_error=1, got %d", snapshot["anti_tamper_probe_error"])
+	}
+	if snapshot["anti_tamper_probe_invoked"] != 1 {
+		t.Fatalf("expected anti_tamper_probe_invoked=1, got %d", snapshot["anti_tamper_probe_invoked"])
+	}
+	if snapshot["anti_tamper_probe_error"] != 1 {
+		t.Fatalf("expected anti_tamper_probe_error=1, got %d", snapshot["anti_tamper_probe_error"])
 	}
 
 	ResetSecurityTelemetry()
 	snapshot = SecurityTelemetrySnapshot()
-	if snapshot["debugger_detected"] != 0 || snapshot["integrity_failed"] != 0 || snapshot["signature_failed"] != 0 || snapshot["sandbox_detected"] != 0 || snapshot["rust_probe_invoked"] != 0 || snapshot["rust_probe_error"] != 0 {
+	if snapshot["debugger_detected"] != 0 || snapshot["integrity_failed"] != 0 || snapshot["signature_failed"] != 0 || snapshot["sandbox_detected"] != 0 || snapshot["anti_tamper_probe_invoked"] != 0 || snapshot["anti_tamper_probe_error"] != 0 {
 		t.Fatalf("expected counters to reset to zero, got %+v", snapshot)
 	}
 }
@@ -272,8 +278,8 @@ func TestSecurityTelemetryJSONAndExport(t *testing.T) {
 	if snapshot["sandbox_detected"] != 0 {
 		t.Fatalf("expected sandbox_detected=0, got %+v", snapshot)
 	}
-	if snapshot["rust_probe_invoked"] != 0 || snapshot["rust_probe_error"] != 0 {
-		t.Fatalf("expected rust probe counters to be zero, got %+v", snapshot)
+	if snapshot["anti_tamper_probe_invoked"] != 0 || snapshot["anti_tamper_probe_error"] != 0 {
+		t.Fatalf("expected canonical anti-tamper probe counters to be zero, got %+v", snapshot)
 	}
 
 	tmpFile := filepath.Join(t.TempDir(), "telemetry.json")

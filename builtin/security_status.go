@@ -20,9 +20,9 @@ func DebugStatus(args ...object.Object) object.Object {
 		"type":           stringObj(detectionType(detected, "debugger")),
 		"confidence":     intObj(detectionConfidence(detected)),
 		"indicators":     stringArrayObj(nil),
-		"rust_signals":   rustSignalArrayObj(nil),
-		"rust_enabled":   boolObj(false),
-		"rust_error":     stringObj(""),
+		"probe_signals":  antiTamperSignalArrayObj(nil),
+		"probe_enabled":  boolObj(false),
+		"probe_error":    stringObj(""),
 		"source":         stringObj("go-security"),
 		"advisory":       boolObj(true),
 		"event_count":    intObj(int64(telemetry["debugger_detected"])),
@@ -30,14 +30,14 @@ func DebugStatus(args ...object.Object) object.Object {
 		"schema_version": intObj(1),
 	}
 
-	rustSignals, rustEnabled, rustErr := security.RunRustProbe(
+	probeSignals, probeEnabled, probeErr := security.RunAntiTamperProbe(
 		[]string{"hardware_breakpoint", "timing", "syscall", "frida_ptrace", "trampoline", "iat_got"},
 		"builtin:debug_status",
 	)
-	result["rust_enabled"] = boolObj(rustEnabled)
-	result["rust_signals"] = rustSignalArrayObj(rustSignals)
-	if rustErr != nil {
-		result["rust_error"] = stringObj(rustErr.Error())
+	result["probe_enabled"] = boolObj(probeEnabled)
+	result["probe_signals"] = antiTamperSignalArrayObj(probeSignals)
+	if probeErr != nil {
+		result["probe_error"] = stringObj(probeErr.Error())
 	}
 
 	return makeHashObject(result)
@@ -76,9 +76,9 @@ func SandboxStatus(args ...object.Object) object.Object {
 		"type":           stringObj(statusType),
 		"confidence":     intObj(int64(confidence)),
 		"indicators":     stringArrayObj(indicators),
-		"rust_signals":   rustSignalArrayObj(nil),
-		"rust_enabled":   boolObj(false),
-		"rust_error":     stringObj(""),
+		"probe_signals":  antiTamperSignalArrayObj(nil),
+		"probe_enabled":  boolObj(false),
+		"probe_error":    stringObj(""),
 		"source":         stringObj("go-security"),
 		"advisory":       boolObj(true),
 		"event_count":    intObj(int64(telemetry["sandbox_detected"])),
@@ -86,14 +86,14 @@ func SandboxStatus(args ...object.Object) object.Object {
 		"schema_version": intObj(1),
 	}
 
-	rustSignals, rustEnabled, rustErr := security.RunRustProbe(
+	probeSignals, probeEnabled, probeErr := security.RunAntiTamperProbe(
 		[]string{"cpuid_hypervisor", "rdtsc_drift", "acpi_pci", "gpu_feature", "ld_preload", "syscall_table"},
 		"builtin:sandbox_status",
 	)
-	result["rust_enabled"] = boolObj(rustEnabled)
-	result["rust_signals"] = rustSignalArrayObj(rustSignals)
-	if rustErr != nil {
-		result["rust_error"] = stringObj(rustErr.Error())
+	result["probe_enabled"] = boolObj(probeEnabled)
+	result["probe_signals"] = antiTamperSignalArrayObj(probeSignals)
+	if probeErr != nil {
+		result["probe_error"] = stringObj(probeErr.Error())
 	}
 
 	return makeHashObject(result)
@@ -186,7 +186,7 @@ func stringArrayObj(values []string) *object.Array {
 	return &object.Array{Elements: elements}
 }
 
-func rustSignalArrayObj(signals []security.RustSignal) *object.Array {
+func antiTamperSignalArrayObj(signals []security.AntiTamperSignal) *object.Array {
 	if len(signals) == 0 {
 		return &object.Array{Elements: []object.Object{}}
 	}

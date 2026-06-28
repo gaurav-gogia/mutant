@@ -25,17 +25,7 @@ var releaseTargets = []releaseTarget{
 	{goos: "windows", goarch: "386"},
 }
 
-const (
-	RustRequireReleaseEnv   = "MUTANT_REQUIRE_RUST_STATICLIB"
-	RustStaticLibPathEnv    = "MUTANT_RUST_STATICLIB_PATH"
-	RustReleaseStrictCGOEnv = "MUTANT_RUST_RELEASE_REQUIRE_CGO"
-)
-
 func GenerateReleaseAssets(outputPath string) error {
-	if err := validateRustReleasePrerequisites(); err != nil {
-		return err
-	}
-
 	assetsDir := resolveAssetsDir(outputPath)
 	dataDir := filepath.Join(assetsDir, "data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -127,27 +117,6 @@ func buildReleaseRuntimeBinary(goos, goarch string) ([]byte, error) {
 	}
 
 	return binaryData, nil
-}
-
-func validateRustReleasePrerequisites() error {
-	if strings.TrimSpace(os.Getenv(RustRequireReleaseEnv)) != "1" {
-		return nil
-	}
-
-	staticLibPath := strings.TrimSpace(os.Getenv(RustStaticLibPathEnv))
-	if staticLibPath == "" {
-		return fmt.Errorf("%s=1 requires %s to point to Rust static library", RustRequireReleaseEnv, RustStaticLibPathEnv)
-	}
-
-	if _, err := os.Stat(staticLibPath); err != nil {
-		return fmt.Errorf("required rust static library not found at %q: %w", staticLibPath, err)
-	}
-
-	if strings.TrimSpace(os.Getenv(RustReleaseStrictCGOEnv)) == "1" && strings.TrimSpace(os.Getenv("CGO_ENABLED")) == "0" {
-		return fmt.Errorf("%s=1 requires CGO_ENABLED to be set for release asset generation", RustReleaseStrictCGOEnv)
-	}
-
-	return nil
 }
 
 func renderReleaseAssetsIndex(entries map[string]string) []byte {

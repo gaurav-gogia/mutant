@@ -281,7 +281,7 @@ func TestSecurityStatusBuiltins(t *testing.T) {
 			t.Fatalf("%s did not return Hash. got=%T", input, evaluated)
 		}
 
-		for _, key := range []string{"detected", "type", "confidence", "indicators", "rust_signals", "rust_enabled", "rust_error", "source", "advisory", "event_count", "error", "schema_version"} {
+		for _, key := range []string{"detected", "type", "confidence", "indicators", "probe_signals", "probe_enabled", "probe_error", "source", "advisory", "event_count", "error", "schema_version"} {
 			keyObj := &object.String{Value: key}
 			if _, ok := hash.Pairs[keyObj.HashKey()]; !ok {
 				t.Fatalf("%s missing key %q", input, key)
