@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"strings"
 )
 
@@ -33,6 +34,10 @@ func (b *Boolean) HashKey() HashKey {
 
 func (i *Integer) HashKey() HashKey {
 	return HashKey{Type: i.Type(), Value: uint64(i.Value)}
+}
+
+func (f *Float) HashKey() HashKey {
+	return HashKey{Type: f.Type(), Value: math.Float64bits(f.Value)}
 }
 
 func (s *String) HashKey() HashKey {

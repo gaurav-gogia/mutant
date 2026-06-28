@@ -24,7 +24,7 @@ func RunRepl(version string, enableMacros bool) {
 	repl.Start(os.Stdin, os.Stdout, version, enableMacros)
 }
 
-func CompileCode(src, goos, goarch string, release bool) {
+func CompileCode(src, goos, goarch string, release bool, password string, mutationLevel int, mutationSeed int64) {
 	start := time.Now()
 	srcpath, err := filepath.Abs(src)
 	if err != nil {
@@ -33,7 +33,9 @@ func CompileCode(src, goos, goarch string, release bool) {
 	}
 	dstpath := strings.TrimSuffix(srcpath, global.MutantSourceCodeFileExtention)
 
-	if err, errtype, errors := generator.Generate(srcpath, dstpath, goos, goarch, release); err != nil {
+	// Pass nil for privateKey - Generate() will create a new one
+	// In production, you'd load a persistent key from a secure location
+	if err, errtype, errors := generator.Generate(srcpath, dstpath, goos, goarch, release, password, mutationLevel, mutationSeed, nil); err != nil {
 		switch errtype {
 		case errrs.ERROR:
 			fmt.Println(err)
@@ -48,14 +50,25 @@ func CompileCode(src, goos, goarch string, release bool) {
 	fmt.Println("Compiled in:", time.Since(start))
 }
 
-func RunCode(src string) {
+func GenerateReleaseAssets(outputPath string) {
+	start := time.Now()
+
+	if err := generator.GenerateReleaseAssets(outputPath); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("Generated in:", time.Since(start))
+}
+
+func RunCode(src string, password string, secureMode bool, enforceSignerAuth bool) {
 	srcpath, err := filepath.Abs(src)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	if err, errtype := runner.Run(srcpath); err != nil {
+	if err, errtype := runner.Run(srcpath, password, secureMode, enforceSignerAuth); err != nil {
 		switch errtype {
 		case errrs.ERROR:
 			fmt.Println(err)

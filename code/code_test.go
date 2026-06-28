@@ -13,6 +13,8 @@ func TestMake(t *testing.T) {
 	}{
 		{OpConstant, []int{65534}, []byte{byte(OpConstant), 255, 254}},
 		{OpAdd, []int{}, []byte{byte(OpAdd)}},
+		{OpChkDbg, []int{}, []byte{byte(OpChkDbg)}},
+		{OpChkSnd, []int{}, []byte{byte(OpChkSnd)}},
 		{OpGetLocal, []int{255}, []byte{byte(OpGetLocal), 255}},
 		{OpClosure, []int{65534, 255}, []byte{byte(OpClosure), 255, 254, 255}},
 	}

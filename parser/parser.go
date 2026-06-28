@@ -10,6 +10,7 @@ import (
 const (
 	_ int = iota
 	LOWEST
+	ASSIGNMENT
 	EQUALS
 	LESSGREATER
 	SUM
@@ -17,9 +18,11 @@ const (
 	PREFIX
 	CALL
 	INDEX
+	FIELD
 )
 
 var precedences = map[token.TokenType]int{
+	token.ASSIGN:     ASSIGNMENT,
 	token.EQUALITY:   EQUALS,
 	token.INEQUALITY: EQUALS,
 	token.LT:         LESSGREATER,
@@ -30,6 +33,8 @@ var precedences = map[token.TokenType]int{
 	token.ASTERISK:   PRODUCT,
 	token.LPAREN:     CALL,
 	token.LSQUARE:    INDEX,
+	token.DOT:        FIELD,
+	token.LBRACE:     CALL,
 }
 
 type (
@@ -52,6 +57,7 @@ func New(l *lexer.Lexer) *Parser {
 	p.prefixParseFns = make(map[token.TokenType]prefixParseFn)
 	p.registerPrefix(token.IDENT, p.parseIdentifier)
 	p.registerPrefix(token.INT, p.parseIntegerLiteral)
+	p.registerPrefix(token.FLOAT, p.parseFloatLiteral)
 	p.registerPrefix(token.BANG, p.parsePrefixExpression)
 	p.registerPrefix(token.MINUS, p.parsePrefixExpression)
 	p.registerPrefix(token.TRUE, p.parseBoolean)
@@ -71,8 +77,11 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerInfix(token.INEQUALITY, p.parseInfixExpression)
 	p.registerInfix(token.LT, p.parseInfixExpression)
 	p.registerInfix(token.GT, p.parseInfixExpression)
+	p.registerInfix(token.ASSIGN, p.parseAssignExpression)
 	p.registerInfix(token.LPAREN, p.parseCallExpression)
 	p.registerInfix(token.LSQUARE, p.parseIndexExpression)
+	p.registerInfix(token.DOT, p.parseFieldExpression)
+	p.registerInfix(token.LBRACE, p.parseStructLiteralExpression)
 	p.registerPrefix(token.LBRACE, p.parseHashLiteral)
 	p.registerPrefix(token.MACRO, p.parseMacroLiteral)
 

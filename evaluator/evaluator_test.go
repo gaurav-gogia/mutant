@@ -82,7 +82,7 @@ func TestBangOperator(t *testing.T) {
 	}
 }
 
-func TestiFElseExpressions(t *testing.T) {
+func TestIFElseExpressions(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected interface{}
@@ -210,11 +210,11 @@ func TestFunctionApplication(t *testing.T) {
 }
 
 func TestClosures(t *testing.T) {
-	input := ` 
-			let newAdder = fn(x) { 
-				fn(y) { x + y }; 
-			}; 
-			let addTwo = newAdder(2); 
+	input := `
+			let newAdder = fn(x) {
+				fn(y) { x + y };
+			};
+			let addTwo = newAdder(2);
 			addTwo(2);
 			`
 	testIntegerObject(t, testEval(input), 4)
@@ -271,6 +271,70 @@ func TestBuiltInFunctions(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSecurityStatusBuiltins(t *testing.T) {
+	for _, input := range []string{"debug_status()", "sandbox_status()"} {
+		evaluated := testEval(input)
+		hash, ok := evaluated.(*object.Hash)
+		if !ok {
+			t.Fatalf("%s did not return Hash. got=%T", input, evaluated)
+		}
+
+		for _, key := range []string{"detected", "type", "confidence", "indicators", "probe_signals", "probe_enabled", "probe_error", "source", "advisory", "event_count", "error", "schema_version"} {
+			keyObj := &object.String{Value: key}
+			if _, ok := hash.Pairs[keyObj.HashKey()]; !ok {
+				t.Fatalf("%s missing key %q", input, key)
+			}
+		}
+	}
+}
+
+func TestCommandExecutionBuiltins(t *testing.T) {
+	t.Setenv("MUTANT_BUILTIN_CAPABILITIES", "command_exec")
+
+	evaluated := testEval(`exec_string("Write-Output 'mutant'")`)
+	hash, ok := evaluated.(*object.Hash)
+	if !ok {
+		t.Fatalf("exec_string did not return Hash. got=%T", evaluated)
+	}
+
+	for _, key := range []string{"ok", "allowed", "policy_decision", "exit_code", "stdout", "stderr", "timed_out", "error", "schema_version"} {
+		keyObj := &object.String{Value: key}
+		if _, ok := hash.Pairs[keyObj.HashKey()]; !ok {
+			t.Fatalf("exec_string missing key %q", key)
+		}
+	}
+
+	decisionObj, ok := hashValue(hash, "policy_decision").(*object.String)
+	if !ok {
+		t.Fatalf("policy_decision is not String")
+	}
+	if decisionObj.Value != "blocked_disabled" {
+		t.Fatalf("unexpected policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
+	}
+
+	builderResult := testEval(`cmd_run(cmd_add(cmd_builder("powershell"), "Write-Output 'a'"))`)
+	builderHash, ok := builderResult.(*object.Hash)
+	if !ok {
+		t.Fatalf("cmd_run did not return Hash. got=%T", builderResult)
+	}
+	decisionObj, ok = hashValue(builderHash, "policy_decision").(*object.String)
+	if !ok {
+		t.Fatalf("policy_decision is not String")
+	}
+	if decisionObj.Value != "blocked_disabled" {
+		t.Fatalf("unexpected cmd_run policy decision. got=%q, want=%q", decisionObj.Value, "blocked_disabled")
+	}
+}
+
+func hashValue(hash *object.Hash, key string) object.Object {
+	keyObj := &object.String{Value: key}
+	pair, ok := hash.Pairs[keyObj.HashKey()]
+	if !ok {
+		return nil
+	}
+	return pair.Value
 }
 
 func TestArrayLiterals(t *testing.T) {

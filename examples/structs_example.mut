@@ -1,0 +1,15 @@
+struct Point { x; y; };
+
+let p = Point { x: 10, y: 20 };
+
+putln("initial struct values: ");
+putf("p.x = ", p.x);
+putln("");
+putf("p.y = ", p.y);
+putln("");
+
+p.y = 99;
+putln("");
+
+putln("after field assignment:");
+putf("p.y = ", p.y);

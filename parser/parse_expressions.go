@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"mutant/ast"
 	"mutant/token"
 )
@@ -147,4 +148,70 @@ func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {
 		return nil
 	}
 	return exp
+}
+
+func (p *Parser) parseAssignExpression(left ast.Expression) ast.Expression {
+	switch left.(type) {
+	case *ast.Identifier, *ast.FieldExpression:
+	default:
+		msg := fmt.Sprintf("invalid assignment target: %T", left)
+		p.errors = append(p.errors, msg)
+		return nil
+	}
+
+	exp := &ast.AssignExpression{Token: p.curToken, Left: left}
+	precedence := p.curPrecedence()
+	p.nextToken()
+	exp.Value = p.parseExpression(precedence - 1)
+
+	return exp
+}
+
+func (p *Parser) parseFieldExpression(left ast.Expression) ast.Expression {
+	exp := &ast.FieldExpression{Token: p.curToken, Left: left}
+
+	if !p.expectPeek(token.IDENT) {
+		return nil
+	}
+
+	exp.Field = &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}
+	return exp
+}
+
+func (p *Parser) parseStructLiteralExpression(left ast.Expression) ast.Expression {
+	name, ok := left.(*ast.Identifier)
+	if !ok {
+		return left
+	}
+
+	lit := &ast.StructLiteral{Token: p.curToken, Name: name, Fields: []*ast.StructFieldValue{}}
+
+	for !p.peekTokenIs(token.RBRACE) {
+		p.nextToken()
+		if !p.curTokenIs(token.IDENT) {
+			msg := fmt.Sprintf("expected struct literal field identifier, got %s", p.curToken.Type)
+			p.errors = append(p.errors, msg)
+			return nil
+		}
+
+		field := &ast.StructFieldValue{Name: &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}}
+
+		if !p.expectPeek(token.COLON) {
+			return nil
+		}
+
+		p.nextToken()
+		field.Value = p.parseExpression(LOWEST)
+		lit.Fields = append(lit.Fields, field)
+
+		if !p.peekTokenIs(token.RBRACE) && !p.expectPeek(token.COMMA) {
+			return nil
+		}
+	}
+
+	if !p.expectPeek(token.RBRACE) {
+		return nil
+	}
+
+	return lit
 }

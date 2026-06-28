@@ -31,7 +31,7 @@ func runCompilerTests(t *testing.T, tests []compilerTestCase) {
 			t.Fatalf("testInstructions failed: %s", err)
 		}
 
-		if err := testConstants(t, tt.expectedConstants, bytecode.Constants); err != nil {
+		if err := testConstants(tt.expectedConstants, bytecode.Constants); err != nil {
 			t.Fatalf("testConstants failed: %s", err)
 		}
 	}
@@ -66,7 +66,7 @@ func flattenInstructions(s []code.Instructions) code.Instructions {
 	return out
 }
 
-func testConstants(t *testing.T, expected []interface{}, actual []object.Object) error {
+func testConstants(expected []interface{}, actual []object.Object) error {
 	if len(expected) != len(actual) {
 		return fmt.Errorf("wrong number of constants. got = %d, want = %d", len(actual), len(expected))
 	}
@@ -763,6 +763,39 @@ func TestFunctionCalls(t *testing.T) {
 	runCompilerTests(t, tests)
 }
 
+func TestSecurityOpcodeInjection(t *testing.T) {
+	program := parse("let x = 1; x + 2;")
+
+	compiler := New()
+	compiler.EnableSecurityOpcodeInjection()
+
+	if err := compiler.Compile(program); err != nil {
+		t.Fatalf("compiler error: %s", err)
+	}
+
+	bytecode := compiler.ByteCode()
+
+	hasChkDbg := false
+	hasChkSnd := false
+	for i := 0; i < len(bytecode.Instructions); i++ {
+		op := code.Opcode(bytecode.Instructions[i])
+		if op == code.OpChkDbg {
+			hasChkDbg = true
+		}
+		if op == code.OpChkSnd {
+			hasChkSnd = true
+		}
+	}
+
+	if !hasChkDbg {
+		t.Fatalf("expected OpChkDbg to be present in instructions")
+	}
+
+	if !hasChkSnd {
+		t.Fatalf("expected OpChkSnd to be present in instructions")
+	}
+}
+
 func TestBuiltins(t *testing.T) {
 	tests := []compilerTestCase{
 		{
@@ -793,6 +826,18 @@ func TestBuiltins(t *testing.T) {
 
 			expectedInstructions: []code.Instructions{
 				code.Make(code.OpClosure, 0, 0),
+				code.Make(code.OpPop),
+			},
+		},
+		{
+			input:             "debug_status(); sandbox_status();",
+			expectedConstants: []interface{}{},
+			expectedInstructions: []code.Instructions{
+				code.Make(code.OpGetBuiltin, 9),
+				code.Make(code.OpCall, 0),
+				code.Make(code.OpPop),
+				code.Make(code.OpGetBuiltin, 10),
+				code.Make(code.OpCall, 0),
 				code.Make(code.OpPop),
 			},
 		},
