@@ -1,5 +1,5 @@
 <p align='center'>
-  <img src='./logo.jpeg' />
+  <img src='./logo.png' />
 </p>
 
 # The [mutant](https://mudocs.netlify.app) Programming Language
