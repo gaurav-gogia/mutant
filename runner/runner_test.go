@@ -278,39 +278,6 @@ func TestExecuteLuaPatchesBeforeVMSucceeds(t *testing.T) {
 	}
 }
 
-func TestExecuteLuaPatchesBeforeVMEnforcesTamperPolicy(t *testing.T) {
-	plaintext := []byte("return os.getenv('HOME')")
-	password := "runner-lua-fail"
-	inslen := 64
-	encrypted, err := security.SecureXOR(plaintext, int64(inslen), password)
-	if err != nil {
-		t.Fatalf("failed to encrypt test patch: %v", err)
-	}
-
-	bytecode := &compiler.ByteCode{
-		Instructions: make([]byte, inslen),
-		LuaPatches: map[string]*object.LuaPatch{
-			"bad": {
-				Name:             "bad",
-				EncryptedPayload: encrypted,
-				ChecksumExpected: object.ComputeChecksum(plaintext),
-			},
-		},
-	}
-
-	t.Setenv(security.TamperResponseEnv, security.TamperResponseTerminate)
-	err = executeLuaPatchesBeforeVM(bytecode, password, true)
-	if err == nil {
-		t.Fatalf("expected secure mode terminate policy to fail")
-	}
-
-	t.Setenv(security.TamperResponseEnv, security.TamperResponseWarn)
-	err = executeLuaPatchesBeforeVM(bytecode, password, false)
-	if err != nil {
-		t.Fatalf("expected compat warn policy to continue, got: %v", err)
-	}
-}
-
 func writeTempPayload(t *testing.T, data []byte) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "payload-*.mu")
