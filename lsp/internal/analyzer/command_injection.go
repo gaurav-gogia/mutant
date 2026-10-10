@@ -147,7 +147,7 @@ func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 				return
 			}
 
-			spliced, how, found := splicedValue(resolveOneHop(argument, bindings))
+			spliced, how, found := splicedValue(resolveOneHop(argument, bindings), bindings)
 			if !found {
 				return
 			}
@@ -223,7 +223,7 @@ func argvInjectionDiagnostic(
 			continue
 		}
 
-		spliced, how, found := splicedValue(resolved)
+		spliced, how, found := splicedValue(resolved, bindings)
 		if !found || isSanitized(spliced, bindings, shadowed) {
 			continue
 		}
@@ -251,7 +251,19 @@ func argvInjectionDiagnostic(
 // A template whose every hole is a string literal, or a concatenation of
 // literals, is a constant that happens to be written in pieces: there is
 // nothing in it the author did not put there, so there is nothing to report.
-func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, found bool) {
+//
+// Each piece is resolved one hop through the scope's bindings before being
+// asked whether it is fixed, which is the same depth the caller already used on
+// the argument as a whole. `let flags = "-la"; exec_string("ls " + flags);` is
+// the constant this paragraph describes -- singleBindings knows `flags` is a
+// literal, and a name bound twice is absent from that map, so a value that
+// could be two things is still reported. Reading only the written piece made
+// the rule warn on a fixed command and push the author to inline the literal or
+// switch the rule off.
+func splicedValue(
+	expr mast.Expression,
+	bindings map[string]mast.Expression,
+) (spliced mast.Expression, how string, found bool) {
 	switch node := expr.(type) {
 	case *mast.TemplateLiteral:
 		if node == nil {
@@ -261,7 +273,7 @@ func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, fo
 			if part == nil {
 				continue
 			}
-			if _, fixed := literalString(part); fixed {
+			if _, fixed := literalString(resolveOneHop(part, bindings)); fixed {
 				continue
 			}
 			return part, "interpolated into", true
@@ -275,12 +287,12 @@ func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, fo
 			if side == nil {
 				continue
 			}
-			if _, fixed := literalString(side); fixed {
+			if _, fixed := literalString(resolveOneHop(side, bindings)); fixed {
 				continue
 			}
 			// A nested `+` is the rest of the same chain; anything else is
 			// the spliced value itself.
-			if inner, innerHow, ok := splicedValue(side); ok {
+			if inner, innerHow, ok := splicedValue(side, bindings); ok {
 				return inner, innerHow, true
 			}
 			if nested, isInfix := side.(*mast.InfixExpression); isInfix && nested != nil && nested.Operator == "+" {

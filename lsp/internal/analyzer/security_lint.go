@@ -262,3 +262,28 @@ func forEachBuiltinCall(
 		}
 	})
 }
+
+// forEachTopStatement visits the statements a scope is written from, and not the
+// statements nested inside them.
+//
+// It is what a rule wants when it walks each statement's expressions with
+// walkExpressions, because that walk already descends through blocks, `if` arms
+// and loop bodies on its own. Pairing it with forEachStatementInScope -- which
+// visits a nested statement as well as the one it sits in -- visits a call once
+// per enclosing statement instead of once. Measured: a call three blocks deep
+// was reported seven times, once for each `if` statement and each of its
+// blocks and once for the statement itself. evidenceMutation and pathTraversal
+// both did it, and each reported the same seven.
+// forEachBuiltinCall has always ranged over the scope's own statements for this
+// reason; this is that loop, named, so the next rule has something to reach for.
+//
+// A scope's nested function literals are a scope of their own and are reached by
+// forEachScope, never from here.
+func forEachTopStatement(scope []mast.Statement, visit func(mast.Statement)) {
+	for _, stmt := range scope {
+		if isNilStatement(stmt) {
+			continue
+		}
+		visit(stmt)
+	}
+}

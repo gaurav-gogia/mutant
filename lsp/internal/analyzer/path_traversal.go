@@ -151,7 +151,7 @@ func lintPathTraversal(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnost
 			return
 		}
 
-		forEachStatementInScope(scope, func(stmt mast.Statement) {
+		forEachTopStatement(scope, func(stmt mast.Statement) {
 			walkExpressions(stmt, false, func(expr mast.Expression) {
 				call, ok := expr.(*mast.CallExpression)
 				if !ok || call == nil {
@@ -313,12 +313,24 @@ func taintedNameIn(
 			if !untrusted {
 				return
 			}
-			if _, checked := guarded[node.Value]; checked {
-				return
-			}
 			// A name derived from a checked one is checked: the program looked
-			// at the value before it became this.
-			if _, checked := guarded[origin.source]; checked {
+			// at the value before it became this. The whole derivation is
+			// walked, not the one hop this used to look at, because the doc
+			// above promises "any name it was derived from" and a path is
+			// commonly built in two steps:
+			//
+			//	let name = gets();
+			//	if (text_contains(name, "..")) { return; }
+			//	let file = "cases/" + name;
+			//	let full = file + ".log";
+			//	fs_read(full);
+			//
+			// `full` derives from `file` derives from the guarded `name`, so
+			// one hop reached `file`, found no guard on it, and reported a
+			// read the program had checked -- with a message saying nothing in
+			// the file looks at the value, which the file disproves four lines
+			// up.
+			if guardedAnywhereInChain(node.Value, origins, guarded) {
 				return
 			}
 			found, provenance = node.Value, origin.from
@@ -339,6 +351,45 @@ func taintedNameIn(
 	walk(expr)
 
 	return found, provenance
+}
+
+// guardedAnywhereInChain reports whether this name, or any name its value was
+// derived from, was handed to a text-inspecting builtin.
+//
+// untrustedOrigin.source is the step before: another name for a value built out
+// of one, and the source builtin's own name -- `gets` -- at the end of the
+// chain, which is not a name the program binds and so appears in neither map.
+// Following it to that end is what makes the rule's documented promise true,
+// and it is what over-suppresses on purpose: a guard on any ancestor silences
+// the report, because the rule cannot read which characters were looked for and
+// takes the author's word.
+//
+// maxFollowedNames bounds the walk, and a name already seen ends it. Neither
+// should be reachable -- a derivation chain is as long as the `let`s that built
+// it, and untrustedNames fills origins from a fixed point over bindings each of
+// which is bound exactly once -- but a linter that loops is a language server
+// that stops answering, and stopping early only ever stays quiet.
+func guardedAnywhereInChain(
+	name string,
+	origins map[string]untrustedOrigin,
+	guarded map[string]struct{},
+) bool {
+	seen := make(map[string]struct{}, 4)
+	for step := 0; name != "" && step <= maxFollowedNames; step++ {
+		if _, checked := guarded[name]; checked {
+			return true
+		}
+		if _, repeat := seen[name]; repeat {
+			return false
+		}
+		seen[name] = struct{}{}
+		origin, known := origins[name]
+		if !known {
+			return false
+		}
+		name = origin.source
+	}
+	return false
 }
 
 // namesGivenToAGuard collects every name the document hands to a builtin that

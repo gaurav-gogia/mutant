@@ -331,7 +331,17 @@ func Diagnostics(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnostic {
 
 	diagnostics := make([]lsp.Diagnostic, 0, len(snapshot.ParseErrors)+4)
 	diagnostics = append(diagnostics, ParseDiagnostics(snapshot)...)
-	diagnostics = append(diagnostics, syntaxBalanceDiagnostics(snapshot.Source)...)
+	// Only where the parser itself failed. This scan exists to put a precise
+	// range on an unclosed delimiter, which "unexpected end of input" cannot,
+	// and it reads bytes rather than tokens in order to do it. A program the
+	// parser accepted has balanced delimiters by construction, so anything the
+	// scan reports there is the scan misreading the source rather than a defect
+	// in the program -- and it published those as mutant-parser ERRORS, which
+	// `mutant lint` exits 1 on. One byte-level misreading is fixed below; this
+	// is what stops the next one being published at all.
+	if len(snapshot.ParseErrors) > 0 {
+		diagnostics = append(diagnostics, syntaxBalanceDiagnostics(snapshot.Source)...)
+	}
 
 	// A reach into another module the compiler will refuse. These are not
 	// lints and take no LintConfig: the underscore export rule and "that
@@ -827,6 +837,11 @@ func syntaxBalanceDiagnostics(sourceText string) []lsp.Diagnostic {
 	inString := false
 	escaped := false
 	inLineComment := false
+	// rawString and tripleString are the two string spellings this scan used to
+	// read as though they were the ordinary one. See the entry points below.
+	rawString := false
+	tripleString := false
+	rawNext := false
 
 	for i := 0; i < len(normalized); i++ {
 		ch := normalized[i]
@@ -845,25 +860,69 @@ func syntaxBalanceDiagnostics(sourceText string) []lsp.Diagnostic {
 		}
 
 		if inString {
-			if escaped {
+			// A raw string has no escapes at all -- that is its entire rule,
+			// and the lexer's readRawBody stops at the first quote however many
+			// backslashes precede it. Reading `\"` as an escaped quote inside
+			// one is what made this scan walk past the end of
+			// `r"C:\evidence\"`, stay in string mode, and then pair the quotes
+			// of every later string the wrong way round, so the delimiters
+			// inside them became real. A Windows path written as a raw string
+			// is ordinary in a DFIR script, and the program it reported an
+			// unclosed `(` in parses and runs.
+			if !rawString && escaped {
 				escaped = false
 				col++
 				continue
 			}
-			if ch == '\\' {
+			if !rawString && ch == '\\' {
 				escaped = true
 				col++
 				continue
 			}
 			if ch == '"' {
-				inString = false
+				if !tripleString {
+					inString = false
+					rawString = false
+				} else if i+2 < len(normalized) &&
+					normalized[i+1] == '"' && normalized[i+2] == '"' {
+					// A lone quote inside a """...""" literal is text. Only
+					// three of them end it.
+					inString = false
+					rawString = false
+					tripleString = false
+					col += 3
+					i += 2
+					continue
+				}
 			}
+			col++
+			continue
+		}
+
+		// `r` immediately followed by a quote opens a raw string -- the one
+		// place in this language where an identifier character does not start
+		// an identifier. The preceding byte is tested because this scan reads
+		// bytes and not tokens: in `error"x"` the lexer reads a name and then a
+		// plain string, and the `r` at the end of the name opens nothing.
+		if ch == 'r' && i+1 < len(normalized) && normalized[i+1] == '"' &&
+			!identifierByteBefore(normalized, i) {
+			rawNext = true
 			col++
 			continue
 		}
 
 		if ch == '"' {
 			inString = true
+			rawString = rawNext
+			rawNext = false
+			// `"""` runs to the next `"""`. `""` is the empty string and not an
+			// opener, which is why all three bytes are tested.
+			if i+2 < len(normalized) && normalized[i+1] == '"' && normalized[i+2] == '"' {
+				tripleString = true
+				col += 3
+				i += 2
+				continue
+			}
 			col++
 			continue
 		}
@@ -923,6 +982,21 @@ func syntaxBalanceDiagnostics(sourceText string) []lsp.Diagnostic {
 	}
 
 	return diagnostics
+}
+
+// identifierByteBefore reports whether the byte before this position could be
+// part of an identifier. It is how the delimiter scan tells the `r` of a raw
+// string from the `r` ending a name, which it has to do itself because it reads
+// bytes rather than the lexer's tokens.
+func identifierByteBefore(text string, i int) bool {
+	if i <= 0 || i > len(text) {
+		return false
+	}
+	ch := text[i-1]
+	return ch == '_' ||
+		(ch >= '0' && ch <= '9') ||
+		(ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z')
 }
 
 func delimitersMatch(open, close string) bool {

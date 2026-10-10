@@ -84,13 +84,28 @@ var evidenceMutators = map[string]evidenceMutator{
 // pathKey canonicalises a path expression to something two call sites can be
 // compared on. Anything else -- a call, an index, a concatenation, an
 // interpolation -- has no key, and a mutation with no key is never reported.
-func pathKey(expr mast.Expression) (string, bool) {
+//
+// A name is keyed by the DECLARATION it refers to and not by its spelling. The
+// file header above claims certainty -- "Certainty comes from comparing what the
+// author wrote" -- and a spelling is not that:
+//
+//	for (path in images)  { raw_open(path); }
+//	for (path in outputs) { fs_write(path, "report"); }
+//
+// is two variables, written by an author who meant two, and keying on the word
+// `path` made the second loop a write to the evidence the first loop opened.
+// Iterate the images, then write the reports is the shape every triage script
+// has. A rebinding `let` does the same thing with one name.
+//
+// A name the graph cannot resolve has no key, which is the quiet direction this
+// rule errs in everywhere else.
+func pathKey(snapshot *Snapshot, expr mast.Expression) (string, bool) {
 	switch node := expr.(type) {
 	case *mast.Identifier:
 		if node == nil || node.Value == "" || node.Value == "_" {
 			return "", false
 		}
-		return "name:" + node.Value, true
+		return declarationKeyOf(snapshot, node)
 	case *mast.StringLiteral:
 		if node == nil || node.Value == "" {
 			return "", false
@@ -98,6 +113,29 @@ func pathKey(expr mast.Expression) (string, bool) {
 		return "path:" + node.Value, true
 	}
 	return "", false
+}
+
+// declarationKeyOf keys an identifier on the declaration it binds to.
+//
+// DeclID already distinguishes two declarations of one name in one scope by its
+// Seq, which is the whole of what this rule was missing, so the key is that id
+// written out. The graph is built once per document and the undefined-name rule
+// in this same diagnostics pass already asks for it, so this costs nothing it
+// was not already paying.
+func declarationKeyOf(snapshot *Snapshot, ident *mast.Identifier) (string, bool) {
+	if snapshot == nil || snapshot.Program == nil {
+		return "", false
+	}
+	rng, ok := snapshot.Program.RangeOf(ident)
+	if !ok {
+		return "", false
+	}
+	declared, resolved := snapshot.Graph().Resolve(rng.Start.Line, rng.Start.Column)
+	if !resolved || declared == nil || declared.ID.IsZero() {
+		return "", false
+	}
+	id := declared.ID
+	return fmt.Sprintf("decl:%s|%s|%s|%d", id.Module, id.Scope, id.Name, id.Seq), true
 }
 
 // openedEvidence is one opener call and the path it was given.
@@ -135,7 +173,7 @@ func lintEvidenceMutation(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 			if _, literal := literalString(argument); !literal {
 				return
 			}
-			key, ok := pathKey(argument)
+			key, ok := pathKey(snapshot, argument)
 			if !ok {
 				return
 			}
@@ -157,7 +195,7 @@ func lintEvidenceMutation(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 			return taken
 		}
 
-		forEachStatementInScope(scope, func(stmt mast.Statement) {
+		forEachTopStatement(scope, func(stmt mast.Statement) {
 			walkExpressions(stmt, false, func(expr mast.Expression) {
 				call, ok := expr.(*mast.CallExpression)
 				if !ok || call == nil {
@@ -175,7 +213,7 @@ func lintEvidenceMutation(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 				if argument == nil {
 					return
 				}
-				if key, ok := pathKey(argument); ok {
+				if key, ok := pathKey(snapshot, argument); ok {
 					inScope[key] = openedEvidence{opener: name, subject: subject}
 				}
 			})
@@ -185,7 +223,7 @@ func lintEvidenceMutation(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 			return
 		}
 
-		forEachStatementInScope(scope, func(stmt mast.Statement) {
+		forEachTopStatement(scope, func(stmt mast.Statement) {
 			walkExpressions(stmt, false, func(expr mast.Expression) {
 				call, ok := expr.(*mast.CallExpression)
 				if !ok || call == nil {
@@ -205,7 +243,7 @@ func lintEvidenceMutation(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 					if argument == nil {
 						continue
 					}
-					key, ok := pathKey(argument)
+					key, ok := pathKey(snapshot, argument)
 					if !ok {
 						continue
 					}

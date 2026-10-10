@@ -188,3 +188,32 @@ let t, e = spawn(fn() { total = 1; });`
 		}
 	}
 }
+
+// The header above promises that only a name declared at the top level counts,
+// because "a captured local is copied by every closure, spawned or not, so a
+// write to one is not specific to this". The shadow set held only what the
+// callback itself binds, so a local of the ENCLOSING function sharing a name
+// with a global was called a global. Running it settles which variable the
+// message was about: the enclosing local stays 5 and the global stays 0, so the
+// advice was right and the sentence named the wrong one.
+func TestAnEnclosingLocalIsNotCalledAGlobal(t *testing.T) {
+	src := `let count = 0;
+let run = fn() {
+  let count = 5;
+  let t, e = spawn(fn() { count = 1; });
+  return count;
+};`
+
+	if messages := spawnWriteMessages(t, src); len(messages) != 0 {
+		t.Fatalf("a captured local is not a global, want silence, got %v", messages)
+	}
+
+	// The control: the same write, with no enclosing binding in the way, is
+	// the defect the rule is for and still reports.
+	global := `let count = 0;
+let t, e = spawn(fn() { count = 1; });`
+
+	if messages := spawnWriteMessages(t, global); len(messages) != 1 {
+		t.Fatalf("a real global write, want one report, got %d: %v", len(messages), messages)
+	}
+}

@@ -194,6 +194,20 @@ func namesHeldAsPairs(statements []mast.Statement) map[string]struct{} {
 			if node == nil {
 				return
 			}
+			// `fn(p) { let r = fs_read(p); r; }` returns the pair exactly as
+			// `return r;` does -- the last expression of a body is its value --
+			// so the name is held for the same reason. Without this the rule
+			// warned on the implicit form while staying quiet on the explicit
+			// one, which is a warning on correct code, and its advice
+			// (`let r, err = ...`) would have broken the forwarding the caller
+			// destructures.
+			if node.Body != nil && len(node.Body.Statements) > 0 {
+				if last, ok := node.Body.Statements[len(node.Body.Statements)-1].(*mast.ExpressionStatement); ok && last != nil {
+					// hold takes a name and ignores anything else, so a body
+					// ending in a call or an index falls through untouched.
+					hold(last.Expression)
+				}
+			}
 			walkStatement(node.Body)
 		case *mast.MacroLiteral:
 			if node == nil {

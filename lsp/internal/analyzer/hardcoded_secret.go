@@ -53,6 +53,21 @@ import (
 var secretNamePattern = regexp.MustCompile(
 	`(?i)(^|[^a-z])(pass(word|wd|phrase)?|secret|token|api[_-]?key|apikey|access[_-]?key|auth|credential|priv(ate)?[_-]?key|client[_-]?secret|bearer)([^a-z]|$)`)
 
+// locationValue is a value that says WHERE something is rather than being the
+// something: a URL with a scheme, an absolute POSIX path, a UNC share, a
+// Windows path with a drive letter, or a `./` or `../` relative path.
+//
+// It is read only after providerSecrets has had its say, so a value whose shape
+// is its own evidence -- an AWS key, a GitHub token, a JWT -- is reported
+// whatever it would look like to this.
+var locationValue = regexp.MustCompile(
+	`^(?:[A-Za-z][A-Za-z0-9+.-]*://|/|\\\\|[A-Za-z]:[\\/]|\.\.?[\\/])`)
+
+// urlWithCredentials matches the one URL shape that is itself a credential: a
+// userinfo component with a password in it, as in https://svc:hunter2@host/p.
+var urlWithCredentials = regexp.MustCompile(
+	`^[A-Za-z][A-Za-z0-9+.-]*://[^/?#@]*:[^/?#@]*@`)
+
 // providerSecret is a literal shape belonging to one issuer, recognisable
 // without any help from the name beside it.
 type providerSecret struct {
@@ -370,8 +385,28 @@ func secretVerdict(name, value string) (issuer string, named string, report bool
 	// leaves a literal assigned to a name like `api_key_file` unflagged -- a
 	// blind spot worth accepting against a rule that was otherwise wrong every
 	// time it spoke.
+	//
+	// _log, _url and _endpoint are here for the same reason and were added
+	// after the same mistake was found three more times: `auth_log` matches
+	// `auth`, `passwd_dump` matches `passwd`, and a name holding a service
+	// address matches `token` as readily as one holding the token.
 	if strings.HasSuffix(name, "_file") || strings.HasSuffix(name, "_path") ||
-		strings.HasSuffix(name, "_dir") {
+		strings.HasSuffix(name, "_dir") || strings.HasSuffix(name, "_log") ||
+		strings.HasSuffix(name, "_url") || strings.HasSuffix(name, "_endpoint") {
+		return "", "", false
+	}
+	// And then the value, because the suffixes only catch the names someone
+	// thought to write that way. `/var/log/auth.log` and
+	// `https://logs.example/ingest` are locations under any name, and
+	// looksIssued passes both: it asks whether a value reads like something
+	// generated, and every path has a separator and every URL a colon, so the
+	// three questions together were certain to fire on the most ordinary lines
+	// in a Linux triage script.
+	//
+	// A URL carrying userinfo is the exception and keeps reporting, because
+	// `https://svc:hunter2@host/path` is a location with a credential written
+	// into it, which is exactly what this rule is for.
+	if locationValue.MatchString(value) && !urlWithCredentials.MatchString(value) {
 		return "", "", false
 	}
 	if !looksIssued(value) {

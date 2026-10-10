@@ -147,6 +147,29 @@ func (c *spawnWriteCollector) reportWrites(literal *mast.FunctionLiteral, builti
 			return
 		}
 
+		// c.globals is spellings, and a local of the ENCLOSING function that
+		// happens to share a name with a top-level one is not a global:
+		//
+		//	let count = 0;
+		//	let run = fn() { let count = 5; spawn(fn() { count = 1; }); };
+		//
+		// leaves the global at 0 and the enclosing local at 5, both measured.
+		// The advice below is still right -- the write is lost -- but the
+		// sentence names the wrong variable, and the rule's own header promises
+		// that only a top-level name counts. shadowed holds what the callback
+		// binds for itself and so cannot see the enclosing `let` at all; the
+		// graph can, because a top-level declaration is one whose scope is the
+		// root.
+		//
+		// A target the graph cannot resolve keeps the old answer rather than
+		// going quiet: the globals check is still a real signal, and the cost
+		// of being wrong here is a wording, not a missed defect.
+		graph := c.snapshot.Graph()
+		if declared, resolved := graph.Resolve(rng.Start.Line, rng.Start.Column); resolved &&
+			declared != nil && declared.Scope != graph.Root {
+			return
+		}
+
 		c.result = append(c.result, lsp.Diagnostic{
 			Range:    c.snapshot.Range(rng),
 			Severity: c.severity,

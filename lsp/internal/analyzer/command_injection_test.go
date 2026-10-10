@@ -220,3 +220,49 @@ func TestCommandInjectionCanBeTurnedOff(t *testing.T) {
 		}
 	}
 }
+
+// splicedValue's own doc says a concatenation of literals "is a constant that
+// happens to be written in pieces: there is nothing in it the author did not
+// put there, so there is nothing to report". One hop was resolved on the whole
+// argument and on none of its pieces, so a name bound once to a literal was
+// read as a spliced value and the rule contradicted its own paragraph. A
+// warning on a fixed command pushes the author to inline the literal or to
+// switch the rule off.
+func TestAConstantNameSplicedIntoACommandIsSilent(t *testing.T) {
+	quiet := []string{
+		`let flags = "-la";
+let out, err = exec_string("ls " + flags);`,
+		`let flags = "-la";
+let out, err = exec_string("ls ${flags}");`,
+		`let root = "/srv";
+let flags = "-la";
+let out, err = exec_string("ls " + flags + " " + root);`,
+	}
+
+	for _, src := range quiet {
+		if messages := injectionMessages(t, src); len(messages) != 0 {
+			t.Fatalf("a constant command, want silence:\n%s\ngot %v", src, messages)
+		}
+	}
+}
+
+// A narrowing, not an amputation: a piece whose value is not fixed text still
+// reports, whether it is written in the splice or bound to a name beside it. A
+// name bound twice is absent from singleBindings, so a value that could be two
+// things is not treated as one of them.
+func TestANonConstantPieceStillReports(t *testing.T) {
+	loud := []string{
+		`let dir = gets();
+let out, err = exec_string("ls " + dir);`,
+		`let out, err = exec_string("ls " + gets());`,
+		`let flags = "-la";
+let flags = gets();
+let out, err = exec_string("ls " + flags);`,
+	}
+
+	for _, src := range loud {
+		if messages := injectionMessages(t, src); len(messages) == 0 {
+			t.Fatalf("want a report:\n%s", src)
+		}
+	}
+}

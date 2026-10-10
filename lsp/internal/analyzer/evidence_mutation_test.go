@@ -211,3 +211,56 @@ let w, werr = fs_write("case01.dd", "notes");`
 		}
 	}
 }
+
+// One call is one report however deep it sits. The rule paired
+// forEachStatementInScope, which visits a nested statement as well as the one
+// it sits in, with walkExpressions, which descends into the nested statement
+// again -- so a call three blocks down was reported once per ancestor. The
+// Problems panel repeated the same long warning, and the count a --strict user
+// sees was inflated by nesting alone.
+func TestEvidenceMutationReportsANestedCallOnce(t *testing.T) {
+	src := `let img, err = raw_open("case01.dd");
+if (true) {
+  if (true) {
+    if (true) {
+      let w, werr = fs_write("case01.dd", "notes");
+    }
+  }
+}`
+
+	if messages := evidenceMessages(t, src); len(messages) != 1 {
+		t.Fatalf("want one report, got %d: %v", len(messages), messages)
+	}
+}
+
+// Two loops over one name are two variables, and the rule keyed them by the
+// word. Iterate the images, then write the reports is the shape every triage
+// script has, so the one rule meant to protect exhibits fired on it -- which
+// teaches an examiner to ignore the rule, and with it the reports that are
+// real.
+func TestEvidenceMutationDoesNotFollowASpellingAcrossTwoBindings(t *testing.T) {
+	reused := `let images = ["a.dd", "b.dd"];
+let outputs = ["a.txt", "b.txt"];
+for (path in images) {
+  let img, err = raw_open(path);
+}
+for (path in outputs) {
+  let w, werr = fs_write(path, "report");
+}`
+
+	if messages := evidenceMessages(t, reused); len(messages) != 0 {
+		t.Fatalf("two bindings of one name, want silence, got %v", messages)
+	}
+
+	// The control, so the fix is a narrowing and not an amputation: one
+	// binding, opened and then written, still reports.
+	same := `let images = ["a.dd", "b.dd"];
+for (path in images) {
+  let img, err = raw_open(path);
+  let w, werr = fs_write(path, "report");
+}`
+
+	if messages := evidenceMessages(t, same); len(messages) != 1 {
+		t.Fatalf("one binding opened and written, want one report, got %d: %v", len(messages), messages)
+	}
+}
