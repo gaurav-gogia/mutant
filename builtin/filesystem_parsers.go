@@ -32,6 +32,58 @@ type ntfsListEntry struct {
 	Deleted       bool
 	Size          uint64
 	AllocatedSize uint64
+	SizeSource    string
+}
+
+// Where a listed size came from, which on NTFS is not one answer. The
+// directory index keeps its own copy of each entry's length and NTFS updates
+// it lazily, so the copy is routinely stale and routinely zero; the $DATA
+// attribute is where the length actually lives. A caller that cannot tell the
+// two apart cannot tell a 0-byte file from one whose index entry was never
+// caught up.
+const (
+	// ntfsSizeFromData: read from the unnamed $DATA attribute. Authoritative.
+	ntfsSizeFromData = "data_attribute"
+	// ntfsSizeNoData: the path addresses no $DATA at all, so its length is
+	// zero and that is the whole truth. A directory, or a file holding its
+	// content only in named streams.
+	ntfsSizeNoData = "no_data_attribute"
+	// ntfsSizeFromIndex: the $FILE_NAME copy, used only when the $DATA could
+	// not be reached. It may be stale. A deleted entry is the ordinary case,
+	// because it no longer opens by path.
+	ntfsSizeFromIndex = "index_record"
+)
+
+// ntfsResolveEntrySize reads one listed entry's length from its $DATA
+// attribute instead of from the $FILE_NAME copy ReadDir hands back.
+//
+// The copy is stale often enough to matter: on a stock 1 GiB volume four live
+// files hold 4,259,940 bytes between them while the index records 0 for every
+// one, and $MFT records 16,384 against an actual 2,097,152. M26-FS2-002 fixed
+// the same trap on the recovery path, where it truncated recovered files; this
+// is the live listing, which published it as the size.
+//
+// The length comes from the unnamed stream rather than from File.Size(),
+// because Size() follows whichever $DATA attribute libntfs selected and on a
+// path with no unnamed stream that is an alternate one -- it reports 264472 for
+// $Secure, the length of its $SDS stream. See ntfsNamedOnlyStreams.
+//
+// The index values are passed in so that a path which cannot be opened keeps
+// the only length that exists for it, labelled as that rather than as a
+// resolved one.
+func ntfsResolveEntrySize(volume *libntfs.Volume, entryPath string, indexSize, indexAllocated uint64) (size, allocated uint64, source string) {
+	f, err := volume.OpenPath(normalizeFSPath(entryPath))
+	if err != nil || f == nil {
+		return indexSize, indexAllocated, ntfsSizeFromIndex
+	}
+
+	for _, info := range f.Streams() {
+		if !info.IsAlternate() {
+			return info.Size, info.AllocatedSize, ntfsSizeFromData
+		}
+	}
+
+	return 0, 0, ntfsSizeNoData
 }
 
 type ntfsMetadata struct {
@@ -634,6 +686,7 @@ func NtfsListFiles(args ...object.Object) object.Object {
 			"deleted":        boolObj(entry.Deleted),
 			"size":           intObj(int64(entry.Size)),
 			"allocated_size": intObj(int64(entry.AllocatedSize)),
+			"size_source":    stringObj(entry.SizeSource),
 		}))
 	}
 
@@ -1967,16 +2020,27 @@ func (s *realNTFSSession) ListFiles(dirPath string) ([]ntfsListEntry, error) {
 
 	out := make([]ntfsListEntry, 0, len(entries))
 	for _, entry := range entries {
-		out = append(out, ntfsListEntry{
-			Name:          entry.Name,
-			Path:          joinFSPath(cleanPath, entry.Name),
-			EntryNum:      entry.EntryNum,
-			SequenceNum:   entry.SequenceNum,
-			IsDirectory:   entry.IsDirectory,
-			Deleted:       entry.Deleted,
-			Size:          entry.Size,
-			AllocatedSize: entry.AllocatedSize,
-		})
+		row := ntfsListEntry{
+			Name:        entry.Name,
+			Path:        joinFSPath(cleanPath, entry.Name),
+			EntryNum:    entry.EntryNum,
+			SequenceNum: entry.SequenceNum,
+			IsDirectory: entry.IsDirectory,
+			Deleted:     entry.Deleted,
+		}
+
+		// A directory has no $DATA attribute, so there is nothing to resolve
+		// and nothing to open for. The index records 0 for both lengths on
+		// every directory of a stock volume, which is what this reports.
+		if entry.IsDirectory {
+			row.SizeSource = ntfsSizeNoData
+			out = append(out, row)
+			continue
+		}
+
+		row.Size, row.AllocatedSize, row.SizeSource = ntfsResolveEntrySize(
+			s.volume, row.Path, entry.Size, entry.AllocatedSize)
+		out = append(out, row)
 	}
 
 	return out, nil
@@ -2212,6 +2276,73 @@ func (s *realXFSSession) ListFiles(dirPath string) ([]xfsListEntry, error) {
 	return out, nil
 }
 
+// ntfsNamedOnlyStreams names the $DATA streams of a path that addresses no
+// content of its own: one that has $DATA attributes where every one of them is
+// named.
+//
+// libntfs chooses the attribute a whole-file read serves in
+// FindPrimaryDataAttribute, which prefers the unnamed $DATA but falls back to
+// the first named one when the entry has none -- its body ends
+// `return dataAttrs[0]`. Nothing downstream can see that it fell back: Size,
+// HasData and the resident/sparse/compressed flags then all describe an
+// alternate stream, so a whole-file read returns that stream's bytes and a
+// digest taken over them is that stream's digest published under the file's
+// name, with every field that exists to report an incomplete read saying the
+// read was whole. $Secure is in this state on a stock Windows volume; the case
+// that matters is a file whose content was moved into an alternate stream so
+// that a whole-file read would not show it.
+//
+// Two states are deliberately not this, and both return nil:
+//
+//   - an entry with no $DATA attribute at all. It addresses nothing and reads
+//     as empty, which is the true answer for it rather than a refusal.
+//     /$Extend/$ObjId, /$Extend/$Quota and /$Extend/$Reparse are the three on
+//     a stock volume, and they read as zero bytes.
+//   - a directory. It never has an unnamed $DATA and can still carry named
+//     streams, so testing only for the missing unnamed stream would refuse
+//     every directory for the wrong reason. The readers already refuse one for
+//     being a directory, and Metadata has to keep describing it.
+func ntfsNamedOnlyStreams(f *libntfs.File) []string {
+	if f.IsDirectory() {
+		return nil
+	}
+
+	streams := f.Streams()
+	if len(streams) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(streams))
+	for _, info := range streams {
+		if !info.IsAlternate() {
+			return nil
+		}
+		names = append(names, info.Name)
+	}
+
+	return names
+}
+
+// ntfsNoUnnamedStreamRefusal is shared by the whole-file readers and the
+// metadata reader so the four cannot drift into describing one volume
+// differently. ntfs_streams reports the same state as a warning rather than an
+// error, because listing the streams is how a caller finds out what to ask for.
+func ntfsNoUnnamedStreamRefusal(names []string) error {
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		quoted = append(quoted, fmt.Sprintf("%q", name))
+	}
+
+	subject := "the alternate stream " + quoted[0]
+	if len(quoted) > 1 {
+		subject = "the alternate streams " + strings.Join(quoted, ", ")
+	}
+
+	return fmt.Errorf("the path has no unnamed $DATA attribute, so it names no content of its "+
+		"own: what it holds is in %s, which ntfs_read_stream reads by name and ntfs_streams "+
+		"lists", subject)
+}
+
 func (s *realNTFSSession) ReadFile(filePath string) ([]byte, error) {
 	cleanPath := normalizeFSPath(filePath)
 
@@ -2221,6 +2352,11 @@ func (s *realNTFSSession) ReadFile(filePath string) ([]byte, error) {
 	}
 	if f.IsDirectory() {
 		return nil, errors.New("target path is a directory")
+	}
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		// ReadAll follows the attribute libntfs selected, which here is one of
+		// these rather than any content the path itself names.
+		return nil, ntfsNoUnnamedStreamRefusal(named)
 	}
 
 	return f.ReadAll()
@@ -2332,6 +2468,12 @@ func (s *realNTFSSession) OpenReader(filePath string) (fsFileReader, error) {
 	}
 	if f.IsDirectory() {
 		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	// Before ReadSupport, because support describes the attribute libntfs
+	// selected and that attribute is the thing in question here.
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		return fsFileReader{}, ntfsNoUnnamedStreamRefusal(named)
 	}
 
 	// ReadSupport names what blocks a stream before the first byte is asked
@@ -2475,12 +2617,27 @@ func (s *realNTFSSession) Metadata(filePath string) (ntfsMetadata, error) {
 	}
 
 	support := f.ReadSupport()
+	size := f.Size()
+
+	// Metadata describes a path rather than reading one, so it answers where
+	// the readers refuse -- but it has to answer about the path. Everything
+	// support carries would otherwise describe the alternate stream libntfs
+	// selected: the size, has_data, and the resident/sparse/compressed flags.
+	// The path names no content, so that is what these report, and
+	// blocking_error says why. The entry's own facts stay, including the four
+	// $STANDARD_INFORMATION times read below, which belong to the entry rather
+	// than to any stream.
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		support = libntfs.FileReadSupport{BlockingError: ntfsNoUnnamedStreamRefusal(named)}
+		size = 0
+	}
+
 	md := ntfsMetadata{
 		Path:          cleanPath,
 		Name:          f.Name(),
 		EntryNum:      f.EntryNumber(),
 		IsDirectory:   f.IsDirectory(),
-		Size:          f.Size(),
+		Size:          size,
 		HasData:       support.HasData,
 		Resident:      support.Resident,
 		NonResident:   support.NonResident,
