@@ -108,11 +108,14 @@ var EnvAccessAllowlist = []EnvAccessException{
 
 	// display -- a value Mutant prints and never acts on.
 	{
-		File: "repl/repl.go", Func: "welcome", Lines: 1,
+		File: "repl/repl.go", Func: "lookupCurrentUser", Lines: 1,
 		Category: "display",
 		Why: "The REPL greeting prints the account's display name. Built without cgo on Linux, user.Current " +
 			"answers for a uid missing from /etc/passwd from $USER and $HOME, with no display name, and only " +
-			"the greeting uses it. (Its panic when either is unset is M26-TOOL-031.)",
+			"the greeting uses it. It was in welcome, which panicked when either variable was unset and " +
+			"greeted a host that had no display name as \"Hello !\"; both are M26-TOOL-031, and the lookup " +
+			"now sits behind repl.greetingName, which falls back to the username and then to a greeting " +
+			"with no name in it.",
 	},
 
 	// scratch -- the temporary directory (TMPDIR; TMP, TEMP or USERPROFILE on

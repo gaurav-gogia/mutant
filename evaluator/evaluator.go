@@ -92,7 +92,7 @@ func eval(n ast.Node, env *object.Environment) object.Object {
 	case *ast.TemplateLiteral:
 		return evalTemplateLiteral(node, env)
 	case *ast.CallExpression:
-		if node.Function.TokenLiteral() == "quote" {
+		if isQuoteCall(node) {
 			// Arity is checked here rather than assumed: a bare `quote()` in
 			// source used to index an empty argument slice and panic.
 			if len(node.Arguments) != 1 {

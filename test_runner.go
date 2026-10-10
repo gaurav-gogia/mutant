@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,15 +59,24 @@ func handleTestCommand(args []string) int {
 		paths = []string{"."}
 	}
 
-	files, err := collectMutantTestFiles(paths)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mutant test: %v\n", err)
-		return 1
+	// Every problem is named and none of them stops the run: a directory that
+	// could not be read and an argument that is not Mutant source are both
+	// worth saying out loud, and neither is a reason to skip the files that
+	// were found. The exit code carries them so a gate cannot read a partial
+	// run as a clean one.
+	files, problems := collectMutantTestFiles(paths)
+	collectionFailed := false
+	for _, problem := range problems {
+		fmt.Fprintf(os.Stderr, "mutant test: %v\n", problem)
+		collectionFailed = true
 	}
 
 	reporter := newTestReporter(*asJSON, *verbose)
 	if len(files) == 0 {
 		reporter.nothingFound()
+		if collectionFailed {
+			return 1
+		}
 		return 0
 	}
 
@@ -117,7 +125,7 @@ func handleTestCommand(args []string) int {
 		}
 	}
 
-	if totals.filesFailed > 0 {
+	if totals.filesFailed > 0 || collectionFailed {
 		return 1
 	}
 	return 0
@@ -378,10 +386,19 @@ type testEvent struct {
 	Totals *testEventTotals `json:"totals,omitempty"`
 }
 
+// testEventTotals is the counts carried by a `file` and a `summary` event.
+//
+// No field is omitempty, which is what the comment on Totals above has always
+// said and what three of these fields did not do: files, files_failed and
+// files_not_run were omitted at zero, so a passing run emitted no files_failed
+// at all. That is the absent-or-none puzzle the nesting exists to avoid, and
+// files_failed is the field it mattered most for -- a file that fails to
+// compile runs no tests, so tests_failed stays 0 and files_failed is the only
+// count that reports it. (M26-TOOL-029)
 type testEventTotals struct {
-	Files        int `json:"files,omitempty"`
-	FilesFailed  int `json:"files_failed,omitempty"`
-	FilesNotRun  int `json:"files_not_run,omitempty"`
+	Files        int `json:"files"`
+	FilesFailed  int `json:"files_failed"`
+	FilesNotRun  int `json:"files_not_run"`
 	Tests        int `json:"tests"`
 	TestsFailed  int `json:"tests_failed"`
 	TestsSkipped int `json:"tests_skipped"`
@@ -571,40 +588,13 @@ func roundMillis(d time.Duration) string {
 	return d.Round(time.Millisecond).String()
 }
 
-// collectMutantTestFiles expands paths into `*_test.mut` files: explicit file
-// arguments are taken as-is; directories are walked for the `_test.mut` suffix
-// (skipping .git/node_modules/vendor and dot-directories).
-func collectMutantTestFiles(paths []string) ([]string, error) {
-	testSuffix := "_test" + global.MutantSourceCodeFileExtention
-	var files []string
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if !info.IsDir() {
-			files = append(files, p)
-			continue
-		}
-		walkErr := filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				name := d.Name()
-				if name == "node_modules" || name == "vendor" || (strings.HasPrefix(name, ".") && name != "." && name != "..") {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if strings.HasSuffix(path, testSuffix) {
-				files = append(files, path)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return nil, walkErr
-		}
-	}
-	return files, nil
+// collectMutantTestFiles expands paths into `*_test.mut` files: a `.mut` file
+// argument is taken as-is, and a directory is walked for the `_test.mut`
+// suffix.
+//
+// It is collectMutantFiles with the test suffix, and shares that function with
+// `mutant fmt` and `mutant lint` deliberately: the two collectors were separate
+// copies of one walk and carried the same two defects, M26-TOOL-019 in both.
+func collectMutantTestFiles(paths []string) ([]string, []error) {
+	return collectMutantFiles(paths, "_test"+global.MutantSourceCodeFileExtention)
 }

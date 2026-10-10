@@ -83,9 +83,9 @@ func TestCollectMutantSourceFilesWalksDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := collectMutantSourceFiles([]string{dir})
-	if err != nil {
-		t.Fatal(err)
+	files, problems := collectMutantSourceFiles([]string{dir})
+	if len(problems) != 0 {
+		t.Fatalf("collection reported problems on a clean tree: %v", problems)
 	}
 	if len(files) != 1 {
 		t.Fatalf("expected 1 file (node_modules pruned), got %d: %v", len(files), files)

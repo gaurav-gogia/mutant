@@ -16,6 +16,7 @@ package webrepl
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -119,12 +120,8 @@ func (r *REPL) Eval(input string) (string, error) {
 		return "", sealErr
 	}
 	r.constants = byteCode.Constants
-	for name, fields := range byteCode.StructDefs {
-		r.structDefs[name] = fields
-	}
-	for name, variants := range byteCode.EnumDefs {
-		r.enumDefs[name] = variants
-	}
+	maps.Copy(r.structDefs, byteCode.StructDefs)
+	maps.Copy(r.enumDefs, byteCode.EnumDefs)
 
 	// putln/putf print through builtin.Output(); capture that so the browser
 	// gets the text back as a string rather than losing it to the wasm console.

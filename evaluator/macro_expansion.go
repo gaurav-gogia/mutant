@@ -49,6 +49,58 @@ func isMacroDefinition(node ast.Statement) bool {
 	return ok
 }
 
+// UsesMacros reports whether a program holds anything the macro machinery would
+// act on: a macro literal, a call to quote, or a call to unquote.
+//
+// It walks with ast.Modify and a modifier that returns every node unchanged, so
+// the tree is read and not rewritten, and so what this reports and what
+// ExpandMacros would rewrite are decided by one walk and cannot drift apart.
+// ast.Modify does not descend into a macro body -- deliberately, and modify.go
+// says why -- which costs nothing here: the macro literal holding that body is
+// itself visited, so a line defining a macro is reported whatever the body says.
+//
+// It exists for the terminal REPL, which refuses macros unless --enable-macros
+// was passed and decided that by searching the typed line for the substrings
+// "macro", "quote" and "unquote", string literals and longer identifiers
+// included. So `let q = "a quote";` and `let macroCount = 2;` were refused as
+// macro use and never compiled. (M26-TOOL-021)
+func UsesMacros(program ast.Node) bool {
+	if program == nil {
+		return false
+	}
+
+	found := false
+	ast.Modify(program, func(node ast.Node) ast.Node {
+		if isMacroLiteral(node) || isQuoteCall(node) || isUnquoteCall(node) {
+			found = true
+		}
+		return node
+	})
+	return found
+}
+
+func isMacroLiteral(node ast.Node) bool {
+	_, ok := node.(*ast.MacroLiteral)
+	return ok
+}
+
+// isQuoteCall and isUnquoteCall are the two predicates the evaluator decides a
+// quote and an unquote by, and they are functions rather than inline tests so
+// that UsesMacros reads the same spelling the evaluator does.
+//
+// Both guard against a nil callee. ast.Modify's own *CallExpression case guards
+// it, so a call whose function expression is absent is reachable in some tree,
+// and a predicate that dereferenced it would turn a detection pass into a
+// panic.
+func isQuoteCall(node ast.Node) bool {
+	callExpression, ok := node.(*ast.CallExpression)
+	if !ok || callExpression.Function == nil {
+		return false
+	}
+
+	return callExpression.Function.TokenLiteral() == "quote"
+}
+
 func addMacro(stmt ast.Statement, env *object.Environment) {
 	letStatement, _ := stmt.(*ast.LetStatement)
 	macroLiteral, _ := letStatement.Value.(*ast.MacroLiteral)

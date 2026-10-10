@@ -75,9 +75,11 @@ func evalUnquoteCalls(quoted ast.Node, env *object.Environment) (ast.Node, *faul
 	return modified, nil
 }
 
+// isUnquoteCall is the predicate beside isQuoteCall in macro_expansion.go, and
+// guards a nil callee for the reason stated there.
 func isUnquoteCall(node ast.Node) bool {
 	callExpression, ok := node.(*ast.CallExpression)
-	if !ok {
+	if !ok || callExpression.Function == nil {
 		return false
 	}
 
