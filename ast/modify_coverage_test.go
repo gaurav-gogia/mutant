@@ -73,6 +73,42 @@ func TestModifyReachesEveryNodeTypeWithChildren(t *testing.T) {
 			Name:   &Identifier{Value: "Point"},
 			Fields: []*StructFieldValue{{Name: &Identifier{Value: "x"}, Value: marker()}},
 		}},
+
+		// The four node types the hand-written coverage list was missing, one
+		// case per slot a macro can appear in. Each arrived without the list
+		// being updated, and the list could not say so (M26-LEX-012).
+		{"while condition", &WhileStatement{Condition: marker(), Body: &BlockStatement{}}},
+		{"while body", &WhileStatement{
+			Condition: &Identifier{Value: "c"},
+			Body:      &BlockStatement{Statements: []Statement{&ExpressionStatement{Expression: marker()}}},
+		}},
+		{"for-in iterable", &ForInStatement{
+			Key:      &Identifier{Value: "k"},
+			Value:    &Identifier{Value: "v"},
+			Iterable: marker(),
+			Body:     &BlockStatement{},
+		}},
+		{"for-in body", &ForInStatement{
+			Key:      &Identifier{Value: "k"},
+			Value:    &Identifier{Value: "v"},
+			Iterable: &Identifier{Value: "items"},
+			Body:     &BlockStatement{Statements: []Statement{&ExpressionStatement{Expression: marker()}}},
+		}},
+		{"match subject", &MatchExpression{
+			Subject: marker(),
+			Arms:    []*MatchArm{{Patterns: []Expression{&IntegerLiteral{Value: 7}}, Body: &BlockStatement{}}},
+		}},
+		{"match arm body", &MatchExpression{
+			Subject: &Identifier{Value: "x"},
+			Arms: []*MatchArm{{
+				Patterns: []Expression{&IntegerLiteral{Value: 7}},
+				Body:     &BlockStatement{Statements: []Statement{&ExpressionStatement{Expression: marker()}}},
+			}},
+		}},
+		{"template hole", &TemplateLiteral{
+			Texts: []string{"n=", ""},
+			Parts: []Expression{marker()},
+		}},
 	}
 
 	for _, tc := range cases {

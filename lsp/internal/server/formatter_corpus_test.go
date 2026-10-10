@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"mutant/ast"
 	"mutant/lexer"
 	"mutant/lsp/internal/analyzer"
 	"mutant/token"
@@ -147,9 +148,22 @@ func TestFormatterPreservesProgramStructureAcrossExamples(t *testing.T) {
 		}
 
 		compared++
+		if ast.Equal(snapshot.Program, reparsed.Program) {
+			continue
+		}
+		// The verdict is ast.Equal's; the rendering is only how the failure is
+		// shown, because a side-by-side of two canonicalised texts is what a
+		// reader can act on. It used to be the verdict as well, and that was
+		// the defect: Program.String() is lossy, so two different programs can
+		// render to one string and this test watched for a change it could not
+		// see (M26-LEX-011). Where the two now disagree -- Equal says different,
+		// the renderings agree -- firstDifference has nothing to show, and the
+		// message says so rather than printing an empty diff.
 		before := canonicalRendering(snapshot.Program.String())
 		after := canonicalRendering(reparsed.Program.String())
 		if before == after {
+			t.Errorf("%s: formatting changed the program's structure, in a way the rendering "+
+				"cannot show: ast.Equal reports the trees as different and both render as\n%s", path, before)
 			continue
 		}
 		t.Errorf("%s: formatting changed the program's structure\n%s", path, firstDifference(before, after))

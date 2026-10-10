@@ -6,6 +6,23 @@ import (
 	"mutant/token"
 )
 
+// Node is any node in the tree.
+//
+// String() is a debug rendering, and a lossy one. It is for reading a tree in a
+// test failure or a log, and it is not a source of truth about the tree: a
+// block prints its statements with no braces around them, a string literal
+// prints its decoded text with no quotes, and a `${...}` hole prints without
+// its delimiters. So distinct programs render to one string -- `if (c) { a; b; }`
+// and `if (c) { a; } b;` are the same text, and so are the string "1" and the
+// number 1.
+//
+// To ask whether two trees are the same program, use Equal. Comparing
+// renderings is the question it was being asked instead, and it could not
+// answer it: the formatter's structure test compared two renderings, which let
+// a statement move out of a loop body unnoticed (M26-LEX-011).
+//
+// For the same reason String() is not a formatter. Formatting a Mutant file is
+// lsp/internal/server's job, and it works from the tree and the token stream.
 type Node interface {
 	TokenLiteral() string
 	String() string

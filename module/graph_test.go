@@ -320,6 +320,45 @@ func TestLoadReportsAParseErrorAgainstTheOffendingModule(t *testing.T) {
 	if filepath.Base(parseErr.Path) != "broken.mut" {
 		t.Fatalf("parse error blamed %s, want broken.mut", parseErr.Path)
 	}
+
+	// And every message says where in that module, which is the half this test
+	// did not check. It named the file and stopped there, while the messages
+	// themselves carried no position at all -- so `mutant run` printed
+	// `expected next token to be IDENT, but got = instead` and left the author
+	// to find it (M26-LEX-015). This is the only path a parse error reaches the
+	// command line by, for the entry file as much as for an import.
+	if len(parseErr.Errors) == 0 {
+		t.Fatal("the parse error carries no messages")
+	}
+	for _, msg := range parseErr.Errors {
+		if !strings.Contains(msg, "broken.mut:") {
+			t.Errorf("the message %q does not name the file it is in", msg)
+			continue
+		}
+		where := msg[strings.Index(msg, "broken.mut:"):]
+		if !lineColumnPrefix(where[len("broken.mut:"):]) {
+			t.Errorf("the message %q names the file but no line and column", msg)
+		}
+	}
+	// The whole rendering an author reads, as one string.
+	if rendered := parseErr.Error(); !strings.Contains(rendered, "broken.mut:1:") {
+		t.Errorf("the rendered error is %q, which does not place the mistake on line 1", rendered)
+	}
+}
+
+// lineColumnPrefix reports whether s begins with "<digits>:<digits>:".
+func lineColumnPrefix(s string) bool {
+	for range 2 {
+		seen := 0
+		for seen < len(s) && s[seen] >= '0' && s[seen] <= '9' {
+			seen++
+		}
+		if seen == 0 || seen >= len(s) || s[seen] != ':' {
+			return false
+		}
+		s = s[seen+1:]
+	}
+	return true
 }
 
 func TestLoadReportsAnUnreadableEntry(t *testing.T) {

@@ -69,7 +69,8 @@ func prepare(handlerPath string) *object.Error {
 
 	p := parser.New(lexer.New(string(src)))
 	program := p.ParseProgram()
-	if perrs := p.Errors(); len(perrs) > 0 {
+	// The path is already in the sentence, so only line:col is added.
+	if perrs := p.PositionedErrors(""); len(perrs) > 0 {
 		return errObj("net_serve: handler %q parse error: %s", handlerPath, perrs[0])
 	}
 

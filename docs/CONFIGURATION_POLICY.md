@@ -396,8 +396,25 @@ change that names its limit.
 
 The guard is a floor, not a proof. It recognises limits by shape and by name, so
 a limit in a shape none of the rules describes is not caught. Binary-format
-offsets are deliberately not guarded; their bounds are for fuzzing to test, and
-the tree has no fuzz targets yet.
+offsets are deliberately not guarded, on the stated grounds that their bounds
+are for fuzzing to test.
+
+Nine fuzz targets answer that in part. They sit in `lexer/fuzz_test.go`,
+`parser/fuzz_test.go` and `lsp/internal/server/fuzz_test.go`, and between them
+they hold the lexer to reaching the end of its input, to a literal that matches
+the token type it is given, and to positions that index the text it was handed;
+the parser to terminating inside its recovery caps, to recorded ranges that are
+ranges in the source, and to printing every message with a position; and the
+formatter to a parse, format and re-parse round trip that returns the same tree.
+The round trip found a defect in the lexer's float flag within half a minute of
+first being run, which is the argument for the whole exercise.
+
+All nine read source text. None of them reads a binary container, so the offsets
+in the format readers under `builtin/` are at present held by neither the rules
+above nor a fuzzer, and the exemption they are given records an intention rather
+than a coverage claim. A reader who wants those bounds checked should read the
+corpus tests beside each reader, which compare a decode against a known image,
+and not this exemption.
 
 ---
 

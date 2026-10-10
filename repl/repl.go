@@ -427,7 +427,8 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 			if lineReader != nil {
 				lineReader.AddHistory(line, true)
 			}
-			errrs.PrintParseErrors(out, p.Errors())
+			// A REPL line has no path, so the prefix is line:col alone.
+			errrs.PrintParseErrors(out, p.PositionedErrors(""))
 			continue
 		}
 

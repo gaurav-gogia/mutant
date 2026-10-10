@@ -319,6 +319,46 @@ func (p *Parser) Errors() []string { return p.errors }
 // and REPL.
 func (p *Parser) TypedErrors() []ParseError { return p.typedErrors }
 
+// PositionedErrors is Errors with each message prefixed by where it is:
+// "path:line:col: msg", or "line:col: msg" when path is empty, which is what a
+// REPL line wants.
+//
+// Errors alone carries no position at all, and it is what the whole command
+// line printed: `mutant run` reported `expected next token to be ), but got
+// IDENT instead` and left the author to find it (M26-LEX-015). The language
+// server never had the problem, because it renders TypedErrors.
+//
+// The two lists are built together by appendError, one entry each, in order, so
+// they pair by index -- with two exceptions this handles rather than assumes.
+// The "too many parse errors" note is appended to Errors alone, because a
+// diagnostic about the number of diagnostics has no range to sit at; and a
+// message from inside a `${...}` hole is given a prefix in Errors that its
+// typed twin does not carry. So an index past the end of typedErrors is
+// printed unprefixed, and a range that carries no line is left alone rather
+// than rendered as 0:0. TestThePlainAndTypedErrorListsStayPaired holds the
+// pairing in place, since a drift would put a position on the wrong message,
+// which is worse than putting none on any.
+func (p *Parser) PositionedErrors(path string) []string {
+	out := make([]string, 0, len(p.errors))
+	for i, msg := range p.errors {
+		if i >= len(p.typedErrors) {
+			out = append(out, msg)
+			continue
+		}
+		at := p.typedErrors[i].Range.Start
+		if !at.IsValid() {
+			out = append(out, msg)
+			continue
+		}
+		if path == "" {
+			out = append(out, fmt.Sprintf("%d:%d: %s", at.Line, at.Column, msg))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s:%d:%d: %s", path, at.Line, at.Column, msg))
+	}
+	return out
+}
+
 // startMark captures the current token's start position. Callers use it at
 // the top of a parse function to remember where a node begins before it is
 // fully constructed. Pair with recordRange at each successful return point.
@@ -638,30 +678,6 @@ func (p *Parser) refuseParameter() {
 	if p.peekTokenIs(token.RPAREN) {
 		p.nextToken()
 	}
-}
-
-func (p *Parser) parseCallArguments() []ast.Expression {
-	args := []ast.Expression{}
-
-	if p.peekTokenIs(token.RPAREN) {
-		p.nextToken()
-		return args
-	}
-
-	p.nextToken()
-	args = append(args, p.parseExpression(LOWEST))
-
-	for p.peekTokenIs(token.COMMA) {
-		p.nextToken()
-		p.nextToken()
-		args = append(args, p.parseExpression(LOWEST))
-	}
-
-	if !p.expectPeek(token.RPAREN) {
-		return nil
-	}
-
-	return args
 }
 
 func (p *Parser) expectPeek(tokenType token.TokenType) bool {

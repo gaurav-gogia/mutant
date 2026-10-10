@@ -146,7 +146,12 @@ func (w *walker) visit(absolute string, importedAs *ast.ImportStatement) (*Modul
 
 	p := parser.New(lexer.New(string(source)))
 	program := p.ParseProgram()
-	if errs := p.Errors(); len(errs) != 0 {
+	// PositionedErrors and not Errors: this is the only path by which a parse
+	// error reaches the command line, for the entry file as much as for
+	// anything it imports, and Errors carries no position (M26-LEX-015). The
+	// display path is passed in rather than the absolute one, so the prefix is
+	// the name the author typed.
+	if errs := p.PositionedErrors(display); len(errs) != 0 {
 		return nil, &ParseError{Path: display, Errors: errs}
 	}
 

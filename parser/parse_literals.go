@@ -42,8 +42,6 @@ func (p *Parser) parseFloatLiteral() ast.Expression {
 // depending on whether a '.' followed it. Floats are left alone deliberately:
 // no language reads `010.5` as octal, so there is no second reading to refuse.
 func (p *Parser) parseIntegerLiteral() ast.Expression {
-	// defer untrace(trace("parseIntegerLiteral"))
-
 	start := p.startMark()
 	lit := &ast.IntegerLiteral{Token: p.curToken}
 

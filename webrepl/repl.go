@@ -92,7 +92,8 @@ func (r *REPL) Eval(input string) (string, error) {
 
 	p := parser.New(lexer.New(input))
 	program := p.ParseProgram()
-	if errs := p.Errors(); len(errs) > 0 {
+	// No path, as in the terminal REPL: the input is one submitted fragment.
+	if errs := p.PositionedErrors(""); len(errs) > 0 {
 		return "", errors.New(strings.Join(errs, "\n"))
 	}
 

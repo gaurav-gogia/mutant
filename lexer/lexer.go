@@ -30,6 +30,12 @@ type Lexer struct {
 	// Column of l.ch = l.position - l.lineStart + 1.
 	lineStart int
 
+	// origin is the position input's first byte occupies in the file it was
+	// cut from, and is the whole of what NewAt adds. For a lexer over a whole
+	// file it is line 1, column 1, offset 0, which leaves every position
+	// below exactly what it was.
+	origin token.Position
+
 	// comments accumulates comment trivia in source order as it is skipped.
 	// Comments are never emitted as tokens, so the parser is unaffected;
 	// tooling that needs them (the formatter) reads them after lexing via
@@ -40,7 +46,27 @@ type Lexer struct {
 // New function initializes our lexer, takes input as a string
 // that input is the source code
 func New(input string) *Lexer {
-	l := &Lexer{input: input, line: 1, lineStart: 0}
+	return NewAt(input, token.Position{Line: 1, Column: 1, Offset: 0})
+}
+
+// NewAt lexes a fragment cut out of a larger file, reporting every position in
+// that file's coordinates rather than in the fragment's.
+//
+// It exists for interpolation holes. The caller used to get file coordinates by
+// prepending a newline per line and a space per column and lexing the padding
+// along with the text, which worked and was quadratic: a hole at column 40,000
+// paid for 39,999 spaces it then threw away, so N holes on one line cost a sum
+// rather than a constant (M26-LEX-009, measured at 1.04 s for 8,000 holes in a
+// 32 KB file). Padding also bought only two of the three coordinates -- one
+// byte per line stands in for a line that is wider than one byte -- so every
+// offset it produced was short by the difference and had to be corrected
+// afterwards by whoever remembered to (M26-LEX-018).
+//
+// at is where the fragment's first byte is. Line and column must be 1-based,
+// as every position in this package is; a zero-valued at would put the fragment
+// on line 0, which no file has.
+func NewAt(input string, at token.Position) *Lexer {
+	l := &Lexer{input: input, line: 1, lineStart: 0, origin: at}
 	l.readRune()
 	return l
 }
@@ -96,6 +122,9 @@ func (l *Lexer) scanToken() token.Token {
 	}
 
 	start := l.currentPos()
+	// The raw index of the same place. readStringToken slices l.input from
+	// here, and start.Offset is a file offset once NewAt has set an origin.
+	startIndex := l.position
 
 	// End of input is a position, not a character. It used to be the character
 	// l.ch == 0, which is also what a NUL byte in the file decodes to, so the
@@ -289,7 +318,7 @@ func (l *Lexer) scanToken() token.Token {
 	case ';':
 		tok = newToken(token.SEMICOLON, l.ch)
 	case '"':
-		tok = l.readStringToken(start.Offset, false, l.peekRune() == '"' && l.peekRuneAt(2) == '"')
+		tok = l.readStringToken(startIndex, false, l.peekRune() == '"' && l.peekRuneAt(2) == '"')
 	default:
 		// End of input was decided before the switch, so a 0 here is a NUL
 		// byte in the file. It is ILLEGAL like any other character no rule
@@ -306,7 +335,7 @@ func (l *Lexer) scanToken() token.Token {
 		// already mean something else.
 		if l.ch == 'r' && l.peekRune() == '"' {
 			l.readRune() // step onto the opening quote
-			tok = l.readStringToken(start.Offset, true, l.peekRune() == '"' && l.peekRuneAt(2) == '"')
+			tok = l.readStringToken(startIndex, true, l.peekRune() == '"' && l.peekRuneAt(2) == '"')
 			break
 		}
 		if unicode.IsLetter(l.ch) || l.ch == '_' {
@@ -377,14 +406,29 @@ func (l *Lexer) scanToken() token.Token {
 
 // currentPos returns the position of the lexer's current cursor (l.ch).
 // Line and Column are 1-based; Offset is the 0-based byte offset of l.ch
-// within the source input. When the cursor sits past end-of-input, Offset
+// within the file. When the cursor sits past end-of-input, Offset
 // equals len(input) and Column points one past the final column of that
 // line, giving a valid exclusive-end position for the last token.
+//
+// This is the one place the origin is applied, so a fragment lexed by NewAt
+// reports file coordinates everywhere without any other reader of a position
+// knowing a fragment is involved. Line and offset are shifted unconditionally.
+// Column is shifted only on the fragment's first line, because a newline
+// inside the fragment starts a column 1 of its own -- lineStart is 0 exactly
+// until the first newline is read, and is a byte offset of at least 1
+// afterwards, so it is the test for which line we are on.
+//
+// Offset is therefore not an index into l.input when an origin is set. The two
+// places that slice l.input by a position take the raw cursor instead.
 func (l *Lexer) currentPos() token.Position {
+	column := l.position - l.lineStart + 1
+	if l.lineStart == 0 {
+		column += l.origin.Column - 1
+	}
 	return token.Position{
-		Line:   l.line,
-		Column: l.position - l.lineStart + 1,
-		Offset: l.position,
+		Line:   l.line + l.origin.Line - 1,
+		Column: column,
+		Offset: l.position + l.origin.Offset,
 	}
 }
 
@@ -788,17 +832,35 @@ func (l *Lexer) readIdentifier() string {
 	return l.input[position:l.position]
 }
 
+// readNumber reads a run of digits, and a decimal point with digits on both
+// sides of it, returning the spelling and whether it is a float.
+//
+// The flag is set only once the point has been accepted. It used to be set the
+// moment one was seen, before the test that decides whether to take it, so a
+// number written immediately before a dot it does not own came back marked as a
+// float: `3.to_s()` lexed as FLOAT("3") and then `.` and `to_s`, and so did
+// `0.A`, `1.` and `1..4` -- a FLOAT token whose literal holds no decimal point
+// at all, which is the exact signature.
+//
+// Two things followed, and the second is why nothing noticed. A field access on
+// an integer reported the wrong type, because the receiver was a float. And
+// `mutant fmt` rewrote `0 .A` to `0.A`, which is the same program to a reader
+// and a different one to the lexer -- INT became FLOAT -- so formatting changed
+// what the program means. Program.String() renders both as `0`, so the
+// formatter's own structure test could not see it. Found by the fuzz target
+// added for M26-LEX-011, in 28 seconds, once ast.Equal existed to compare the
+// two trees by kind instead of by text.
 func (l *Lexer) readNumber() (string, bool) {
 	position := l.position
 	flag := false
 	for unicode.IsDigit(l.ch) || l.ch == '.' {
 		if l.ch == '.' {
-			flag = true
 			prev := l.prevRune()
 			next := l.nextRune()
 			if !(unicode.IsDigit(prev) && unicode.IsDigit(next)) {
 				break
 			}
+			flag = true
 		}
 
 		l.readRune()
@@ -837,12 +899,15 @@ func (l *Lexer) skipTrivia() scanFault {
 // of identifiers made out of the comment's words.
 func (l *Lexer) skipLineComment() scanFault {
 	start := l.currentPos()
+	// The raw cursor, not start.Offset: with an origin set, Offset is a file
+	// offset and indexes nothing in l.input.
+	from := l.position
 	for l.ch != '\n' && !l.atEOF() {
 		l.readRune()
 	}
 	end := l.currentPos()
 
-	text := l.input[start.Offset:end.Offset]
+	text := l.input[from:l.position]
 
 	// On CRLF input the '\r' sits before the '\n' and would otherwise be
 	// captured as part of the comment body. Drop it from both the text and
@@ -1028,11 +1093,13 @@ func stripBlockIndent(body string) string {
 // ${...} hole becomes a TEMPLATE carrying its parts, everything else stays a
 // STRING carrying its decoded text.
 //
-// openOffset is the offset of the literal's first character -- the `r` of a
-// raw one, not its quote -- so the spelling recorded on the token is the whole
-// thing. The cursor starts on the first quote and is left on the last one,
-// which is the contract NextToken's trailing readRune() expects.
-func (l *Lexer) readStringToken(openOffset int, raw, triple bool) token.Token {
+// openIndex is the index into l.input of the literal's first character -- the
+// `r` of a raw one, not its quote -- so the spelling recorded on the token is
+// the whole thing. It is an index and not a token.Position offset, because a
+// fragment lexed by NewAt reports file offsets that index nothing here. The
+// cursor starts on the first quote and is left on the last one, which is the
+// contract NextToken's trailing readRune() expects.
+func (l *Lexer) readStringToken(openIndex int, raw, triple bool) token.Token {
 	bodyStart := l.bodyPosition(triple)
 
 	var body string
@@ -1051,7 +1118,7 @@ func (l *Lexer) readStringToken(openOffset int, raw, triple bool) token.Token {
 	if end > len(l.input) {
 		end = len(l.input)
 	}
-	spelling := l.input[openOffset:end]
+	spelling := l.input[openIndex:end]
 
 	// A raw NUL in the body cannot be carried any further. stripBlockIndent
 	// joins a triple-quoted literal's lines with one as its marker, on the
@@ -1133,11 +1200,14 @@ func (l *Lexer) bodyPosition(triple bool) token.Position {
 	if triple {
 		skip = 3
 	}
-	return token.Position{
-		Line:   l.line,
-		Column: l.position - l.lineStart + 1 + skip,
-		Offset: l.position + skip,
-	}
+	// Built from currentPos rather than from l.line and l.position directly,
+	// so that the origin NewAt sets is applied here too. Repeating the
+	// arithmetic was how this function came to be the one position a fragment
+	// got wrong.
+	pos := l.currentPos()
+	pos.Column += skip
+	pos.Offset += skip
+	return pos
 }
 
 // splitTemplate cuts a literal's source body into alternating text and ${...}

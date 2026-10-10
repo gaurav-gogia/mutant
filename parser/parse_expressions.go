@@ -60,8 +60,6 @@ func (p *Parser) parseIfExpression() ast.Expression {
 }
 
 func (p *Parser) parsePrefixExpression() ast.Expression {
-	// defer untrace(trace("parsePrefixExpression"))
-
 	start := p.startMark()
 	expression := &ast.PrefixExpression{
 		Token:    p.curToken,
@@ -76,8 +74,6 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 }
 
 func (p *Parser) parseInfixExpression(left ast.Expression) ast.Expression {
-	// defer untrace(trace("parseInfixExpression"))
-
 	// The left-hand side has already been parsed; its range is registered
 	// against the sub-node. For the InfixExpression as a whole we use the
 	// left operand's start (if known) so hovers cover the entire binary
@@ -111,8 +107,6 @@ func (p *Parser) parseGroupedExpression() ast.Expression {
 }
 
 func (p *Parser) parseExpression(precedence int) ast.Expression {
-	// defer untrace(trace("parseExpression"))
-
 	// Every expression form that recurses does it through here, so this one
 	// check bounds all of them: parseGroupedExpression for '(', the prefix
 	// operators, the element and value scans of the array and hash literals,
@@ -144,8 +138,6 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 }
 
 func (p *Parser) parseExpressionStatement() *ast.ExpressionStatement {
-	// defer untrace(trace("parseExpressionStatement"))
-
 	start := p.startMark()
 	stmt := &ast.ExpressionStatement{Token: p.curToken}
 	stmt.Expression = p.parseExpression(LOWEST)
