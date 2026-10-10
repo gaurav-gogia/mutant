@@ -18,7 +18,7 @@ written in a shape the guard does not recognise is in neither place. Values fixe
 by a file format or a protocol are not limits; they are marked `//mutant:format`
 and are not listed.
 
-74 limits in 8 packages bound a run. 4 limits in 2 packages bound the tools around it. The guard finds 117 limits that are not named yet; `policy/limit_budget.go` lists each one.
+74 limits in 8 packages bound a run. 4 limits in 2 packages bound the tools around it. The guard finds 116 limits that are not named yet; `policy/limit_budget.go` lists each one.
 
 ## `builtin`
 

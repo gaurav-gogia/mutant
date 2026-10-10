@@ -182,11 +182,19 @@ func languageSnippetCompletionItems() []lsp.CompletionItem {
 				Value: "Conditional block with an else branch.",
 			},
 		},
+		// The returned value was `nil`, which Mutant does not have: there is no
+		// spelling for the null value at all, so accepting the snippet's
+		// defaults produced `compiler error: undefined variable: nil` from the
+		// editor's own teaching feature. `err` is the name a guard returns in
+		// this language's (value, err) idiom, and it is what the extension's
+		// own guard snippet returns, so whichever set fires the advice agrees.
+		// It is also a placeholder a reader renames, where `nil` read as a
+		// keyword they should keep.
 		{
 			Label:            "if guard return",
 			Kind:             &snippetKind,
 			Detail:           strPtr("Snippet"),
-			InsertText:       strPtr("if (!(${1:condition})) {\n  return ${2:nil};\n}\n${3:// continue}"),
+			InsertText:       strPtr("if (!(${1:condition})) {\n  return ${2:err};\n}\n${3:// continue}"),
 			InsertTextFormat: &snippetFormat,
 			Documentation:    lsp.MarkupContent{Kind: lsp.MarkupKindMarkdown, Value: "Guard clause with early return."},
 		},

@@ -520,7 +520,7 @@ func buildFile(moduleKey string, program *ast.Program, w *Workspace, structOf St
 		g:        g,
 		program:  program,
 		scope:    g.Root,
-		seq:      make(map[string]uint16, 16),
+		seq:      make(map[string]uint64, 16),
 		anon:     make(map[*Scope]int, 4),
 		targets:  targets,
 		structOf: structOf,
@@ -594,7 +594,7 @@ type builder struct {
 	g        *Graph
 	program  *ast.Program
 	scope    *Scope
-	seq      map[string]uint16
+	seq      map[string]uint64
 	anon     map[*Scope]int
 	targets  map[string]string
 	structOf StructOf
@@ -824,7 +824,7 @@ func (n *Node) Anchor() ast.Range {
 }
 
 // Seq is the declaration's sequence number within its scope.
-func (n *Node) Seq() uint16 {
+func (n *Node) Seq() uint64 {
 	if n == nil {
 		return 0
 	}

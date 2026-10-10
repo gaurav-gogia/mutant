@@ -1,6 +1,8 @@
 package analyzer
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -255,4 +257,70 @@ func TestFunctionCardHasTheSameSectionsAsABuiltinCard(t *testing.T) {
 	if !strings.Contains(empty, "**Parameters**\n- _none_") {
 		t.Errorf("zero-parameter function dropped the section:\n%s", empty)
 	}
+}
+
+// chainFixture is a chain of functions each passing its parameter to the next,
+// ending at a builtin that demands a string. It is written caller-first, which
+// is how a reader writes one, so constraints have to travel backwards through
+// every link.
+func chainFixture(links int) string {
+	var src strings.Builder
+	for i := 0; i < links-1; i++ {
+		fmt.Fprintf(&src, "let f%d = fn(x) { return f%d(x); };\n", i, i+1)
+	}
+	fmt.Fprintf(&src, "let f%d = fn(x) { return str_upper(x); };\n", links-1)
+	src.WriteString("f0(\"a\");\n")
+	return src.String()
+}
+
+// The same document asked the same question has to give the same answer. The
+// solver iterated the map it was filling, and Go randomises that order, so the
+// direction a constraint travelled changed between runs: on a 14-function chain
+// the answer came out `f0(x)` on 39 of 40 fresh analyses and `f0(x: STRING)` on
+// one. Hover and signature help are read between keystrokes, and a card that
+// changes when nothing in the file did reads as the editor guessing.
+//
+// Both halves are asserted, because either alone would pass for the wrong
+// reason: forty runs agreeing on a stalled answer is still a stalled answer,
+// and one run reaching STRING says nothing about the next.
+func TestTheSolverGivesOneAnswerForOneDocument(t *testing.T) {
+	fixture := chainFixture(14)
+
+	seen := map[string]int{}
+	for run := 0; run < 40; run++ {
+		seen[cardFor(t, fixture)]++
+	}
+
+	if len(seen) != 1 {
+		var answers []string
+		for card, count := range seen {
+			answers = append(answers, fmt.Sprintf("%dx %s", count, firstLine(card)))
+		}
+		sort.Strings(answers)
+		t.Fatalf("40 analyses of one document gave %d different cards: %s",
+			len(seen), strings.Join(answers, " | "))
+	}
+
+	for card := range seen {
+		if !strings.Contains(card, "f0(x: STRING)") {
+			t.Fatalf("the chain's constraint never reached f0; every run said:\n%s", card)
+		}
+	}
+}
+
+// A chain longer than any fixed round count, to pin that the bound is computed
+// from the document and not written down. Thirty-two links is four times the
+// cap this used to carry.
+func TestALongChainStillReachesItsFixpoint(t *testing.T) {
+	card := cardFor(t, chainFixture(32))
+	if !strings.Contains(card, "f0(x: STRING)") {
+		t.Fatalf("a 32-link chain did not reach f0:\n%s", card)
+	}
+}
+
+func firstLine(s string) string {
+	if at := strings.IndexByte(s, '\n'); at >= 0 {
+		return s[:at]
+	}
+	return s
 }

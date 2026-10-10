@@ -298,6 +298,33 @@ func (w *Workspace) bindingsLocked(key string) map[string]string {
 	return bound
 }
 
+// spellingsLocked returns the import path each alias was bound by, written as
+// the author wrote it.
+//
+// It is the companion to bindingsLocked, with the same first-wins rule for a
+// repeated alias, and it exists because of that function's empty strings: an
+// alias whose target has not been indexed has no key, and a message about that
+// module has nothing else to name it by. See ScopeCtx.NamespaceSpelling.
+//
+// The caller must hold at least a read lock.
+func (w *Workspace) spellingsLocked(key string) map[string]string {
+	facts, known := w.facts[key]
+	if !known {
+		return nil
+	}
+	spelled := make(map[string]string, len(facts.Imports))
+	for _, imported := range facts.Imports {
+		if imported.Alias == "" || imported.Spelling == "" {
+			continue
+		}
+		if _, already := spelled[imported.Alias]; already {
+			continue
+		}
+		spelled[imported.Alias] = imported.Spelling
+	}
+	return spelled
+}
+
 // Closure returns every module reachable from key by imports, key included,
 // in a deterministic order.
 //
@@ -475,6 +502,7 @@ type LocalScope struct {
 func (w *Workspace) ScopeCtxFor(key string, local LocalScope) ScopeCtx {
 	w.mu.RLock()
 	namespaces := w.bindingsLocked(key)
+	spellings := w.spellingsLocked(key)
 	w.mu.RUnlock()
 
 	return ScopeCtx{
@@ -493,10 +521,12 @@ func (w *Workspace) ScopeCtxFor(key string, local LocalScope) ScopeCtx {
 			export, declared := facts.Exports[name]
 			return export, declared
 		},
-		// A module is known when its facts are in hand. Namespaces already
-		// drops aliases that did not resolve, so this reports false only in the
-		// window where a file was forgotten between the two calls -- in which
-		// case hedging is exactly right.
+		// A module is known when its facts are in hand. bindingsLocked keeps an
+		// alias whose target has not been indexed, binding it to "", so this
+		// reports false for exactly that alias -- which is the point: the
+		// resolution comes back Provisional and renders as nothing. It also
+		// reports false in the window where a file was forgotten between the
+		// two calls, where hedging is equally right.
 		ModuleKnown: func(moduleKey string) bool {
 			_, known := w.Facts(moduleKey)
 			return known
@@ -505,6 +535,9 @@ func (w *Workspace) ScopeCtxFor(key string, local LocalScope) ScopeCtx {
 			w.mu.RLock()
 			defer w.mu.RUnlock()
 			return w.displayName(moduleKey)
+		},
+		NamespaceSpelling: func(alias string) string {
+			return spellings[alias]
 		},
 	}
 }

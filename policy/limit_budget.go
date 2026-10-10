@@ -201,9 +201,6 @@ var LimitBudget = map[string][]string{
 		"N1 package level: StackSize = 2048",
 		"N1 package level: GlobalSize = 65536",
 	},
-	"lsp/internal/analyzer/fn_solver.go": {
-		"L5 solveFunctionParams: 8",
-	},
 	"lsp/internal/analyzer/hardcoded_secret.go": {
 		"N1 package level: minimumSecretLength = 8",
 	},

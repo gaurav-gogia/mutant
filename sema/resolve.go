@@ -110,22 +110,58 @@ type ScopeCtx struct {
 	// name".
 	ModuleKnown func(moduleKey string) bool
 
-	// ModuleName renders a module key for a human, for message text only.
+	// ModuleName renders a module key for a human, for message text only. It
+	// is only ever asked about a key that is not empty: see
+	// namespaceTargetName, which owns the case where the target of an import
+	// has no key yet.
 	ModuleName func(moduleKey string) string
+
+	// NamespaceSpelling returns the import path an alias was bound by, as the
+	// author wrote it, or "" if it is not known.
+	//
+	// It exists for one sentence. An alias stays bound while its target is
+	// unindexed, and then Namespace reports it with an empty key -- so a
+	// message about that module has nothing to name it by, and the import
+	// spelling is the only name the author would recognise anyway. Nil is
+	// allowed, and means the message names no module rather than the wrong
+	// one.
+	NamespaceSpelling func(alias string) string
 }
 
 // moduleName mirrors the compiler's own fallback: a real path beats something
 // evasive, and a program with no modules is "this program".
-func (c *ScopeCtx) moduleName(key string) string {
-	if c.ModuleName != nil {
-		if display := c.ModuleName(key); display != "" {
-			return display
+// namespaceTargetName names the module an alias is bound to, for message text.
+//
+// The empty key means two different things in this file and only one of them is
+// "this program". ScopeCtx.Module is empty for the REPL, the playground and a
+// single file with no imports, where "this program" is exactly right. A
+// namespace target is empty for a different reason: the alias is bound, because
+// an import wrote it, but the file it names has not been indexed, so its
+// canonical key is not known yet. Naming that "this program" produced
+// `stats._total is private to this program`, which names the one module the
+// name certainly is not private to, in the window where the editor is still
+// reading the workspace.
+//
+// The import spelling is what the author wrote and is what they would
+// recognise, so it is the name to use. Where even that is unavailable the
+// sentence names no module, because naming none is a smaller cost to the reader
+// than naming the wrong one.
+func (c *ScopeCtx) namespaceTargetName(alias, key string) string {
+	if key != "" {
+		if c.ModuleName != nil {
+			if display := c.ModuleName(key); display != "" {
+				return display
+			}
+		}
+		return key
+	}
+
+	if c.NamespaceSpelling != nil {
+		if spelling := c.NamespaceSpelling(alias); spelling != "" {
+			return spelling
 		}
 	}
-	if key == "" {
-		return "this program"
-	}
-	return key
+	return "the module it is imported from"
 }
 
 func (c *ScopeCtx) bound(name string) bool {
@@ -246,13 +282,17 @@ func (r *Resolver) ResolveField(ctx ScopeCtx, left, field string) FieldResolutio
 // underscore is a rule about the name itself, so it holds whether or not the
 // module has been loaded. That is what lets the editor squiggle stats._total
 // the moment it is typed, in a file whose imports it has not finished reading.
+//
+// It is also why both refusals name the module through namespaceTargetName
+// rather than through ModuleName: running early means running with key empty,
+// and an empty key here does not mean "this program".
 func (r *Resolver) resolveModuleMember(ctx *ScopeCtx, alias, key, name string) FieldResolution {
 	if IsModulePrivate(name) {
 		return FieldResolution{
 			Kind:       FieldRefused,
 			ModuleKey:  key,
 			Member:     name,
-			Refusal:    privateMemberRefusal(alias, name, ctx.moduleName(key)),
+			Refusal:    privateMemberRefusal(alias, name, ctx.namespaceTargetName(alias, key)),
 			Confidence: Certain,
 		}
 	}
@@ -272,7 +312,7 @@ func (r *Resolver) resolveModuleMember(ctx *ScopeCtx, alias, key, name string) F
 			Kind:       FieldRefused,
 			ModuleKey:  key,
 			Member:     name,
-			Refusal:    noSuchMemberRefusal(alias, name, ctx.moduleName(key)),
+			Refusal:    noSuchMemberRefusal(alias, name, ctx.namespaceTargetName(alias, key)),
 			Confidence: Certain,
 		}
 	}

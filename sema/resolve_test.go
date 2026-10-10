@@ -2,6 +2,7 @@ package sema
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +20,7 @@ type fixture struct {
 	exports    map[string][]string // module key -> declared top-level names
 	unknown    []string            // module keys whose declarations are NOT loaded
 	displays   map[string]string
+	spellings  map[string]string // alias -> the import path as written
 }
 
 func (f fixture) ctx() ScopeCtx {
@@ -39,6 +41,10 @@ func (f fixture) ctx() ScopeCtx {
 			return ExportFact{Name: name, Private: IsModulePrivate(name)}, true
 		},
 		ModuleName: func(key string) string { return f.displays[key] },
+	}
+
+	if len(f.spellings) > 0 {
+		c.NamespaceSpelling = func(alias string) string { return f.spellings[alias] }
 	}
 
 	if len(f.unknown) > 0 {
@@ -147,6 +153,52 @@ func TestAPrivateMemberIsRefused(t *testing.T) {
 	want := "stats._total is private to lib/stats.mut: a top-level name beginning with _ is visible only inside the module that declares it"
 	if got.Refusal.Error() != want {
 		t.Fatalf("refusal text:\n got %q\nwant %q", got.Refusal.Error(), want)
+	}
+}
+
+// An alias stays bound while its target is unindexed -- that is deliberate, and
+// bindingsLocked says why -- so it is reported with an empty key, and the
+// private check runs before anything asks whether the module was loaded. That
+// left the message with nothing to name the module by, and it named "this
+// program": the one module `_total` is certainly not private to, said while the
+// editor is still reading the workspace.
+func TestThePrivateRefusalNamesTheImportWhileItsTargetIsUnread(t *testing.T) {
+	f := fixture{
+		module:     "main",
+		namespaces: map[string]string{"stats": ""},
+		spellings:  map[string]string{"stats": "lib/stats.mut"},
+	}
+	got := NewResolver().ResolveField(f.ctx(), "stats", "_total")
+	if got.Kind != FieldRefused || got.Refusal == nil {
+		t.Fatalf("ResolveField(stats._total) = %v, want FieldRefused with a refusal", got.Kind)
+	}
+
+	want := "stats._total is private to lib/stats.mut: a top-level name beginning with _ is visible only inside the module that declares it"
+	if got.Refusal.Error() != want {
+		t.Fatalf("refusal text:\n got %q\nwant %q", got.Refusal.Error(), want)
+	}
+}
+
+// The same situation with the spelling unavailable too. The sentence then names
+// no module, which is the honest answer: naming none costs the reader less than
+// naming the wrong one, and "this program" was the wrong one.
+func TestTheRefusalNamesNoModuleWhenEvenTheImportPathIsUnknown(t *testing.T) {
+	f := fixture{
+		module:     "main",
+		namespaces: map[string]string{"stats": ""},
+	}
+	got := NewResolver().ResolveField(f.ctx(), "stats", "_total")
+	if got.Kind != FieldRefused || got.Refusal == nil {
+		t.Fatalf("ResolveField(stats._total) = %v, want FieldRefused with a refusal", got.Kind)
+	}
+
+	text := got.Refusal.Error()
+	if strings.Contains(text, "this program") {
+		t.Fatalf("the refusal still calls the imported module this program: %q", text)
+	}
+	want := "stats._total is private to the module it is imported from: a top-level name beginning with _ is visible only inside the module that declares it"
+	if text != want {
+		t.Fatalf("refusal text:\n got %q\nwant %q", text, want)
 	}
 }
 

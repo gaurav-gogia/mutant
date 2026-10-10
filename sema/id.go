@@ -121,7 +121,18 @@ type DeclID struct {
 	// Seq distinguishes repeat declarations of Name in one Scope, 0 for the
 	// first. Mutant permits `let x = 1; let x = 2;` in a block, and go-to
 	// definition on the second use must not land on the first declaration.
-	Seq uint16
+	//
+	// It is 64 bits because a counter that wraps hands two declarations one
+	// identity, which is the worst thing that can happen to this type: the
+	// later declaration overwrites the earlier one in Graph.nodes, so
+	// find-references on the first reports the last one's uses and rename
+	// edits them. At uint16 the 65,537th `let x` in one scope wrapped to 0 and
+	// did exactly that, in a generated file of 720 KB -- not a hypothetical
+	// size. Widening is free: this struct is three strings and this field, so
+	// it measures 56 bytes at 16, 32 or 64 bits, and String already formats
+	// through uint64. At 64 bits a collision needs more declarations of one
+	// name than any file that fits in memory can hold.
+	Seq uint64
 }
 
 // IsZero reports whether d identifies nothing. A zero DeclID is what an

@@ -2,6 +2,7 @@ package sema
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mutant/ast"
@@ -432,5 +433,21 @@ func TestAnAliasWhoseTargetIsUnreadHedgesRatherThanBecomingAValue(t *testing.T) 
 	if private.Kind != FieldRefused || private.Confidence != Certain {
 		t.Fatalf("stats._total against an unread module = %v/%v, want a certain refusal",
 			private.Kind, private.Confidence)
+	}
+
+	// And it names the module by the import the author wrote. There is no key
+	// to name it by, which is what unread means, and the sentence used to fill
+	// that gap with "this program" -- the one module a name beginning with _ is
+	// certainly not private to from here. A refusal the editor is right to show
+	// early is also a refusal it has to word correctly early.
+	if private.Refusal == nil {
+		t.Fatal("the refusal carries no message")
+	}
+	text := private.Refusal.Error()
+	if strings.Contains(text, "this program") {
+		t.Fatalf("the refusal calls the imported module this program: %q", text)
+	}
+	if !strings.Contains(text, "lib/stats.mut") {
+		t.Fatalf("the refusal names no module the author would recognise: %q", text)
 	}
 }
