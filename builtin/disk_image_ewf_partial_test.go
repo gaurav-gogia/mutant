@@ -282,3 +282,190 @@ func TestAListOfOneEWFSegmentIsOpenedAsGiven(t *testing.T) {
 		t.Errorf("one segment of three, opened as given, reported partial false")
 	}
 }
+
+// --- the 2026-10-10 EWF rows ------------------------------------------------
+
+// ewfPartialHandle opens one named member of a set and hands back the handle
+// and its metadata, so the three tests below can each start from what the
+// image declares rather than from a number typed here.
+func ewfPartialHandle(t *testing.T, dir string, name string) (object.Object, *object.Hash) {
+	t.Helper()
+
+	payload, errObj := unwrapPair(t, EWFOpenPartial(stringObj(filepath.Join(dir, name))))
+	if errObj != nil {
+		t.Fatalf("ewf_open_partial(%s): %s", name, errObj.Inspect())
+	}
+	handle := mustHashValue(t, payload.(*object.Hash), "handle")
+	t.Cleanup(func() { EWFClose(handle) })
+
+	meta, errObj := unwrapPair(t, EWFMetadata(handle))
+	if errObj != nil {
+		t.Fatalf("ewf_metadata: %s", errObj.Inspect())
+	}
+	return handle, meta.(*object.Hash)
+}
+
+// TestAnEWFReadInsideTheDeclaredMediaThatIsAbsentIsRefused is M26-FS1-024's
+// regression test. A set holding segments 1 and 3 declares three chunks and
+// can place only the first, so every offset from 8 to 23 is inside the media
+// the image declares and inside the segment the set does not have. Those reads
+// came back as an empty buffer -- which is also how a read past the end of the
+// media comes back -- so a caller walking windows until one came back empty
+// read a 24-byte image as an 8-byte one and had nothing to tell it otherwise.
+//
+// The three cases are now distinct, and this test pins all three, because
+// fixing one by breaking another is the way this goes wrong: a window that
+// starts inside the data and runs past it still returns what is there (that is
+// M26-FS1-010's case, above), and an offset at or past the declared media
+// still returns empty, which is how a walk ends.
+func TestAnEWFReadInsideTheDeclaredMediaThatIsAbsentIsRefused(t *testing.T) {
+	dir := writeEWFSet(t, 1, 3)
+	handle, meta := ewfPartialHandle(t, dir, "img.E01")
+
+	declared := mustHashIntValue(t, meta, "total_logical_bytes")
+	chunks := mustHashIntValue(t, meta, "number_of_chunks")
+	observed := mustHashIntValue(t, meta, "observed_chunk_count")
+	if chunks <= observed || observed <= 0 {
+		t.Fatalf("the holed set observed %d of %d chunks, which is not the shortfall this test needs",
+			observed, chunks)
+	}
+	// The edge is derived from what the image publishes, not typed in, so the
+	// test still means something if the fixture's geometry changes.
+	perChunk := declared / chunks
+	edge := observed * perChunk
+	if edge <= 0 || edge >= declared {
+		t.Fatalf("the edge came out at %d of %d declared bytes, which is not a boundary", edge, declared)
+	}
+
+	// Inside what the set located: the bytes are there, and nothing changes.
+	inside, errObj := unwrapPairNoFatal(EWFReadAtBytes(handle, intObj(0), intObj(perChunk)))
+	if errObj != nil {
+		t.Fatalf("ewf_read_at_bytes(0, %d) on data the set holds: %s", perChunk, errObj.Message)
+	}
+	if got := inside.(*object.Bytes).Value; int64(len(got)) != perChunk {
+		t.Errorf("ewf_read_at_bytes(0, %d) returned %d bytes from the chunk the set holds", perChunk, len(got))
+	}
+
+	// Starting inside and running past the edge: short, not padded, no error.
+	straddle, errObj := unwrapPairNoFatal(EWFReadAtBytes(handle, intObj(0), intObj(declared)))
+	if errObj != nil {
+		t.Fatalf("ewf_read_at_bytes(0, %d) straddling the edge was refused (%s); a window that "+
+			"starts inside the data must still return what is there", declared, errObj.Message)
+	}
+	if got := int64(len(straddle.(*object.Bytes).Value)); got != edge {
+		t.Errorf("ewf_read_at_bytes(0, %d) returned %d bytes, want the %d it located and no padding",
+			declared, got, edge)
+	}
+
+	// At the edge and inside the declared media: refused, naming both numbers.
+	for _, offset := range []int64{edge, declared - 1} {
+		got, errObj := unwrapPairNoFatal(EWFReadAtBytes(handle, intObj(offset), intObj(perChunk)))
+		if errObj == nil {
+			t.Errorf("ewf_read_at_bytes(%d, %d) answered with %d byte(s) for an offset inside the %d "+
+				"bytes this image declares and inside the segment the set is missing; an empty "+
+				"answer there is the same answer as the end of the media",
+				offset, perChunk, len(got.(*object.Bytes).Value), declared)
+			continue
+		}
+		for _, number := range []string{itoa(offset), itoa(declared)} {
+			if !strings.Contains(errObj.Message, number) {
+				t.Errorf("the refusal at offset %d does not name %s, so a caller cannot tell how far "+
+					"short of the declared media it stopped: %s", offset, number, errObj.Message)
+			}
+		}
+	}
+
+	// At and past the declared media: empty, and no error. This is how a
+	// caller walks off the end, and the fix above must not take it away.
+	for _, offset := range []int64{declared, declared + perChunk} {
+		got, errObj := unwrapPairNoFatal(EWFReadAtBytes(handle, intObj(offset), intObj(perChunk)))
+		if errObj != nil {
+			t.Errorf("ewf_read_at_bytes(%d, %d) past the %d bytes declared was refused (%s), and "+
+				"walking off the end is how a read loop is supposed to finish",
+				offset, perChunk, declared, errObj.Message)
+			continue
+		}
+		if n := len(got.(*object.Bytes).Value); n != 0 {
+			t.Errorf("ewf_read_at_bytes(%d, %d) past the end returned %d bytes", offset, perChunk, n)
+		}
+	}
+}
+
+// TestAnEWFv1ImageDoesNotPublishACompressionMethodItNeverRead is
+// M26-FS1-026's regression test. compression_method is libewf's enum -- 0
+// none, 1 deflate, 2 bzip2 -- but EWF v1's file header has no such field, so
+// libewf fills the struct with 0 for every v1 image. mutant published that 0
+// on its own, which says "stored uncompressed" about an EnCase 6 image whose
+// chunks are deflate: ewfinfo prints "deflate" for the same file, and an image
+// acquired here with deflate at best compression, 100 MiB down to 62 MB, still
+// read as 0. has_compression_method is what tells the two apart.
+//
+// Only the v1 side is measured, here and anywhere: the libewf build available
+// refuses to write EWF2 ("Unsupported EWF format defaulting to: encase6"), so
+// nothing proves the v2 path publishes the header's own value. It reads it --
+// libewf parses it at reader/open.go's parseFileHeaderV2 -- and that is all
+// that can honestly be said.
+func TestAnEWFv1ImageDoesNotPublishACompressionMethodItNeverRead(t *testing.T) {
+	dir := writeEWFSet(t, 1, 2, 3)
+	_, meta := ewfPartialHandle(t, dir, "img.E01")
+
+	if major := mustHashIntValue(t, meta, "major_version"); major != 1 {
+		t.Fatalf("the fixture wrote a major version %d image; this test is about v1", major)
+	}
+	if mustHashBoolValue(t, meta, "has_compression_method") {
+		t.Errorf("a v1 image reports has_compression_method true, but v1's file header has no such "+
+			"field and the %d published for it is libewf's placeholder",
+			mustHashIntValue(t, meta, "compression_method"))
+	}
+}
+
+// TestEWFVerifyNeverCallsAnAbsentDigestAMismatch is M26-FS1-025's regression
+// test. md5_match and sha1_match read false both when a stored digest failed
+// to reproduce and when there was no stored digest to compare against, so a
+// comparison that never happened looked like one that failed. The pair is the
+// contract -- has_stored_md5 says whether anything was compared, md5_match
+// says how it came out -- and this pins it in both directions on an image that
+// stores no digest at all: the match fields must not claim a match, and ok
+// must not be true, because there is nothing here to verify against.
+func TestEWFVerifyNeverCallsAnAbsentDigestAMismatch(t *testing.T) {
+	dir := writeEWFSet(t, 1, 2, 3)
+	handle, _ := ewfPartialHandle(t, dir, "img.E01")
+
+	payload, errObj := unwrapPair(t, EWFVerify(handle))
+	if errObj != nil {
+		t.Fatalf("ewf_verify: %s", errObj.Inspect())
+	}
+	result := payload.(*object.Hash)
+
+	compared := 0
+	for _, pair := range []struct{ has, match, stored, computed string }{
+		{"has_stored_md5", "md5_match", "stored_md5", "computed_md5"},
+		{"has_stored_sha1", "sha1_match", "stored_sha1", "computed_sha1"},
+	} {
+		has := mustHashBoolValue(t, result, pair.has)
+		match := mustHashBoolValue(t, result, pair.match)
+		if has {
+			// Nothing to prove here on this image, but if a fixture ever does
+			// store a digest the pair still has to agree with itself.
+			if want := mustHashStringValue(t, result, pair.stored) == mustHashStringValue(t, result, pair.computed); match != want {
+				t.Errorf("%s is %v while %s and %s %s", pair.match, match, pair.stored, pair.computed,
+					map[bool]string{true: "are equal", false: "differ"}[want])
+			}
+			continue
+		}
+		compared++
+		if match {
+			t.Errorf("%s is true on an image where %s is false, so a comparison that never happened "+
+				"is reported as one that succeeded", pair.match, pair.has)
+		}
+		if stored := mustHashStringValue(t, result, pair.stored); stored != "" {
+			t.Errorf("%s is false but %s carries %q", pair.has, pair.stored, stored)
+		}
+	}
+	if compared == 0 {
+		t.Fatal("this image stores both digests, so the absent-digest case went untested")
+	}
+	if mustHashBoolValue(t, result, "ok") {
+		t.Error("ok is true for an image that stores no digest, so there was nothing to verify against")
+	}
+}

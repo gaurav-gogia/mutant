@@ -116,7 +116,16 @@ type ewfMetadata struct {
 	NumberOfChunks    uint64
 	TotalLogicalBytes uint64
 	SectorSize        int
-	CompressionMethod uint16
+	// EWF v1's file header has no compression-method field at all, so libewf
+	// fills the struct with CompressionMethodNone for every v1 image -- and in
+	// that enum 0 means "no compression" (libewf types/definitions.go: none 0,
+	// deflate 1, bzip2 2). The number alone therefore says an EnCase 6 image
+	// was stored uncompressed when its chunks may well be deflate, which on v1
+	// they always are when a chunk is flagged compressed. HasCompressionMethod
+	// says whether the number was read from the image or is that placeholder,
+	// the way HasMedia above guards the media fields.
+	HasCompressionMethod bool
+	CompressionMethod    uint16
 	// Chunk-table integrity. ChunkTablesInvalid counts groups where neither the
 	// primary table nor its table2 backup validated: their chunks were decoded
 	// unverified and the data they describe should be treated as suspect.
@@ -754,6 +763,7 @@ func EWFMetadata(args ...object.Object) object.Object {
 		"total_logical_bytes": intObj(int64(metadata.TotalLogicalBytes)),
 
 		"sector_size":             intObj(int64(metadata.SectorSize)),
+		"has_compression_method":  boolObj(metadata.HasCompressionMethod),
 		"compression_method":      intObj(int64(metadata.CompressionMethod)),
 		"chunk_tables_invalid":    intObj(int64(metadata.ChunkTablesInvalid)),
 		"chunk_tables_recovered":  intObj(int64(metadata.ChunkTablesRecovered)),
@@ -1528,6 +1538,25 @@ func (s *realEWFSession) ReadAt(offset int64, length int64) ([]byte, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	// An offset the media declares but this handle cannot serve is refused
+	// rather than answered with an empty buffer, because empty is already how
+	// a caller walks off the end of the media. Answering a hole the same way
+	// makes a set missing its later segments look like a shorter disk: a walk
+	// that reads windows until one comes back empty stops at the first absent
+	// segment and reports the image as that long, with nothing anywhere
+	// saying otherwise. ext_read_file_at settles this for the house -- an
+	// offset inside the recorded size but past what the library could locate
+	// is an error naming both numbers, because "a short buffer or a run of
+	// zeroes would hide it".
+	//
+	// A short answer is left alone: a window that starts inside located data
+	// and runs past it returns what is there, which is what
+	// TestAHoledEWFSetDecodesUpToItsFirstGap requires for M26-FS1-010.
+	if n == 0 {
+		if size := s.reader.Size(); offset < size {
+			return nil, fmt.Errorf("offset %d is inside the %d bytes of media this image declares, but no data for it was located in the segments this handle opened", offset, size)
+		}
+	}
 	return buf[:n], nil
 }
 
@@ -1548,6 +1577,7 @@ func (s *realEWFSession) Metadata() (ewfMetadata, error) {
 		// two media fields that are absent on some images.
 		TotalLogicalBytes:     uint64(s.reader.Size()),
 		SectorSize:            s.reader.SectorSize(),
+		HasCompressionMethod:  meta.MajorVersion >= 2,
 		CompressionMethod:     meta.CompressionMethod,
 		ChunkTablesInvalid:    meta.ChunkTablesInvalid,
 		ChunkTablesRecovered:  meta.ChunkTablesRecovered,
@@ -1581,6 +1611,12 @@ func (s *realEWFSession) Verify(ctx context.Context) (ewfVerifyResult, error) {
 		return ewfVerifyResult{}, err
 	}
 
+	// MD5Match and SHA1Match are passed through rather than re-derived, and
+	// they are only ever true where the image stored that digest: libewf
+	// computes each as HasStored && equal (verify.go). So a false match field
+	// means either a digest that failed to reproduce or no digest to compare
+	// against, and only the HasStored flag beside it says which -- which is
+	// what ewf_verify's documented contract now tells a caller to read.
 	out := ewfVerifyResult{
 		Size:          res.Size,
 		BytesHashed:   res.BytesHashed,
