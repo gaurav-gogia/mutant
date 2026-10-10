@@ -190,7 +190,6 @@ const (
 	ASTERISK   = "*"
 	FSLASH     = "/"
 	MODULO     = "%"
-	BSLASH     = "\\"
 	DOT        = "."
 	LT         = "<"
 	GT         = ">"

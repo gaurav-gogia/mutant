@@ -177,10 +177,19 @@ func (p *Parser) parseExpressionList(end token.TokenType) []ast.Expression {
 
 	p.nextToken()
 	for !p.curTokenIs(token.EOF) {
+		// An element that reported its own problem has already told the author
+		// what is wrong at this position, so the punctuation complaint below is
+		// suppressed and the parse goes straight to synchronising. Without this
+		// `putln(0xFF + 1)` cost two errors for one mistake -- the lexer's
+		// account of `0xFF`, and then a sentence about commas aimed at the `+`
+		// left over from the element that was refused. Counting errors around
+		// the call is how parseBlockStatement decides the same question.
+		before := len(p.errors)
 		exp := p.parseExpression(LOWEST)
 		if exp != nil {
 			list = append(list, exp)
 		}
+		reported := len(p.errors) > before
 
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
@@ -197,8 +206,18 @@ func (p *Parser) parseExpressionList(end token.TokenType) []ast.Expression {
 			return list
 		}
 
-		msg := fmt.Sprintf("expected next token to be %s or %s, but got %s instead", token.COMMA, end, p.peekToken.Type)
-		p.appendError(p.peekToken, msg)
+		if !reported {
+			// An ILLEGAL's own sentence replaces this one, as it does at every
+			// other refusal that can meet one. The lexer knows a backslash is
+			// not an operator; this function knows only that the token is not a
+			// comma, which is the less useful half of the truth and was all
+			// `putln(6 \ 3)` ever produced (M26-LEX-016).
+			msg := fmt.Sprintf("expected next token to be %s or %s, but got %s instead", token.COMMA, end, p.peekToken.Type)
+			if detail := illegalDetail(p.peekToken); detail != "" {
+				msg = detail
+			}
+			p.appendError(p.peekToken, msg)
+		}
 
 		stop := p.synchronizeToTokenTypes(token.COMMA, end, token.SEMICOLON, token.RBRACE)
 		if stop == token.COMMA {

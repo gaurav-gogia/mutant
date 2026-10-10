@@ -369,6 +369,16 @@ func (p *Parser) Recoverables() []RecoverableError { return p.recoverables }
 // *without* advancing, so the next statement starts where it should. The
 // older `if !p.curTokenIs(SEMICOLON) { p.nextToken() }` idiom swallowed the
 // first token of the following statement whenever a semicolon was missing.
+//
+// An omission is recoverable or hard depending on what follows it, and the
+// dividing line is whether another statement begins on the same line. Across a
+// line break the author has written two statements and left out a `;`, which is
+// what they meant and what the formatter repairs, so it stays recoverable. On
+// one line the two readings are not equally likely: `let y = x--1;` was read as
+// `let y = x--;` and then `1;`, and it ran, printing 4 and 4 while mutating x
+// (M26-LEX-007). Nothing in the source says the author wanted two statements
+// there, and a format-severity warning on a program that runs with wrong values
+// is not enough.
 func (p *Parser) consumeStatementTerminator(stmt ast.Statement) {
 	if p.peekTokenIs(token.SEMICOLON) {
 		p.nextToken()
@@ -379,7 +389,53 @@ func (p *Parser) consumeStatementTerminator(stmt ast.Statement) {
 		return
 	}
 
+	if p.statementFollowsOnSameLine() {
+		p.refuseMissingSemicolon(p.curToken, p.peekToken)
+		return
+	}
+
 	p.recordMissingSemicolon(p.curToken)
+}
+
+// statementFollowsOnSameLine reports whether the token after the statement that
+// just ended begins another statement on the same line.
+//
+// EOF and `}` are the two tokens that can follow a statement without beginning
+// one: `let x = 5` at end of input and `fn() { return 5 }` are both omissions
+// the formatter repairs, and both are pinned as recoverable. Every other token
+// on that line starts a statement, because a statement is the only thing the
+// grammar admits in this position.
+func (p *Parser) statementFollowsOnSameLine() bool {
+	if p.peekTokenIs(token.EOF) || p.peekTokenIs(token.RBRACE) {
+		return false
+	}
+	return p.peekToken.Start.Line == p.curToken.End.Line
+}
+
+// refuseMissingSemicolon reports two statements written on one line with no `;`
+// between them, naming both ends so the split is visible.
+//
+// The range is the token that begins the second statement rather than the
+// insertion point, because this is an error and not a quick fix: what the reader
+// needs to see is the code that was read as a statement of its own.
+//
+// Written with no space at all between them, the two are almost certainly one
+// spelling that this language does not have, so the message says so. The three
+// that reach here from another language -- a hex literal, an exponent and a
+// digit separator -- are refused by the lexer with their own names, since it can
+// see they were one token; this is the rest, `x--1` among them.
+func (p *Parser) refuseMissingSemicolon(end, next token.Token) {
+	msg := fmt.Sprintf(
+		"missing ';': the statement ending at `%s` is followed on the same line by `%s`, which begins another one, so this line is two statements and not one",
+		end.Literal, next.Literal)
+
+	if next.Start == end.End {
+		msg += fmt.Sprintf(
+			". They are written with nothing between them, so `%s%s` was more likely meant as one thing",
+			end.Literal, next.Literal)
+	}
+
+	p.appendError(next, msg)
 }
 
 // recordMissingSemicolon notes that the statement ending at tok needs a `;`.
@@ -461,6 +517,7 @@ func (p *Parser) parseBoolean() ast.Expression {
 
 func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 	identifiers := []*ast.Identifier{}
+	named := map[string]bool{}
 
 	if p.peekTokenIs(token.RPAREN) {
 		p.nextToken()
@@ -469,27 +526,21 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 
 	p.nextToken()
 
-	identStart := p.startMark()
-	if !p.curTokenIs(token.IDENT) {
-		p.refuseParameter()
+	ident := p.parseParameterName(named)
+	if ident == nil {
 		return nil
 	}
-	ident := &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}
-	p.recordRange(ident, identStart)
 	identifiers = append(identifiers, ident)
 
 	for p.peekTokenIs(token.COMMA) {
 		p.nextToken()
 		p.nextToken()
 
-		nextStart := p.startMark()
-		if !p.curTokenIs(token.IDENT) {
-			p.refuseParameter()
+		next := p.parseParameterName(named)
+		if next == nil {
 			return nil
 		}
-		ident := &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}
-		p.recordRange(ident, nextStart)
-		identifiers = append(identifiers, ident)
+		identifiers = append(identifiers, next)
 	}
 
 	if !p.expectPeek(token.RPAREN) {
@@ -497,6 +548,62 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 	}
 
 	return identifiers
+}
+
+// parseParameterName reads one parameter name, refusing a token that is not a
+// name and a name the list already holds.
+//
+// It returns nil only for the first of those. A duplicate is reported and then
+// kept, because the list is well formed apart from it: dropping it would cost
+// the author an invented second error from the caller's expectPeek, and keeping
+// it leaves the tree shaped like the source, which is what every position
+// recorded against it assumes.
+func (p *Parser) parseParameterName(named map[string]bool) *ast.Identifier {
+	start := p.startMark()
+	if !p.curTokenIs(token.IDENT) {
+		p.refuseParameter()
+		return nil
+	}
+
+	name := p.curToken.Literal
+	if name != blankParameter {
+		if named[name] {
+			p.refuseDuplicateParameter(name, p.curToken)
+		}
+		named[name] = true
+	}
+
+	ident := &ast.Identifier{Token: p.curToken, Value: name}
+	p.recordRange(ident, start)
+	return ident
+}
+
+// blankParameter is the discard slot, exempt from the duplicate rule for the
+// reason compiler.blankName exists: a parameter list is positional, so `fn(_,
+// _, c)` has to keep all three slots or c would read the wrong argument. Two
+// discards are also not two readings of one name, because neither can be read.
+const blankParameter = "_"
+
+// refuseDuplicateParameter reports a parameter list naming one parameter twice.
+//
+// The sentence is sema.DuplicateParameterRefusal's, written out rather than
+// called: this package depends on token, ast and lexer and nothing else, which
+// is what lets the formatter and the language server parse a file without the
+// object model, the builtin table and the graph store coming with it.
+// TestTheDuplicateParameterSentenceIsTheOneSemaWrites holds the two spellings
+// together so they cannot drift apart unnoticed.
+//
+// It is refused here, and not only where it already was, because the compiler's
+// copy never sees a macro. A macro literal shares parseFunctionParameters and is
+// then expanded by the evaluator, which has no such check at all, so `macro(a,
+// a)` compiled and ran with the second parameter winning while `fn(a, a)` was
+// refused (M26-LEX-013). One check where both go through settles both engines,
+// and a parse error carries the range the editor needs to show this as an error
+// rather than as the lint warning it was.
+func (p *Parser) refuseDuplicateParameter(name string, at token.Token) {
+	p.appendError(at, fmt.Sprintf(
+		"parameter %s is declared twice: the second one could never be read, because every mention of %s in the body means the first",
+		name, name))
 }
 
 // refuseParameter rejects the token standing in a parameter slot when it is

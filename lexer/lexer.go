@@ -2,6 +2,8 @@ package lexer
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"mutant/token"
@@ -164,7 +166,16 @@ func (l *Lexer) scanToken() token.Token {
 			tok = newToken(token.FSLASH, l.ch)
 		}
 	case '\\':
-		tok = newToken(token.FSLASH, l.ch)
+		// A backslash is not an operator in this language and never was. This
+		// arm emitted FSLASH, so `6 \ 3` was read as a division whose operator
+		// happened to be spelled `\`: the parser saw a well-formed infix
+		// expression, the editor showed no diagnostic at all, and the only
+		// complaint came from the compiler, as `unknown operator \` with no
+		// position on it (M26-LEX-016). An ILLEGAL carrying its own account is
+		// the shape this lexer already uses for a character no rule begins
+		// with, and it reaches the author where they wrote it.
+		tok = newToken(token.ILLEGAL, l.ch)
+		tok.Err = faultBackslash
 	case '%':
 		if l.peekRune() == '=' {
 			ch := string(l.ch)
@@ -314,6 +325,36 @@ func (l *Lexer) scanToken() token.Token {
 			// reader that takes nothing returns a token of no width. This is the
 			// stall: `let x = 2²;` never finished lexing.
 			val, isFloat := l.readNumber()
+
+			// A name written with no space after the digits is one malformed
+			// number, not a number and then a name. Splitting it was silent and
+			// the split is invisible in the source: `0xFF` became INT(0)
+			// IDENT(xFF), so at a statement boundary `let m = 0xFF;` ran as two
+			// statements and printed 0 where xFF happened to be bound, and
+			// inside an expression `putln(0xFF)` failed with `expected , or ),
+			// got IDENT` -- a sentence about punctuation for an author who
+			// wrote a hex literal (M26-LEX-007). One ILLEGAL spanning the whole
+			// spelling is what it is, and numberFault names the reading.
+			//
+			// IsLetter and '_' are exactly readIdentifier's own start set minus
+			// the digits readNumber already took. A superscript two is neither,
+			// so `2²` still lexes as INT(2) and then an ILLEGAL for the ².
+			if unicode.IsLetter(l.ch) || l.ch == '_' {
+				suffix := l.readIdentifier()
+				// Literal carries the whole spelling and Raw stays empty: Raw
+				// is for the string forms whose spelling says something their
+				// decoded value cannot, and the only reader of it is the
+				// formatter, on literal nodes. No node is built from this
+				// token at all -- there is no prefix parse function for
+				// ILLEGAL -- so the field would be inert as well as untrue.
+				tok.Type = token.ILLEGAL
+				tok.Literal = val + suffix
+				tok.Err = numberFault(val, suffix)
+				tok.Start = start
+				tok.End = l.currentPos()
+				return tok
+			}
+
 			tok.Literal = val
 			if isFloat {
 				tok.Type = token.FLOAT
@@ -381,19 +422,119 @@ type scanFault struct {
 	where token.Position
 }
 
-// The two faults, worded as the author reads them. message() appends the
-// position, so each of these is the whole of what the lexer has to say.
+// The faults, worded as the author reads them.
 //
-// A literal with no closing delimiter is not among them. That is
+// The first two go through message(), which appends a line and column, because
+// each is one character inside a construct many runes wide: the token's range
+// covers the whole string literal or the whole comment, and the position the
+// author needs is the byte within it. The two below them are the opposite shape
+// -- the token IS the thing that is wrong, so its own range already says where,
+// and appending a position printed it twice (measured: `0xFF is not a number:
+// ... (line 2, column 7)` under a diagnostic already headed `2:7`).
+//
+// A literal with no closing delimiter is in neither group. That is
 // token.UNTERMINATED, a token type of its own with its own parser handler,
 // because it is a token many runes wide that was read correctly and that no
 // program can contain -- not a character no rule begins with (M26-LEX-005).
-// These two are the other shape: one character inside a construct that was
-// otherwise read, which is what an ILLEGAL carrying Err is for.
 const (
 	faultOpenHole = "unterminated ${ inside a string literal: this hole is never closed by a }"
 	faultNUL      = "NUL byte in the source, which a Mutant source file cannot hold -- a string literal that needs one writes \\0"
+
+	faultBackslash = "a backslash is not an operator in this language: integer division is written /, and a backslash in text needs a string literal around it"
 )
+
+// numberFault is the lexer's account of digits written immediately before a
+// name, which is one malformed number and not two tokens.
+//
+// Three spellings reach here from authors who have written another language,
+// and each is named rather than merely refused, because each has a different
+// remedy and the author is looking at something they believe is one number.
+// The decimal value is computed and offered where it can be, which is the same
+// courtesy parseIntegerLiteral already extends to a leading zero.
+//
+// The general case names the split itself. That is the part the author cannot
+// see: `255u8` was read as the number 255 followed by a name called u8, and
+// every message downstream talked about the name.
+//
+// It carries no position: the ILLEGAL token it is set on spans the whole
+// spelling, so the range a diagnostic already shows is this fault's own.
+func numberFault(digits, name string) string {
+	whole := digits + name
+
+	// Tested before the two below it, because a 0 prefix and an exponent can
+	// both begin with a letter the other would claim: `0e5` is an exponent and
+	// not a base, and numberPrefix declining it is what lets it fall through.
+	if digits == "0" && len(name) > 1 {
+		if base, kind := numberPrefix(name[0]); base != 0 {
+			return fmt.Sprintf("%s is not a number: this language has no %s literal%s",
+				whole, kind, advice(name[1:], base))
+		}
+	}
+
+	if len(name) > 1 && (name[0] == 'e' || name[0] == 'E') && allDigits(name[1:]) {
+		return fmt.Sprintf("%s is not a number: this language has no exponent notation%s",
+			whole, exponentAdvice(whole))
+	}
+
+	if len(name) > 1 && name[0] == '_' && allDigits(name[1:]) {
+		return fmt.Sprintf("%s is not a number: this language has no digit separator, so write %s",
+			whole, strings.ReplaceAll(whole, "_", ""))
+	}
+
+	return fmt.Sprintf(
+		"%s is read as the number %s followed by the name %s, which is not one thing: a number cannot be written immediately before a name",
+		whole, digits, name)
+}
+
+// numberPrefix names the base a 0-prefix spells, or 0 for a letter that spells
+// none. The three are the ones an author arrives with, and parse_int reads all
+// three at run time, so each has somewhere to go.
+func numberPrefix(c byte) (base int, kind string) {
+	switch c {
+	case 'x', 'X':
+		return 16, "hex"
+	case 'o', 'O':
+		return 8, "octal"
+	case 'b', 'B':
+		return 2, "binary"
+	}
+	return 0, ""
+}
+
+// advice offers the decimal value of digits read in base, and the builtin call
+// that reads them at run time, or says nothing at all when the digits are not a
+// number in that base -- `0xZZ` has no value to offer, and inventing one would
+// be worse than saying less.
+func advice(digits string, base int) string {
+	value, err := strconv.ParseUint(digits, base, 64)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf(`, so write %d, or parse_int("%s", %d)`, value, digits, base)
+}
+
+// exponentAdvice offers the value the exponent spells, where it is a whole
+// number a reader would recognise. 1e400 overflows and 1.5e-3 is not whole, so
+// both fall back to the general sentence rather than to a rounded answer.
+func exponentAdvice(whole string) string {
+	value, err := strconv.ParseFloat(whole, 64)
+	if err != nil || math.IsInf(value, 0) || value != math.Trunc(value) {
+		return ""
+	}
+	return fmt.Sprintf(", so write %d", int64(value))
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
 
 func (f scanFault) bad() bool { return f.why != "" }
 

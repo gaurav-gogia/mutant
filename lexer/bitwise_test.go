@@ -60,16 +60,20 @@ func TestBitwiseOperatorTokens(t *testing.T) {
 			{Type: token.GTE, Literal: ">="},
 			{Type: token.IDENT, Literal: "b"},
 		}},
-		// Mutant has no hex literals, so `0xff` is an INT followed by an IDENT.
-		// The mask below is therefore two tokens, not one -- pinned here so that
-		// adding hex literals later is a deliberate change with a failing test,
-		// not a silent one.
-		{"~x & 0xff", []token.Token{
+		// Mutant has no hex literals, so a mask is written in decimal, which is
+		// what the language reference tells an author to write.
+		//
+		// This case used to spell the mask `0xff` and pin that it lexed as
+		// INT(0) IDENT(xff), so that adding hex literals later would be a
+		// deliberate change with a failing test. `0xff` is now refused outright
+		// rather than split (M26-LEX-007), so that pin has moved to
+		// malformed_number_test.go and is the stronger one there: a hex literal
+		// that started working would fail a refusal, not just a token stream.
+		{"~x & 255", []token.Token{
 			{Type: token.TILDE, Literal: "~"},
 			{Type: token.IDENT, Literal: "x"},
 			{Type: token.AMPERSAND, Literal: "&"},
-			{Type: token.INT, Literal: "0"},
-			{Type: token.IDENT, Literal: "xff"},
+			{Type: token.INT, Literal: "255"},
 		}},
 	}
 

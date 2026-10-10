@@ -79,34 +79,41 @@ func TestALeadingZeroIsRefusedRatherThanReadAsOctal(t *testing.T) {
 }
 
 // TestBaseZeroNeverReachedAnythingButTheLeadingZero records why base 10 costs
-// no capability: the lexer's readNumber loops on IsDigit and '.', so a prefix
-// is split off as a separate identifier and never reaches
-// parseIntegerLiteral in one token. The leading zero was the only thing base 0
-// was ever handed here.
+// no capability: none of the prefixes base 0 understands ever reaches
+// parseIntegerLiteral at all. The leading zero was the only thing base 0 was
+// ever handed here.
 //
-// This asserts the token stream rather than a parse error, because whether the
-// split is an error depends on where it sits: in an argument list the trailing
-// identifier is a hard error, while as a bare statement it is two statements
-// with a recoverable missing semicolon between them. The split is the part that
-// makes the base irrelevant.
+// It used to assert the token stream, because readNumber loops on IsDigit and
+// '.' and so split a prefix off as a separate identifier -- `0x1F` lexing as
+// INT(0) IDENT(x1F). That split was itself a defect: it was silent, and at a
+// statement boundary it ran as two statements (M26-LEX-007). The lexer now
+// refuses each of these spellings as one ILLEGAL token, which is a stronger
+// version of the same conclusion: not "the prefix arrives in two pieces" but
+// "the prefix does not arrive".
 func TestBaseZeroNeverReachedAnythingButTheLeadingZero(t *testing.T) {
 	for _, tc := range []struct {
 		src   string
-		first string
-		then  string
+		whole string
+		names string
 	}{
-		{"0x1F;", "0", "x1F"},
-		{"0b101;", "0", "b101"},
-		{"0o17;", "0", "o17"},
-		{"1_000;", "1", "_000"},
+		{"0x1F;", "0x1F", "hex"},
+		{"0b101;", "0b101", "binary"},
+		{"0o17;", "0o17", "octal"},
+		{"1_000;", "1_000", "digit separator"},
 	} {
 		l := lexer.New(tc.src)
-		one, two := l.NextToken(), l.NextToken()
-		if string(one.Type) != "INT" || one.Literal != tc.first {
-			t.Errorf("%q: first token %s(%s), want INT(%s)", tc.src, one.Type, one.Literal, tc.first)
+		one := l.NextToken()
+		if string(one.Type) != "ILLEGAL" || one.Literal != tc.whole {
+			t.Errorf("%q: first token %s(%s), want ILLEGAL(%s)",
+				tc.src, one.Type, one.Literal, tc.whole)
 		}
-		if string(two.Type) != "IDENT" || two.Literal != tc.then {
-			t.Errorf("%q: second token %s(%s), want IDENT(%s)", tc.src, two.Type, two.Literal, tc.then)
+		if !strings.Contains(one.Err, tc.names) {
+			t.Errorf("%q: the refusal does not name %s: %q", tc.src, tc.names, one.Err)
+		}
+		// One token for the whole spelling, so the `;` is next and there is no
+		// stray identifier for a later statement to be assembled out of.
+		if two := l.NextToken(); string(two.Type) != ";" {
+			t.Errorf("%q: second token %s(%s), want the ;", tc.src, two.Type, two.Literal)
 		}
 	}
 
