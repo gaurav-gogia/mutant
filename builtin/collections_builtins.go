@@ -282,13 +282,18 @@ func Zip(args ...object.Object) object.Object {
 
 // --- hash operations ---
 
+// hashSortedPairs is the order keys, values and entries list a hash in: the
+// order printing it and a for-in loop over it use, so keys(h)[i] and
+// values(h)[i] are one entry of h even when separate calls produced them, as
+// long as h did not change between the calls.
+//
+// These three used to sort for themselves, on the rendered key alone. That put
+// 10 before 2, and keys that render alike -- 1 and "1", true and "true" -- tied
+// and kept whatever order the Go map was ranged in, which differs from call to
+// call, so keys(h)[0] and values(h)[0] could come from different entries
+// (M26-BLT-007).
 func hashSortedPairs(h *object.Hash) []object.HashPair {
-	pairs := make([]object.HashPair, 0, len(h.Pairs))
-	for _, p := range h.Pairs {
-		pairs = append(pairs, p)
-	}
-	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].Key.Inspect() < pairs[j].Key.Inspect() })
-	return pairs
+	return h.SortedPairs()
 }
 
 func Keys(args ...object.Object) object.Object {
@@ -342,7 +347,7 @@ func Entries(args ...object.Object) object.Object {
 func hashableKey(op string, key object.Object) (object.HashKey, *object.Error) {
 	hashable, ok := key.(object.Hashable)
 	if !ok {
-		return object.HashKey{}, newError("`%s` key must be a hashable type (STRING/INTEGER/FLOAT/BOOLEAN), got %s", op, key.Type())
+		return object.HashKey{}, newError("`%s` key must be a hashable type (STRING/BYTES/INTEGER/FLOAT/BOOLEAN), got %s", op, key.Type())
 	}
 	return hashable.HashKey(), nil
 }

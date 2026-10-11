@@ -3,9 +3,9 @@ package builtin
 import (
 	"fmt"
 	"mutant/global"
+	"reflect"
 	"runtime"
 	"strings"
-	"unicode"
 
 	"mutant/object"
 )
@@ -262,7 +262,7 @@ var Builtins = []BuiltinDefinition{
 	// network
 	{BuiltinNameNetResolve, &BuiltIn{NetResolve}},
 	{BuiltinNameNetDial, &BuiltIn{NetDial}},
-	{BuiltinNameNetSynScan, &BuiltIn{NetConnectScan}}, // deprecated alias of net_connect_scan
+	{BuiltinNameNetSynScan, &BuiltIn{NetSynScan}}, // deprecated alias of net_connect_scan
 	{BuiltinNameNetUdpScan, &BuiltIn{NetUDPScan}},
 	{BuiltinNameNetBanner, &BuiltIn{NetBanner}},
 	{BuiltinNameNetTlsFingerprint, &BuiltIn{NetTLSFingerprint}},
@@ -822,76 +822,124 @@ func GetBuiltinByName(name string) *BuiltIn {
 	return nil
 }
 
+// newError builds the error a builtin returns and names that builtin in the
+// error's context: an error fs_read raises says "builtin.fs_read".
+//
+// The name is the one the builtin is registered under. raisingBuiltin finds
+// the registered function on the stack and builtinGoFuncs says what it is
+// registered as. The Go function's own name is never turned into the builtin's,
+// because the two need not match -- reverse is ReverseArray, uuid_v7 is UUIDv7,
+// every bin_ builtin is a Bin function -- and a context worked out from the Go
+// name named builtins no program can call. When the stack shows no registered
+// function the context is plain "builtin". That is the case for the pieces of
+// an executor-native builtin, which the engine calls directly, so code there
+// that raises the builtin's error sets the context itself, as resourceError and
+// RegisterTask do.
 func newError(format string, a ...any) *object.Error {
 	context := "builtin"
+	if name := raisingBuiltin(); name != "" {
+		context = "builtin." + name
+	}
+	return &object.Error{Message: fmt.Sprintf(format, a...), Context: context}
+}
+
+// builtinGoFuncs maps the Go function behind each registered builtin, spelled as
+// a stack frame spells it ("mutant/builtin.ReverseArray"), to the name it is
+// registered under ("reverse").
+//
+// A function registered under two names maps to "". A stack shows which
+// function ran, not which registry entry the program reached it through, so for
+// such a function there is no name to give -- which is why net_syn_scan has a
+// function of its own rather than being NetConnectScan a second time.
+var builtinGoFuncs map[string]string
+
+// This init fills builtinGoFuncs. It runs after the init above that appends
+// help, because a file's init functions run in the order they appear, so every
+// registered builtin is in the map. A package-level initializer could not build
+// it: the builtins call newError, which reads the map, so the map would depend
+// on itself through Builtins, and Go refuses that initialization cycle.
+func init() {
+	builtinGoFuncs = make(map[string]string, len(Builtins))
+	for _, def := range Builtins {
+		if def.Name == "" || def.Builtin == nil || def.Builtin.Fn == nil {
+			continue
+		}
+		function := runtime.FuncForPC(reflect.ValueOf(def.Builtin.Fn).Pointer())
+		if function == nil {
+			continue
+		}
+		goName := function.Name()
+		if registered, seen := builtinGoFuncs[goName]; seen && registered != def.Name {
+			builtinGoFuncs[goName] = ""
+			continue
+		}
+		builtinGoFuncs[goName] = def.Name
+	}
+}
+
+// builtinPackage is how a stack frame spells the start of a function in this
+// package.
+const builtinPackage = "mutant/builtin."
+
+// raisingBuiltin reads the stack of the goroutine raising an error and returns
+// the name of the builtin the error belongs to, or "" when the stack shows none.
+//
+// That builtin is the registered function an engine called: the one whose
+// caller is outside this package. A registered function can call another as
+// plain Go -- db_query is DbQueryNodes behind an argument check -- and an error
+// the inner one raises then belongs to the builtin the program called, so the
+// walk carries on outward for as long as the caller is still in this package.
+// It stops at the first caller outside it rather than reading on to the
+// outermost registered function, so that a builtin which ran a program of its
+// own would not be blamed for the calls that program makes.
+//
+// The stack is read as far as the answer needs, which can be all of it: an
+// error raised deep inside a recursive parser is still the parser builtin's.
+func raisingBuiltin() string {
 	pcs := make([]uintptr, 16)
-	n := runtime.Callers(2, pcs)
-	if n > 0 {
+	for {
+		n := runtime.Callers(2, pcs)
 		frames := runtime.CallersFrames(pcs[:n])
+		var walk stackWalk
 		for {
 			frame, more := frames.Next()
-			name := shortFunctionName(frame.Function)
-			if strings.Contains(frame.Function, "mutant/builtin.") {
-				if builtinName, ok := builtinNameFromFunctionName(name); ok {
-					context = "builtin." + builtinName
-					break
-				}
+			walk = readFrame(walk, frame.Function)
+			if walk.decided {
+				return walk.found
 			}
 			if !more {
 				break
 			}
 		}
-	}
-	return &object.Error{Message: fmt.Sprintf(format, a...), Context: context}
-}
-
-func shortFunctionName(name string) string {
-	if idx := strings.LastIndex(name, "."); idx >= 0 && idx+1 < len(name) {
-		return name[idx+1:]
-	}
-	return name
-}
-
-func builtinNameFromFunctionName(name string) (string, bool) {
-	if name == "" || name == "newError" || strings.HasPrefix(name, "func") {
-		return "", false
-	}
-
-	runes := []rune(name)
-	if len(runes) == 0 || !unicode.IsUpper(runes[0]) {
-		return "", false
-	}
-
-	if strings.HasPrefix(name, "Bin") && len(name) > len("Bin") {
-		return camelToSnake(name[len("Bin"):]), true
-	}
-
-	return camelToSnake(name), true
-}
-
-func camelToSnake(in string) string {
-	if in == "" {
-		return ""
-	}
-
-	runes := []rune(in)
-	var out []rune
-	for i, r := range runes {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				prev := runes[i-1]
-				nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
-				if unicode.IsLower(prev) || unicode.IsDigit(prev) || nextLower {
-					out = append(out, '_')
-				}
-			}
-			out = append(out, unicode.ToLower(r))
-			continue
+		if n < len(pcs) {
+			// The buffer held the whole stack: there is nothing further out.
+			return walk.found
 		}
-		out = append(out, r)
+		pcs = make([]uintptr, 2*len(pcs))
 	}
+}
 
-	return string(out)
+// stackWalk is raisingBuiltin's progress through a stack, innermost frame first.
+type stackWalk struct {
+	found    string // the outermost registered builtin read so far, "" if none or ambiguous
+	awaiting bool   // the frame just read was a registered builtin's; the next is its caller
+	decided  bool   // found is the answer
+}
+
+// readFrame moves the walk out by one frame, given the function that frame is
+// running.
+func readFrame(walk stackWalk, function string) stackWalk {
+	if walk.awaiting {
+		walk.awaiting = false
+		if !strings.HasPrefix(function, builtinPackage) {
+			walk.decided = true
+			return walk
+		}
+	}
+	if name, registered := builtinGoFuncs[function]; registered {
+		walk.found, walk.awaiting = name, true
+	}
+	return walk
 }
 
 func resultAndError(result object.Object, errObj *object.Error) object.Object {

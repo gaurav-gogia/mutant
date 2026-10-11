@@ -41,7 +41,7 @@ Core language primitives: collection and hash operations, first-class higher-ord
 | `concat(a: ARRAY, b: ARRAY) -> ARRAY` | all | Returns a new array with the elements of a followed by b. |
 | `contains(array: ARRAY, value) -> BOOLEAN` | all | Returns whether array contains value (by value equality). |
 | `debug_status() -> (HASH, ERROR)` | all | Returns runtime/debugger status information. |
-| `delete(hash: HASH, key: STRING\|INTEGER\|FLOAT\|BOOLEAN) -> HASH` | all | Returns a new hash with key removed. |
+| `delete(hash: HASH, key: STRING\|BYTES\|INTEGER\|FLOAT\|BOOLEAN) -> HASH` | all | Returns a new hash with key removed. |
 | `each(array: ARRAY, fn: FUNCTION) -> NULL` | all | Calls fn for each element for its side effects and returns null. fn takes (element) or (element, index). |
 | `entries(hash: HASH) -> ARRAY` | all | Returns the hash as an array of [key, value] pairs (sorted by key). |
 | `error(message: STRING, context?: STRING, related?: HASH) -> ERROR` | all | Constructs an error value carrying a message, an origin, and any related facts. Single-return: it cannot fail. |
@@ -49,16 +49,16 @@ Core language primitives: collection and hash operations, first-class higher-ord
 | `first(array: ARRAY) -> ANY` | all | Returns the first element of an array. |
 | `flatten(array: ARRAY) -> ARRAY` | all | Flattens one level of nested arrays. |
 | `floor(x: INTEGER\|FLOAT) -> INTEGER` | all | Largest integer <= x (INTEGER); an INTEGER is returned unchanged. |
-| `get(hash: HASH, key: STRING\|INTEGER\|FLOAT\|BOOLEAN, default) -> ANY` | all | Returns hash[key], or default when the key is absent. |
+| `get(hash: HASH, key: STRING\|BYTES\|INTEGER\|FLOAT\|BOOLEAN, default) -> ANY` | all | Returns hash[key], or default when the key is absent. |
 | `gets() -> STRING` | all | Reads a full line of input from stdin and returns it as a STRING (newline trimmed). Use to_int/to_float/parse_int to convert. |
-| `has_key(hash: HASH, key: STRING\|INTEGER\|FLOAT\|BOOLEAN) -> BOOLEAN` | all | Returns whether hash contains key. |
+| `has_key(hash: HASH, key: STRING\|BYTES\|INTEGER\|FLOAT\|BOOLEAN) -> BOOLEAN` | all | Returns whether hash contains key. |
 | `help(topic?: STRING, mode?: STRING) -> STRING` | all | Returns help text: an overview, a topic (keywords/builtins/examples/docs), or details for a specific builtin name. |
 | `index_of(array: ARRAY, value) -> INTEGER` | all | Returns the first index of value in array, or -1. |
 | `int_to_ip(n: INTEGER) -> STRING` | all | Converts a 32-bit integer to an IPv4 dotted-quad string. |
 | `is_null(v) -> BOOLEAN` | all | Returns whether v is NULL. |
 | `keys(hash: HASH) -> ARRAY` | all | Returns the hash keys as an array (sorted for determinism). |
 | `last(array: ARRAY) -> ANY` | all | Returns the last element of an array. |
-| `len(value: STRING\|BYTES\|ARRAY\|HASH) -> INTEGER` | all | Returns the length of a string, buffer, array, or hash. |
+| `len(value: STRING\|BYTES\|ARRAY\|HASH) -> INTEGER` | all | Returns the length of a string, buffer, array, or hash. A string is measured in bytes, not characters: `len("José")` is 5, because é takes two bytes. `s[i]`, a for-in loop, str_substr, str_char_at and the str_pad builtins count characters (runes), so `len(s)` is not their bound once a string holds a character that takes more than one byte. A byte that is not valid UTF-8 counts as one character, so it does not separate the two counts. |
 | `map(array: ARRAY, fn: FUNCTION) -> ARRAY` | all | Returns a new array of fn applied to each element. fn takes (element) or (element, index). |
 | `max(value: INTEGER\|FLOAT, ...values: INTEGER\|FLOAT) -> INTEGER\|FLOAT` | all | Returns the largest of the numeric arguments (original type preserved). |
 | `merge(a: HASH, b: HASH) -> HASH` | all | Returns a new hash combining a and b (b wins on key conflicts). |
@@ -80,7 +80,7 @@ Core language primitives: collection and hash operations, first-class higher-ord
 | `security_diagnostics() -> (HASH, ERROR)` | all | Returns security diagnostics for the current runtime. |
 | `serve_arg() -> (ANY, ERROR)` | all | Inside a net_serve handler, returns the shared arg passed to net_serve; null otherwise. |
 | `serve_conn() -> (INTEGER\|NULL, ERROR)` | all | Inside a net_serve handler, returns the connection handle (INTEGER); null otherwise. |
-| `set(hash: HASH, key: STRING\|INTEGER\|FLOAT\|BOOLEAN, value) -> HASH` | all | Returns a new hash with key set to value (original unchanged). |
+| `set(hash: HASH, key: STRING\|BYTES\|INTEGER\|FLOAT\|BOOLEAN, value) -> HASH` | all | Returns a new hash with key set to value (original unchanged). |
 | `sleep_ms(ms: INTEGER) -> (BOOLEAN, ERROR)` | all | Blocks the current handler for ms milliseconds. |
 | `slice(array: ARRAY, start: INTEGER, end: INTEGER) -> ARRAY` | all | Returns the sub-array array[start:end] (bounds-clamped). |
 | `sort(array: ARRAY) -> ARRAY` | all | Returns a sorted copy of an array (all numbers or all strings). |
@@ -165,7 +165,7 @@ Substring search, splitting/replacing, regular expressions, and fuzzy matching (
 | `text_contains(haystack: STRING, needle: STRING) -> BOOLEAN` | all | Returns whether a string contains a substring. |
 | `text_count(haystack: STRING, needle: STRING) -> INTEGER` | all | Counts non-overlapping substring occurrences. |
 | `text_fuzzy_find(query: STRING, candidates: ARRAY, maxDistance?: INTEGER) -> HASH` | all | Finds the closest fuzzy match in an array of candidate strings. |
-| `text_index(haystack: STRING, needle: STRING) -> INTEGER` | all | Returns the first index of substring occurrence, or -1. |
+| `text_index(haystack: STRING, needle: STRING) -> INTEGER` | all | Returns the byte offset of the first occurrence of needle in haystack, or -1. It counts bytes, as len does, so it is a position for bytes_slice and bytes_get. `s[i]`, str_substr and str_char_at count characters (runes), and the two agree only up to the first character that takes more than one byte: in "José: admin" the colon is byte 5 and character 4. A byte that is not valid UTF-8 counts as one character, so it does not separate them. |
 | `text_jaro_winkler(left: STRING, right: STRING) -> FLOAT` | all | Computes Jaro-Winkler string similarity score. |
 | `text_levenshtein(left: STRING, right: STRING) -> INTEGER` | all | Computes Levenshtein edit distance between two strings. |
 | `text_replace(text: STRING, old: STRING, new: STRING, count?: INTEGER) -> STRING` | all | Replaces substring occurrences in text; count limits how many (all by default). |

@@ -372,6 +372,14 @@ func NetConnectScan(args ...object.Object) object.Object {
 	}), nil)
 }
 
+// NetSynScan is net_syn_scan, the deprecated alias of net_connect_scan: the
+// same scan under its old name. It is registered as a function of its own,
+// rather than as NetConnectScan a second time, so that a stack can tell the
+// two names apart and an error's context names the one the program called.
+func NetSynScan(args ...object.Object) object.Object {
+	return NetConnectScan(args...)
+}
+
 func NetUDPScan(args ...object.Object) object.Object {
 	if len(args) != 4 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=4", len(args)))

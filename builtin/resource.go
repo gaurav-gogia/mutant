@@ -95,9 +95,9 @@ func PrepareResource(args []object.Object) (call ResourceCall, opened *object.Er
 func (c ResourceCall) Closeable() bool { return c.Closer != nil && c.Handle != nil }
 
 // resourceError builds a with_resource error carrying the builtin's own name as
-// its context. newError derives the context from the calling Go function, which
-// here is PrepareResource -- and "builtin.prepare_resource" names something no
-// program can call.
+// its context. newError names the registered builtin it finds on the stack, and
+// with_resource has none there to find: it is executor-native, so the engine
+// calls PrepareResource directly.
 func resourceError(format string, a ...any) *object.Error {
 	failure := newError(format, a...)
 	failure.Context = "builtin." + BuiltinNameWithResource

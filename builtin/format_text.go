@@ -856,7 +856,7 @@ func NdjsonStringify(args ...object.Object) object.Object {
 		if err != nil {
 			return resultAndError(nil, newError("ndjson_stringify: element %d: %s", i, err.Error()))
 		}
-		encoded, err := json.Marshal(value)
+		encoded, err := json.Marshal(jsonFloatsStayFloat(value))
 		if err != nil {
 			return resultAndError(nil, newError("ndjson_stringify: element %d: %s", i, err.Error()))
 		}

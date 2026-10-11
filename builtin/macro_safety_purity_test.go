@@ -124,7 +124,7 @@ var pureMembers = map[string][]string{
 	"mutant/global": nil,
 
 	// runtime, for two members only. newError labels a builtin's error with the
-	// Go function that raised it, and those two are how it reads the stack. The
+	// builtin it finds on the stack, and those two are how it reads the stack. The
 	// rest of the package is not pure: GOOS, GOARCH, Version and Stack all report
 	// on the running process, and this same package uses them for the status
 	// builtins, which are refused.

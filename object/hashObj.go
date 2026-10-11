@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 )
 
@@ -68,11 +67,7 @@ func (h *Hash) Type() ObjectType { return HASH_OBJ }
 func (h *Hash) Inspect() string {
 	var out bytes.Buffer
 
-	pairs := make([]HashPair, 0, len(h.Pairs))
-	for _, pair := range h.Pairs {
-		pairs = append(pairs, pair)
-	}
-	sort.Slice(pairs, func(i, j int) bool { return hashKeyLess(pairs[i].Key, pairs[j].Key) })
+	pairs := h.SortedPairs()
 
 	rendered := make([]string, 0, len(pairs))
 	for _, pair := range pairs {

@@ -74,7 +74,12 @@ func RegisterTask() (int64, *object.Error) {
 	taskRegistry.Lock()
 	if taskRegistry.live >= maxLiveTasks {
 		taskRegistry.Unlock()
-		return 0, newError("spawn: too many tasks running at once (limit %d); wait for some with task_wait", maxLiveTasks)
+		// spawn is the builtin that failed. The engine runs spawn itself and
+		// calls this from there, so no registered function is on the stack
+		// for newError to name, and the context is set here instead.
+		failure := newError("spawn: too many tasks running at once (limit %d); wait for some with task_wait", maxLiveTasks)
+		failure.Context = "builtin." + BuiltinNameSpawn
+		return 0, failure
 	}
 	id := taskRegistry.nextID
 	taskRegistry.nextID++
@@ -166,7 +171,9 @@ func lookupTask(op string, arg object.Object) (*managedTask, *object.Error) {
 // The error slot carries whatever stopped the task, so a failed task reads the
 // same way as any failed builtin. Without a timeout it waits indefinitely; with
 // one, running out of time is itself reported as an error, because there is no
-// value to hand back and returning null would look like success.
+// value to hand back and returning null would look like success. A timeout of
+// zero does not wait at all: it collects a task that has already finished and
+// reports one that has not as still running.
 //
 // Collecting a task releases its handle, the way closing a connection releases
 // that one: the result has been handed over and there is nothing left to hold.
@@ -191,11 +198,7 @@ func TaskWait(args ...object.Object) object.Object {
 	}
 
 	if timeoutMs >= 0 {
-		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-task.done:
-		case <-timer.C:
+		if !task.finishedWithin(timeoutMs) {
 			return resultAndError(nil, newError("task_wait: task is still running after %dms", timeoutMs))
 		}
 	} else {
@@ -208,6 +211,37 @@ func TaskWait(args ...object.Object) object.Object {
 		return resultAndError(nil, taskFailureError(task.failure))
 	}
 	return resultAndError(task.result, nil)
+}
+
+// finishedWithin waits up to timeoutMs milliseconds for the task and reports
+// whether it has finished. No timer is started for a zero timeout or for a
+// task that has already finished: either way the answer comes without waiting.
+//
+// The answer is read from done once the wait is over, never from which select
+// case fired. When the task has finished and the timer is due as well, select
+// picks between them at random, so going by the timer would report a finished
+// task as still running -- for a zero timeout, whose timer is due at once, on
+// about half the polls of a finished task.
+func (t *managedTask) finishedWithin(timeoutMs int64) bool {
+	if timeoutMs > 0 && !t.hasFinished() {
+		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-t.done:
+		case <-timer.C:
+		}
+	}
+	return t.hasFinished()
+}
+
+// hasFinished reports whether the task has finished, without waiting.
+func (t *managedTask) hasFinished() bool {
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // failureSite is what a task failure offers about where it happened. The VM

@@ -268,7 +268,7 @@ case\update.dat
 
 **Filter `is_dir` before you pass paths to anything.** `fs_walk` returns the
 root and every directory under it alongside the files. Hand a directory to
-`fs_hash` and you get a read error rather than a hash. Each entry already
+`fs_hash` and it is refused: a directory has no digest. Each entry already
 carries `depth`, `is_dir`, `mod_time`, `name`, `path` and `size`, so you rarely
 need a second `fs_stat`.
 

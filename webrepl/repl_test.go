@@ -444,10 +444,13 @@ policy_allow("allow_policy", {"user": "analyst"})
 		}
 	})
 
+	// The INTEGER comes back an INTEGER. This used to want "7.000000": the
+	// cache kept a value as JSON, so every number came back a FLOAT
+	// (M26-BLT-010).
 	t.Run("cache roundtrip", func(t *testing.T) {
 		got := evalInput(t, repl, `cache_open("session"); cache_put("session", "k", 7); let entry, err = cache_get("session", "k"); entry["value"]`)
-		if got != "7.000000" {
-			t.Fatalf("cache roundtrip output = %q, want %q", got, "7.000000")
+		if got != "7" {
+			t.Fatalf("cache roundtrip output = %q, want %q", got, "7")
 		}
 	})
 

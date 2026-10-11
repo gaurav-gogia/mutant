@@ -371,7 +371,9 @@ func DeprecatedBy(name string) (string, bool) {
 // hashableKinds is the set of kinds that implement object.Hashable, and so the
 // only kinds a hash key may be — see hashableKey in collections_builtins.go,
 // which rejects everything else with "must be a hashable type".
-var hashableKinds = []ParamKind{ParamString, ParamInt, ParamFloat, ParamBool}
+// TestHashableKindsMatchObjectHashable holds it to that. BYTES was once left
+// out, so the editor flagged buffer keys that has_key, get, set and delete take.
+var hashableKinds = []ParamKind{ParamString, ParamBytes, ParamInt, ParamFloat, ParamBool}
 
 // param builds one parameter contract: the spelling used in the signature, the
 // prose shown in hover, and the set of value kinds the builtin accepts there.
@@ -431,10 +433,16 @@ var builtinDocs = map[string]builtinDoc{
 	BuiltinNameLen: {
 		signature: "len(value)",
 		// Verified against builtin/len.go: the switch accepts Array, String,
-		// Bytes and Hash. A buffer's length is its byte count.
-		summary: "Returns the length of a string, buffer, array, or hash.",
+		// Bytes and Hash. A buffer's length is its byte count, and so is a
+		// string's -- len.go takes len of the Go string, which counts bytes --
+		// while s[i], for-in, str_substr, str_char_at and str_pad_* count runes.
+		// The two agree until a string holds a character that takes more than
+		// one byte -- a byte that is not valid UTF-8 decodes as one rune, one
+		// byte wide, so it does not separate them -- which is why the summary
+		// names the unit (M26-BLT-012).
+		summary: "Returns the length of a string, buffer, array, or hash. A string is measured in bytes, not characters: `len(\"José\")` is 5, because é takes two bytes. `s[i]`, a for-in loop, str_substr, str_char_at and the str_pad builtins count characters (runes), so `len(s)` is not their bound once a string holds a character that takes more than one byte. A byte that is not valid UTF-8 counts as one character, so it does not separate the two counts.",
 		params:  []builtinParamDoc{param("value", "String, buffer, array, or hash to measure.", ParamString, ParamBytes, ParamArray, ParamHash)},
-		returns: ret("the length of a string, buffer, array, or hash", ParamInt)},
+		returns: ret("the length: bytes for a string or buffer, elements for an array, pairs for a hash", ParamInt)},
 	BuiltinNameHelp: {signature: "help(topic?, mode?)", summary: "Returns help text: an overview, a topic (keywords/builtins/examples/docs), or details for a specific builtin name.", params: []builtinParamDoc{param("topic?", "Optional topic or builtin name.", ParamString), param("mode?", "Optional rendering mode.", ParamString)}, returns: ret("the rendered help text", ParamString)},
 	// putln takes no arity check at all and prints each argument separated by a
 	// space (builtin/putln.go) — the `putln(value)` spelling it carried before
@@ -1011,7 +1019,7 @@ var builtinDocs = map[string]builtinDoc{
 		signature: "task_wait(handle, timeoutMs?)", summary: "Waits for a spawned task and returns the value its function returned. Whatever stopped the task arrives in the error slot. Without a timeout it waits indefinitely; running out of time is reported as an error and leaves the task collectable. Collecting a task releases its handle, so wait for it once.",
 		params: []builtinParamDoc{
 			param("handle", "Task handle from spawn.", ParamInt),
-			param("timeoutMs?", "How long to wait, in milliseconds; omit to wait indefinitely.", ParamInt),
+			param("timeoutMs?", "How long to wait, in milliseconds; 0 to collect the task only if it has already finished, omit to wait indefinitely.", ParamInt),
 		},
 		returns: pairRet("the value the task's function returned", ParamAny)},
 	BuiltinNameTaskDone: {
@@ -1733,14 +1741,14 @@ var builtinDocs = map[string]builtinDoc{
 		signature: "has_key(hash, key)", summary: "Returns whether hash contains key.",
 		params: []builtinParamDoc{
 			param("hash", "Hash to test.", ParamHash),
-			param("key", "Hashable key: string, integer, float, or boolean.", hashableKinds...),
+			param("key", "Hashable key: string, buffer, integer, float, or boolean. A buffer and a string with the same bytes are different keys.", hashableKinds...),
 		},
 		returns: ret("whether hash contains key", ParamBool)},
 	BuiltinNameGet: {
 		signature: "get(hash, key, default)", summary: "Returns hash[key], or default when the key is absent.",
 		params: []builtinParamDoc{
 			param("hash", "Hash to read from.", ParamHash),
-			param("key", "Hashable key: string, integer, float, or boolean.", hashableKinds...),
+			param("key", "Hashable key: string, buffer, integer, float, or boolean. A buffer and a string with the same bytes are different keys.", hashableKinds...),
 			param("default", "Value returned when the key is absent; any type is accepted.", ParamAny),
 		},
 		returns: ret("the value stored under key, or the supplied default when the key is absent", ParamAny)},
@@ -1748,7 +1756,7 @@ var builtinDocs = map[string]builtinDoc{
 		signature: "set(hash, key, value)", summary: "Returns a new hash with key set to value (original unchanged).",
 		params: []builtinParamDoc{
 			param("hash", "Hash to copy.", ParamHash),
-			param("key", "Hashable key: string, integer, float, or boolean.", hashableKinds...),
+			param("key", "Hashable key: string, buffer, integer, float, or boolean. A buffer and a string with the same bytes are different keys.", hashableKinds...),
 			param("value", "Value to store; any type is accepted.", ParamAny),
 		},
 		returns: ret("a new hash with key set to value (original unchanged)", ParamHash)},
@@ -1763,7 +1771,7 @@ var builtinDocs = map[string]builtinDoc{
 		signature: "delete(hash, key)", summary: "Returns a new hash with key removed.",
 		params: []builtinParamDoc{
 			param("hash", "Hash to copy.", ParamHash),
-			param("key", "Hashable key: string, integer, float, or boolean.", hashableKinds...),
+			param("key", "Hashable key: string, buffer, integer, float, or boolean. A buffer and a string with the same bytes are different keys.", hashableKinds...),
 		},
 		returns: ret("a new hash with key removed", ParamHash)},
 	// security: Go binary analysis (GoReSym) — parses PE/ELF/Mach-O Go binaries
@@ -1904,13 +1912,18 @@ var builtinDocs = map[string]builtinDoc{
 			param("needle", "Substring to search for.", ParamString),
 		},
 		returns: ret("whether a string contains a substring", ParamBool)},
+	// text_index answers strings.Index, a byte offset (builtin/text_matching.go),
+	// while s[i], str_substr and str_char_at count runes. The two agree only up
+	// to the first character that takes more than one byte -- a byte that is not
+	// valid UTF-8 decodes as one rune, one byte wide, so it does not separate
+	// them -- which is why the summary names the unit (M26-BLT-012).
 	BuiltinNameTextIndex: {
-		signature: "text_index(haystack, needle)", summary: "Returns the first index of substring occurrence, or -1.",
+		signature: "text_index(haystack, needle)", summary: "Returns the byte offset of the first occurrence of needle in haystack, or -1. It counts bytes, as len does, so it is a position for bytes_slice and bytes_get. `s[i]`, str_substr and str_char_at count characters (runes), and the two agree only up to the first character that takes more than one byte: in \"José: admin\" the colon is byte 5 and character 4. A byte that is not valid UTF-8 counts as one character, so it does not separate them.",
 		params: []builtinParamDoc{
 			param("haystack", "String to search in.", ParamString),
 			param("needle", "Substring to search for.", ParamString),
 		},
-		returns: ret("the first index of substring occurrence, or -1", ParamInt)},
+		returns: ret("the byte offset of the first occurrence, or -1", ParamInt)},
 	BuiltinNameTextCount: {
 		signature: "text_count(haystack, needle)", summary: "Counts non-overlapping substring occurrences.",
 		params: []builtinParamDoc{
@@ -2050,7 +2063,7 @@ var builtinDocs = map[string]builtinDoc{
 		params: []builtinParamDoc{
 			param("name", "Cache namespace identifier.", ParamString),
 			param("key", "Cache key string.", ParamString),
-			param("value", "Value to store; any type is accepted.", ParamAny),
+			param("value", "Value to store: a STRING, BYTES, INTEGER, FLOAT, BOOLEAN or NULL, or an ARRAY, HASH, STRUCT or ENUM_VALUE made of them. cache_get returns it with the same type and value; anything else, a function for one, is refused.", ParamAny),
 			param("ttlSeconds?", "Optional expiration in seconds (0 for no expiry).", ParamInt),
 		},
 		returns: pairRet("true once the value has been stored", ParamBool)},

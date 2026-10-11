@@ -36,6 +36,19 @@ func FsHash(args ...object.Object) object.Object {
 		algo = strings.ToLower(strings.TrimSpace(algoObj.Value))
 	}
 
+	// A path that stats as a directory is refused here, in fs_hash's own
+	// words and the same on every host. Read as a file, a directory failed in
+	// the host's: "Incorrect function." on Windows, "is a directory" on Linux,
+	// and "permission denied" for one a Unix user may not list, so a script
+	// could not tell the case apart portably (M26-BLT-002). The stat is by
+	// name, not on an open handle, because opening a directory to read it
+	// needs the right to list it, and the refusal must not depend on that
+	// right.
+	if info, err := os.Stat(pathObj.Value); err == nil && info.IsDir() {
+		return resultAndError(nil, newError("fs_hash: %s is a directory, and a directory has no digest; "+
+			"hash each file in it instead (fs_walk lists them)", pathObj.Value))
+	}
+
 	data, err := os.ReadFile(pathObj.Value)
 	if err != nil {
 		return resultAndError(nil, newError("fs_hash: %s", err.Error()))

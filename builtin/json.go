@@ -30,7 +30,7 @@ func JsonStringify(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("argument to `json_stringify` could not be converted to JSON: %s", err.Error()))
 	}
 
-	bytes, err := json.Marshal(value)
+	bytes, err := json.Marshal(jsonFloatsStayFloat(value))
 	if err != nil {
 		return resultAndError(nil, newError("argument to `json_stringify` could not be converted to JSON: %s", err.Error()))
 	}

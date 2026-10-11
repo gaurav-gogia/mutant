@@ -941,6 +941,29 @@ into U+FFFD, `str_substr` and `str_char_at` index by rune so their offsets
 disagree with `bytes_get`'s, and the `regex_*` family reads invalid bytes as
 U+FFFD. None of those fail. They return a plausible wrong answer.
 
+The same two units meet inside text, wherever a position passes from one
+builtin to another. `s[i]`, a `for` loop over a string, `str_substr`,
+`str_char_at` and the width given to `str_pad_left` and `str_pad_right` count
+characters -- runes. `len(s)` and `text_index` count bytes, as `bytes_get` and
+`bytes_slice` do. The two agree up to the first character that takes more than
+one byte and differ after it. A byte that is not valid UTF-8 counts as one
+character, one byte wide, so it does not separate them. `str_substr` and `s[i]`
+do not fail when the two differ: they answer from the wrong place, or with
+nothing once the offset runs past the last character:
+
+```mutant
+let s = "José: admin";
+let at = text_index(s, ":");            // 5: é is two bytes
+putln(len(s));                          // 12 bytes, 11 characters
+putln(str_substr(s, at, 1));            // " ", not ":"
+let name, err = bytes_slice(s, 0, at);  // bytes_slice counts bytes too
+if (err) { putln(err); } else { putln(name); }  // José
+```
+
+So a position from `text_index` belongs to the byte builtins, and a bound for
+`s[i]` or `str_char_at` comes from the characters themselves -- `for (i, c in s)`
+walks them -- rather than from `len`.
+
 There are no `bytes` literals. A buffer comes from a producer or a conversion:
 
 ```
