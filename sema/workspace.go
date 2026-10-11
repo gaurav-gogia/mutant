@@ -202,7 +202,10 @@ func (w *Workspace) URIOf(key string) (string, bool) {
 
 // resolveImport walks the same candidates module.Resolver walks, in the same
 // order -- the importing file's own directory, then each search path -- and
-// substitutes "is this file indexed?" for "does this file exist?".
+// substitutes "is this file indexed?" for "does this file exist?". It walks
+// one fewer: an importer filed under a path with no directory in it ("a.mut",
+// as `mutant lint .` files it) gets no own-directory candidate, where
+// module.Resolver joins the import onto "." (M26-SEM-033).
 //
 // That substitution is the whole of the editor's honesty. It never stats, so it
 // is safe on the keystroke path, and it can only ever resolve to a file the
@@ -212,17 +215,44 @@ func (w *Workspace) URIOf(key string) (string, bool) {
 //
 // The caller must hold at least a read lock.
 func (w *Workspace) resolveImport(fromKey, spelling string) (string, bool) {
+	key, _, ok := w.resolveImportFrom(fromKey, spelling)
+	return key, ok
+}
+
+// resolveImportFrom is resolveImport given the importer by a path rather than a
+// key, and it also returns the candidate that matched, cleaned: the path
+// module.Resolver.Resolve returns for the same import, built the same way -- an
+// absolute spelling on its own, and any other joined onto the importer's
+// directory or, when no indexed file is there, onto the first search path that
+// has one. The exception is the one resolveImport names: an importer whose path
+// has no directory in it is not given its own directory, so the import comes
+// back unresolved, or as a search path's copy, where the loader takes the file
+// beside the importer. The loader's name for the file it reaches is that path
+// rendered for a reader (module.Module.Display), so on Windows, where a key
+// folds letter case, the letters the import wrote are named in the case it
+// wrote them in, which need not be the case the workspace filed the file under
+// (ModuleFacts.Path).
+//
+// from must be clean. Every cleaned path whose key is the importer's gives the
+// key resolveImport gives, and the returned path is the only answer its letters
+// can change; a path that is not clean need not have the importer's directory
+// as its filepath.Dir -- a/b.mut/. has a/b.mut -- and a relative import is then
+// looked for in another directory.
+//
+// The caller must hold at least a read lock.
+func (w *Workspace) resolveImportFrom(from, spelling string) (key, path string, ok bool) {
 	if spelling == "" {
-		return "", false
+		return "", "", false
 	}
 	local := filepath.FromSlash(spelling)
 
-	indexed := func(candidate string) (string, bool) {
+	indexed := func(candidate string) (string, string, bool) {
+		candidate = filepath.Clean(candidate)
 		key := CanonicalKey(candidate)
 		if _, known := w.facts[key]; known {
-			return key, true
+			return key, candidate, true
 		}
-		return "", false
+		return "", "", false
 	}
 
 	// An absolute import bypasses the search entirely: there is exactly one
@@ -231,17 +261,17 @@ func (w *Workspace) resolveImport(fromKey, spelling string) (string, bool) {
 		return indexed(local)
 	}
 
-	if dir := filepath.Dir(fromKey); dir != "" && dir != "." {
-		if key, ok := indexed(filepath.Join(dir, local)); ok {
-			return key, true
+	if dir := filepath.Dir(from); dir != "" && dir != "." {
+		if key, path, ok := indexed(filepath.Join(dir, local)); ok {
+			return key, path, true
 		}
 	}
 	for _, dir := range w.searchPaths {
-		if key, ok := indexed(filepath.Join(dir, local)); ok {
-			return key, true
+		if key, path, ok := indexed(filepath.Join(dir, local)); ok {
+			return key, path, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // Namespaces returns the aliases the module filed under key binds, each mapped
@@ -442,6 +472,18 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 		// closure was walked without meeting a cycle cannot lead to one from
 		// here either, so it is walked once rather than once per import.
 		explored = make(map[string]bool, 8)
+		// path is this file as the workspace filed it, cleaned, standing for
+		// the path a build entered here would be given: module.Load cleans the
+		// entry it is given before it names it or resolves an import from its
+		// directory. Uncleaned, a path filed with a trailing separator or a last
+		// element of "." or ".." -- a document opened as file:///.../a.mut/. --
+		// keeps this file's key, but its filepath.Dir is not this file's
+		// directory, so a relative import is looked for in another directory:
+		// it is missed, or it reaches another file -- "../b.mut" from
+		// proj/a.mut/. is proj/b.mut, not the b.mut beside proj. Every file
+		// below is reached at the path resolveImportFrom returns for the
+		// import that names it.
+		path = filepath.Clean(w.displayName(key))
 	)
 	for _, imported := range facts.Imports {
 		duplicate := false
@@ -452,14 +494,14 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 				Range:  imported.Range,
 				Code:   DiagDuplicateNamespace,
 				Message: duplicateNamespaceMessage(
-					w.displayName(key), imported.Alias, first, imported.Spelling,
+					path, imported.Alias, first, imported.Spelling,
 				),
 			})
 		} else {
 			boundBy[imported.Alias] = imported.Spelling
 		}
 
-		target, ok := w.resolveImport(key, imported.Spelling)
+		target, targetPath, ok := w.resolveImportFrom(path, imported.Spelling)
 		if !ok {
 			diags = append(diags, Diagnostic{
 				Module:  key,
@@ -474,7 +516,7 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 		if duplicate {
 			continue
 		}
-		if code, message, refused := w.firstRefusalLocked(key, target, explored); refused {
+		if code, message, refused := w.firstRefusalLocked(key, path, target, targetPath, explored); refused {
 			diags = append(diags, Diagnostic{
 				Module:  key,
 				Range:   imported.Range,
@@ -501,16 +543,29 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 // either. A walk that met one returns before marking anything done, so the
 // next import walks that ground again and reports it too.
 //
+// entry and target are keys; entryPath and targetPath are the paths a build
+// reaches them by -- the entry as the build was given it, cleaned, and the
+// target as resolveImportFrom returned it. The entry is named by entryPath, and
+// every file below it by the path the loader's walk reaches it through -- the
+// path module.Resolver.Resolve returns for the import that reached it, cleaned:
+// an absolute spelling on its own, or the spelling joined onto the directory of
+// the file that wrote it or onto the search path it was found under -- and not
+// by the path the workspace filed it under. On Windows the two differ when an
+// import spells a file in another letter case, and a cycle's chain can then
+// name one file two ways, as module.CycleError does. What is on the path and
+// what is done stay keyed by key, so a spelling changes what a refusal says and
+// never whether or where it is raised.
+//
 // The caller must hold at least a read lock.
-func (w *Workspace) firstRefusalLocked(entry, target string, done map[string]bool) (DiagCode, string, bool) {
-	stack := []string{entry}
+func (w *Workspace) firstRefusalLocked(entry, entryPath, target, targetPath string, done map[string]bool) (DiagCode, string, bool) {
+	stack := []string{entryPath}
 	onPath := map[string]bool{entry: true}
 
-	var walk func(string) (DiagCode, string, bool)
-	walk = func(current string) (DiagCode, string, bool) {
+	var walk func(current, path string) (DiagCode, string, bool)
+	walk = func(current, path string) (DiagCode, string, bool) {
 		if onPath[current] {
-			chain := append(append([]string(nil), stack...), current)
-			return DiagImportCycle, importCycleMessage(w.displayChain(chain)), true
+			chain := append(append([]string(nil), stack...), path)
+			return DiagImportCycle, importCycleMessage(chain), true
 		}
 		if done[current] {
 			return 0, "", false
@@ -521,21 +576,21 @@ func (w *Workspace) firstRefusalLocked(entry, target string, done map[string]boo
 			return 0, "", false
 		}
 		onPath[current] = true
-		stack = append(stack, current)
+		stack = append(stack, path)
 		boundBy := make(map[string]string, len(facts.Imports))
 		for _, imported := range facts.Imports {
 			// The loader's order: a repeated name is refused before its
 			// import is resolved, so nothing below it is reached.
 			if first, taken := boundBy[imported.Alias]; taken {
 				return DiagDuplicateNamespace, duplicateNamespaceMessage(
-					w.displayName(current), imported.Alias, first, imported.Spelling), true
+					path, imported.Alias, first, imported.Spelling), true
 			}
 			boundBy[imported.Alias] = imported.Spelling
-			next, ok := w.resolveImport(current, imported.Spelling)
+			next, nextPath, ok := w.resolveImportFrom(path, imported.Spelling)
 			if !ok {
 				continue
 			}
-			if code, message, refused := walk(next); refused {
+			if code, message, refused := walk(next, nextPath); refused {
 				return code, message, true
 			}
 		}
@@ -544,18 +599,7 @@ func (w *Workspace) firstRefusalLocked(entry, target string, done map[string]boo
 		done[current] = true
 		return 0, "", false
 	}
-	return walk(target)
-}
-
-// displayChain renders module keys the way a human spelled them.
-//
-// The caller must hold the lock.
-func (w *Workspace) displayChain(keys []string) []string {
-	shown := make([]string, len(keys))
-	for i, key := range keys {
-		shown[i] = w.displayName(key)
-	}
-	return shown
+	return walk(target, targetPath)
 }
 
 // displayName renders a module for a human: the path as it was spelled, never

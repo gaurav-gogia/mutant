@@ -170,6 +170,96 @@ func (s *Snapshot) ModuleMemberDefinition(pos lsp.Position) (lsp.Location, bool)
 	return declaration, true
 }
 
+// ModuleMemberNameAt reports whether the position is on the member half of an
+// `ns.member` that this file's resolver reads as a reach into another module,
+// because ns is an alias one of this file's imports binds -- whether or not the
+// module behind it has been read.
+//
+// To that reading the name belongs to the module: what it refers to is
+// declared there or nowhere, and never in this file. ModuleMemberDefinition
+// and ModuleMemberHover decline when nothing has read the module for this
+// file, when the build refuses the reach because the module keeps the name
+// private or does not declare it, and when this file declares an enum of the
+// alias's name below the use, which they count for the whole file. A caller
+// must then show nothing rather than fall through to the file-local answers,
+// which answer as though the member were a bare name in this file:
+// go-to-definition lands on the use itself, and hover calls it an identifier,
+// or shows the card of the builtin that shares its spelling.
+//
+// A value bound under the alias's name changes none of this, wherever it is
+// bound. The compiler asks about the import before it asks about any binding,
+// and binds a file's aliases for the whole file, so behind
+// `let stats = {"mean": 1};` in a function body `stats.mean` is still a reach
+// into the module. Resolving `stats` through this file's graph would find the
+// let, and would answer for a field the build never reads.
+//
+// An enum of the alias's name does change it, from the enum's declaration on.
+// The compiler asks about an enum before the import, as ResolveField does, and
+// knows the enums whose statements it has compiled so far: `stats.mean`
+// written above `enum stats { mean };` still reads the module, and below it
+// reads the enum (parity's TestAnEnumDeclaredBelowTheUseDoesNotHideTheImport
+// runs both). So the enum is asked about with sema's EnumDeclaredBefore, at
+// the start of the use, and not with LocalScopeAt's Enums, which counts it for
+// the whole file and which the other resolutions in this package still use.
+//
+// The reading is this file's, and the build's can differ from it. An enum of
+// the alias's name declared by a module compiled before this one is one the
+// compiler knows, because its enums are the program's and not the file's, so
+// the build reads `stats.mean` as that enum's variant, while this file's graph
+// holds only the enums this file declares. Where the module behind the alias
+// declares no mean, or has not been read, this reports true there and a
+// caller shows nothing where the build has an answer: an answer missing rather
+// than a wrong one. Where the module does declare mean, ModuleMemberDefinition
+// and ModuleMemberHover answer with that declaration, which is not what the
+// build reads: the same gap, seen from the other side. Source order and the
+// compiler's order also part in three places, where this file's reading is
+// not the build's (M26-LSP-050). The compiler compiles a for loop's post
+// section after the loop's body: a use in the post reads an enum of the
+// alias's name that the body declares, where in source order the enum comes
+// after the use and this reads the module, and a use in the body reads the
+// module where an enum declared in the post comes first in source and this
+// reports false. It never compiles a top-level macro's body, whose enum this
+// still counts. And it compiles a macro's template where the macro is called,
+// which can be above an enum the template is written below.
+//
+// Only the member half counts. `stats` in `stats.mean` names the alias, which
+// this file declares, so a caller still asks the file-local answers about it.
+func (s *Snapshot) ModuleMemberNameAt(pos lsp.Position) bool {
+	if s == nil || s.Program == nil {
+		return false
+	}
+	field, found := s.fieldExpressionAt(pos)
+	if !found {
+		return false
+	}
+	line, column := s.TokenPosition(pos)
+	if rng, ok := s.Program.RangeOf(field.node.Field); !ok || !rangeContains(rng, line, column) {
+		return false
+	}
+	graph, use := s.Graph(), field.rng.Start
+	local := s.localScopeAt(pos)
+	local.Enums = func(name string) bool {
+		return graph.EnumDeclaredBefore(name, use.Line, use.Column)
+	}
+	if s.workspace != nil && s.ModuleKey != "" {
+		switch s.workspace.ResolveField(s.ModuleKey, local, field.left, field.field).Kind {
+		case sema.FieldModuleMember, sema.FieldRefused:
+			return true
+		}
+		return false
+	}
+	// With no workspace or no module key -- an untitled buffer, which has no
+	// path -- nothing resolves this file's imports, so nothing has read the
+	// module behind an alias. Which aliases the imports bind is written here
+	// all the same, and that is all ResolveField's rule asks: an alias names
+	// its module unless an enum of that name is declared before the use.
+	if local.Enums(field.left) {
+		return false
+	}
+	_, imported := importNamespaces(s.Program.Statements)[field.left]
+	return imported
+}
+
 // ModuleMemberDiagnostics reports the reaches into another module that the
 // compiler will refuse: a private name, and a name the module does not declare.
 //

@@ -185,7 +185,10 @@ func (s *Snapshot) structHeldBy(declaration *mast.Identifier) string {
 // owning struct nothing could work out resolves to itself, so the editor
 // reports "this is a field called x" rather than reporting nothing. It is the
 // honest answer to `p.x` where p's type is unknown -- the name is certainly a
-// field, and which one is certainly not known.
+// field, and which one is certainly not known. Go-to-definition and hover do
+// not take it for the member of an import namespace, which this file reads as
+// the module's: they ask ModuleMemberNameAt before they reach it
+// (M26-LSP-048).
 func (s *Snapshot) resolveDefinition(pos lsp.Position) (binding, bool) {
 	if s == nil || s.Program == nil {
 		return binding{}, false

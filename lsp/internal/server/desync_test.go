@@ -636,8 +636,8 @@ func TestADesyncedModuleAnswersNothingAndIsNotReportedMissing(t *testing.T) {
 		Position:     lsp.Position{Line: 1, Character: 18},
 	}
 	// Each question is answered with what it says out of lib.mut, or "". What
-	// an unread module leaves behind -- `mean` described as a bare identifier
-	// of main.mut -- is not lib.mut speaking, and is not counted.
+	// main.mut says on its own is a separate question, asked below once
+	// lib.mut is out of step.
 	fromLib := func() map[string]string {
 		said := map[string]string{}
 		definition, _ := s.definition(nil, &lsp.DefinitionParams{TextDocumentPositionParams: onMean})
@@ -683,6 +683,16 @@ func TestADesyncedModuleAnswersNothingAndIsNotReportedMissing(t *testing.T) {
 	requireDesynced(t, s, libURI)
 	for question, answer := range fromLib() {
 		t.Errorf("%s still answers from the desynced lib.mut: %s", question, answer)
+	}
+	// Nor does main.mut answer in lib.mut's place. `mean` is declared in
+	// lib.mut and nowhere in main.mut, and the importer's own walk used to
+	// answer anyway: definition with the use's own range, hover with
+	// "identifier `mean`" (M26-LSP-048).
+	if definition, _ := s.definition(nil, &lsp.DefinitionParams{TextDocumentPositionParams: onMean}); describeAnswer(definition) != "" {
+		t.Errorf("definition of stats.mean with lib.mut out of step answered %s, which main.mut cannot know", describeAnswer(definition))
+	}
+	if hover, _ := s.hover(nil, &lsp.HoverParams{TextDocumentPositionParams: onMean}); hover != nil {
+		t.Errorf("hover on stats.mean with lib.mut out of step answered %+v, which main.mut cannot know", hover.Contents)
 	}
 
 	// main.mut analysed again, as the next keystroke in it would.

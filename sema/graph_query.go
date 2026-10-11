@@ -120,7 +120,10 @@ func lastStartingAtOrBefore(n, line, column int, rangeAt func(int) ast.Range) in
 // It is what a caller asks after Resolve has come back empty: "the cursor is on
 // a field name, even though nothing here knows whose". The language server
 // answers such a position with the name itself rather than with nothing, so
-// that a struct whose type it could not infer still hovers as a field.
+// go-to-definition on `p.x` lands on that x. The member of an import namespace
+// is the exception: the language server reads that name as the module's, and
+// go-to-definition and hover answer it out of the module or not at all
+// (M26-LSP-048).
 func (g *Graph) FieldNameAt(line, column int) (*ast.Identifier, ast.Range, bool) {
 	if g == nil {
 		return nil, ast.Range{}, false
@@ -317,6 +320,41 @@ func valueBoundIn(scope *Scope, name string, line, column int) bool {
 func (g *Graph) EnumDeclared(name string) bool {
 	declared, _, found := g.TypeNamed(name)
 	return found && declared.Kind == KindEnum
+}
+
+// EnumDeclaredBefore reports whether this file declares an enum under a name
+// at or before the position: EnumDeclared, asked of the file only as far as
+// the position.
+//
+// Source order stands for the order the compiler learns this file's enums in.
+// The ScopeCtx the compiler builds reads its enumDefinitions, which gains an
+// enum when the enum's statement is compiled, so `stats.mean` written above
+// `enum stats { mean };` is compiled before that enum is known, and reads the
+// import of that name unless a module compiled earlier declares an enum stats.
+// EnumDeclared, which LocalScopeAt hands to every caller, counts the enum for
+// the whole file.
+//
+// The two orders part in three places, and the answer there is not the
+// compiler's (M26-LSP-050). A for loop's post section is written before the
+// loop's body and compiled after it, so an enum declared in the post is
+// counted for a use in the body, which the compiler reads as the import, and
+// an enum declared in the body is not counted for a use in the post, which
+// the compiler reads as the enum. An enum in a top-level macro's body is
+// counted although the compiler never compiles it: DefineMacros removes the
+// definition first. And a use in a macro's template is compiled where the
+// macro is called, which can be above an enum the template is written below.
+// Like EnumDeclared it is file-local, for EnumDeclared's reason.
+func (g *Graph) EnumDeclaredBefore(name string, line, column int) bool {
+	if name == "" {
+		return false
+	}
+	for _, declared := range g.typeOrder() {
+		if declared.Kind == KindEnum && declared.Name == name &&
+			startsAtOrBefore(declared.Anchor(), line, column) {
+			return true
+		}
+	}
+	return false
 }
 
 // scopeAt returns the innermost scope covering the position.

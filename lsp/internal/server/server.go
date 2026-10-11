@@ -498,6 +498,14 @@ func (s *Server) hover(_ *glsp.Context, params *lsp.HoverParams) (*lsp.Hover, er
 	// whatever `ns` alone looks like and describe the wrong thing.
 	text, rng, ok := snapshot.ModuleMemberHover(params.Position)
 	if !ok {
+		// Declined on the member of such a reach, it is still a reach to this
+		// file's resolver, and to that reading what the member refers to is
+		// not in this file. The walk below would describe it as a bare name of
+		// this file -- an identifier, or the builtin that shares its spelling.
+		// ModuleMemberNameAt says where the build reads the member otherwise.
+		if snapshot.ModuleMemberNameAt(params.Position) {
+			return nil, nil
+		}
 		text, rng, ok = snapshot.HoverText(params.Position)
 	}
 	if !ok {
@@ -1111,6 +1119,14 @@ func (s *Server) definition(_ *glsp.Context, params *lsp.DefinitionParams) (any,
 	// go-to-definition came to jump into modules nothing had imported.
 	if location, ok := snapshot.ModuleMemberDefinition(params.Position); ok {
 		return location, nil
+	}
+	// Declined on the member of such a reach, it is still a reach to this
+	// file's resolver, and to that reading what the member refers to is not
+	// in this file. The walk below would land on the use itself as though it
+	// were the declaration. ModuleMemberNameAt says where the build reads the
+	// member otherwise.
+	if snapshot.ModuleMemberNameAt(params.Position) {
+		return nil, nil
 	}
 	location, ok := snapshot.DefinitionLocation(params.TextDocument.URI, params.Position)
 	if !ok {

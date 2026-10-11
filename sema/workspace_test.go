@@ -279,10 +279,12 @@ func TestTwoImportsBindingOneAliasAreReported(t *testing.T) {
 //
 // Diagnostics(key) reports, at each of key's imports, the first refusal a build
 // entered at key meets through it: the cycle as module.CycleError prints it,
-// every file from key down to the one that repeats, spelled as the files are
-// spelled. A file in no cycle that imports one is refused by the build all the
-// same, and a file with two imports that each lead into the cycle is told so at
-// both.
+// every file from key down to the one that repeats, named by the path the walk
+// reached it through -- key's file as it was filed, cleaned, and each other
+// file by the path module.Resolver.Resolve returns for the import that reached
+// it -- and never by a canonical key. A file in no cycle that imports one is
+// refused by the build all the same, and a file with two imports that each lead
+// into the cycle is told so at both.
 func TestDiagnosticsReportsACycleAtTheFilesOwnImport(t *testing.T) {
 	w, key := workspaceOf(t, map[string]string{
 		"A.mut":    `import b "B.mut"; let a = 1;`,
@@ -373,6 +375,61 @@ func TestDiagnosticsReportsADuplicateBelowAtTheImportThatLeadsThere(t *testing.T
 			got[0].Range != facts.Imports[c.imported].Range || got[0].Message != want {
 			t.Errorf("Diagnostics(%s) = %+v\nwant one DiagDuplicateNamespace at its import %d, saying %q",
 				c.file, got, c.imported, want)
+		}
+	}
+}
+
+// Diagnostics cleans the path key's file was filed under before it names the
+// file or resolves an import from its directory, as module.Load cleans the path
+// it is given. Filed as A.mut/. -- or with a trailing separator, or a last
+// element of ".." -- the file has A.mut's key, but the path's filepath.Dir is
+// A.mut itself or a directory below it, where nothing is indexed. Resolving
+// from there leaves every import unresolved and the cycle unreported; naming
+// the file by that path says what the loader never prints.
+func TestDiagnosticsCleansThePathTheEntryWasFiledUnder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "proj")
+	sources := map[string]string{
+		"A.mut":      `import b "B.mut"; let a = 1;`,
+		"B.mut":      `import a "A.mut"; let b = 1;`,
+		"dup.mut":    `import "x/util.mut"; import "y/util.mut"; let d = 1;`,
+		"x/util.mut": `let one = 1;`,
+		"y/util.mut": `let two = 2;`,
+	}
+	clean := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
+	cycle := "import cycle: " + strings.Join([]string{clean("A.mut"), clean("B.mut"), clean("A.mut")}, " -> ")
+	duplicate := clean("dup.mut") + `: two imports bind the name "util": "x/util.mut" and "y/util.mut"; ` +
+		"give one an alias, as in `import other \"y/util.mut\"`"
+	sep := string(filepath.Separator)
+
+	for _, c := range []struct {
+		entry    string
+		imported int // which of the entry's imports the refusal is reported at
+		code     DiagCode
+		message  string
+	}{
+		{"A.mut", 0, DiagImportCycle, cycle},
+		{"dup.mut", 1, DiagDuplicateNamespace, duplicate},
+	} {
+		for _, suffix := range []string{sep + ".", sep, sep + "x" + sep + ".."} {
+			w := NewWorkspace(nil)
+			for rel, src := range sources {
+				path := clean(rel)
+				if rel == c.entry {
+					path += suffix
+				}
+				w.PutFile("file:///"+filepath.ToSlash(path), path, parse(t, src))
+			}
+			key := CanonicalKey(clean(c.entry))
+			facts, known := w.Facts(key)
+			if !known || facts.Path != clean(c.entry)+suffix {
+				t.Fatalf("%s%s was not filed under the key of %s", c.entry, suffix, c.entry)
+			}
+			got := w.Diagnostics(key)
+			if len(got) != 1 || got[0].Code != c.code || got[0].Module != key ||
+				got[0].Range != facts.Imports[c.imported].Range || got[0].Message != c.message {
+				t.Errorf("filed as %s, Diagnostics = %+v\nwant one diagnostic of code %d at its import %d, saying %q",
+					facts.Path, got, c.code, c.imported, c.message)
+			}
 		}
 	}
 }
