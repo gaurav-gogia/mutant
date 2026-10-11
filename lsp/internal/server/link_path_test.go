@@ -41,23 +41,32 @@ func TestLinkCandidateRefusesWhatReachesTheNetworkOrADevice(t *testing.T) {
 	docDir := filepath.Join(t.TempDir(), "case")
 	roots := []string{docDir}
 
-	unc := bs + bs + "host" + bs + "share" + bs + "secret.img"
-	for _, value := range []string{
-		unc,                                   // the row's case
-		"//host/share/secret.img",             // the same, in the other slash
-		bs + bs + "?" + bs + "C:" + bs + "x",  // the \\?\ device prefix
-		bs + bs + "." + bs + "PhysicalDrive0", // a raw device
-		bs + "??" + bs + "UNC" + bs + "host" + bs + "s", // the NT object path
-		"C:" + bs + "Windows" + bs + "win.ini",          // an absolute path outside any root
-		"/etc/shadow",                                   // the same on POSIX
-		"C:x",                                           // drive-relative: another drive's cwd
-		"secret.img:hidden",                             // an alternate data stream
-		"../../../../Windows/win.ini",                   // traversal out of every root
-		"..",                                            // the shortest traversal
-		"",                                              // empty
-		"with" + string(rune(0)) + "nul",                // an embedded NUL
-		"two" + string(rune(10)) + "lines",              // an embedded newline
-	} {
+	refused := []string{
+		"//host/share/secret.img",          // a share in forward slashes; absolute on POSIX
+		"/etc/shadow",                      // an absolute path outside any root
+		"/dev/sda",                         // a POSIX device
+		"../../../../Windows/win.ini",      // traversal out of every root
+		"..",                               // the shortest traversal
+		"",                                 // empty
+		"with" + string(rune(0)) + "nul",   // an embedded NUL
+		"two" + string(rune(10)) + "lines", // an embedded newline
+	}
+	// The Windows spellings. A backslash, a colon and a leading `\\` are
+	// ordinary characters in a POSIX file name, so off Windows each of these is
+	// a file in the document's own directory, which no lookup can take off the
+	// machine, and allowing it is right there (M26-LSP-037).
+	if runtime.GOOS == "windows" {
+		refused = append(refused,
+			bs+bs+"host"+bs+"share"+bs+"secret.img", // the row's case
+			bs+bs+"?"+bs+"C:"+bs+"x",                // the \\?\ device prefix
+			bs+bs+"."+bs+"PhysicalDrive0",           // a raw device
+			bs+"??"+bs+"UNC"+bs+"host"+bs+"s",       // the NT object path
+			"C:"+bs+"Windows"+bs+"win.ini",          // an absolute path outside any root
+			"C:x",                                   // drive-relative: another drive's cwd
+			"secret.img:hidden",                     // an alternate data stream
+		)
+	}
+	for _, value := range refused {
 		if _, ok := linkCandidate(docDir, roots, value); ok {
 			t.Errorf("linkCandidate allowed %q; a document chooses this string, so it must be "+
 				"decided before anything is asked of the filesystem", value)
@@ -120,10 +129,14 @@ func TestARefusedLiteralIsNeverHandedToTheFilesystem(t *testing.T) {
 	// count cannot see a 42-second delay, but "the filesystem was never asked"
 	// is exactly what has to be true for the stall to be impossible.
 	dir := t.TempDir()
-	unc := bs + bs + "host" + bs + "share" + bs + "secret.img"
-	src := "let a = fs_read(" + quote(unc) + ");\n" +
-		"let b = fs_read(" + quote("//host/share/secret.img") + ");\n" +
+	src := "let b = fs_read(" + quote("//host/share/secret.img") + ");\n" +
 		"let c = fs_read(" + quote("data.bin") + ");\n"
+	// The backslash spelling is a share on Windows alone; elsewhere it names a
+	// file beside the document, which may be looked up (M26-LSP-037).
+	if runtime.GOOS == "windows" {
+		unc := bs + bs + "host" + bs + "share" + bs + "secret.img"
+		src = "let a = fs_read(" + quote(unc) + ");\n" + src
+	}
 	if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}

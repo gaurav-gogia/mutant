@@ -54,6 +54,31 @@ func duplicateComplaints(src string) []string {
 	return said
 }
 
+// redeclarationRefusals returns the refusals the editor reports for a let that
+// declares nothing new: the diagnostics tagged "mutant-declarations". The tag
+// is spelled out rather than imported because it is what the CLI prints and
+// what a client filters on.
+func redeclarationRefusals(src string) []api.Diagnostic {
+	refusals := make([]api.Diagnostic, 0, 1)
+	for _, d := range api.Lint(src) {
+		if d.Source == "mutant-declarations" {
+			refusals = append(refusals, d)
+		}
+	}
+	return refusals
+}
+
+// saysWhatTheBuildSays reports whether one of diagnostics is an Error that
+// reads exactly message: the compiler's own sentence, not a paraphrase of it.
+func saysWhatTheBuildSays(diagnostics []api.Diagnostic, message string) bool {
+	for _, d := range diagnostics {
+		if d.Severity == api.SeverityError && d.Message == message {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNothingIsADuplicateWhileBothDeclarationsAreLive pins the silence, and
 // pins it to a value rather than to an opinion: each program is run, and the
 // number it produces is only reachable if both declarations of the name are
@@ -145,15 +170,21 @@ let b, _ = gets();
 // the reason the rule exists: these really are two declarations of one binding,
 // and the first one never gets read.
 //
-// The wording is asserted rather than merely the presence of a complaint,
-// because the two spellings are not synonyms. Only "duplicate top-level
-// declaration" is offered the quick fix that deletes the line, and a line is
-// safe to delete only at the top level.
-// Three of these rows are now compile errors as well as lint findings, and
-// that is the strongest form this parity can take: the editor says the same
-// thing the build says, before the build is run. The two struct rows are not --
-// a type name never enters the compiler's symbol table, so two structs of one
-// name is a lint finding about a program that compiles.
+// Three of these rows are refused by the build, and the editor says so the way
+// the build does: an Error, in the compiler's own sentence, and no lint warning
+// beside it. A let that declares nothing new is reported from
+// "mutant-declarations"; a parameter list that names one parameter twice does
+// not parse, so there the parser's Error is the build's. All three used to draw
+// a Warning in the rule's own words -- "duplicate top-level declaration `x`" --
+// which said less than the build would, and which for the top-level row came
+// with a quick fix that deleted the line (M26-LSP-029).
+//
+// The two struct rows are not refusals: a type name never enters the compiler's
+// symbol table, so two structs of one name is a lint finding about a program
+// that compiles. Their wording is asserted rather than merely the presence of a
+// complaint, because the two spellings are not synonyms. Only "duplicate
+// top-level declaration" is offered the quick fix that deletes the
+// declaration, and that is safe only at the top level.
 func TestASecondDeclarationInOneScopeIsStillReported(t *testing.T) {
 	for _, c := range []struct {
 		name, src, want string
@@ -166,7 +197,6 @@ func TestASecondDeclarationInOneScopeIsStillReported(t *testing.T) {
 let x = 2;
 x;
 `,
-			want: "duplicate top-level declaration `x`",
 		},
 		{
 			refused: true,
@@ -174,7 +204,6 @@ x;
 			src: `let f = fn() { let a = 1; let a = 2; return a; };
 f();
 `,
-			want: "duplicate declaration `a`",
 		},
 		{
 			refused: true,
@@ -182,7 +211,6 @@ f();
 			src: `let f = fn(a, a) { return a; };
 7;
 `,
-			want: "duplicate declaration `a`",
 		},
 		{
 			name: "two structs of one name",
@@ -208,12 +236,25 @@ f();
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.refused {
-				if message, refused := compilerRefusesADuplicate(c.src); !refused {
+				message, refused := compilerRefusesADuplicate(c.src)
+				if !refused {
 					t.Fatalf("the compiler accepts a second declaration in one "+
 						"scope (%q), so the editor and the build disagree:\n\n%s",
 						message, c.src)
 				}
-			} else if _, err := evalViaVM(t, c.src); err != nil {
+				if !saysWhatTheBuildSays(api.Lint(c.src), message) {
+					t.Fatalf("the build refuses this with %q, and the editor "+
+						"has no Error that says so: %v\n\n%s",
+						message, api.Lint(c.src), c.src)
+				}
+				if said := duplicateComplaints(c.src); len(said) != 0 {
+					t.Fatalf("the editor reports the build's refusal and a "+
+						"lint warning in its own words as well: %v\n\n%s",
+						said, c.src)
+				}
+				return
+			}
+			if _, err := evalViaVM(t, c.src); err != nil {
 				t.Fatalf("the program does not compile, so the rule is not "+
 					"what is being tested: %v\n\n%s", err, c.src)
 			}
@@ -229,25 +270,63 @@ f();
 	}
 }
 
-// TestTheErrorIdiomMayRebindTheValueHalf pins the exception, in both
-// directions.
+// TestTheErrorIdiomRebindsANameOnlyBesideANewOne pins the error idiom to the
+// compiler's rule, in both directions.
 //
-// `let text, err = read(path);` binds a pair. Reading the value half and then
-// rebinding the name is the idiom, not a mistake -- the first binding was
-// consumed. A rebinding with nothing in between is the thing the rule is for,
-// and still reported.
-func TestTheErrorIdiomMayRebindTheValueHalf(t *testing.T) {
+// `let text, err = read(path);` binds a pair, and the idiom binds the next pair
+// beside it: `let more, err = read(other);` repeats err and is accepted,
+// because more is new. A let is refused only when nothing on its left is new
+// to its scope -- refuseIfNothingIsNew, which is Go's rule for :=.
+//
+// This test used to be TestTheErrorIdiomMayRebindTheValueHalf, and it pinned an
+// exception the compiler does not make: once the value half of a pair had been
+// read, the editor let it be rebound alone -- `let abc, err = gets(); abc; let
+// abc = 1;` -- and said nothing, while the build refuses that let, because abc
+// is not new and nothing else on its left is (M26-LSP-029). Every program below
+// is decided by compiling it.
+func TestTheErrorIdiomRebindsANameOnlyBesideANewOne(t *testing.T) {
+	// The idiom. With err unread in between, the second pair drew "duplicate
+	// top-level declaration `err`", which is how the shipped examples came to
+	// carry 116 warnings on programs that compile.
+	const nextPair = `let abc, err = gets();
+let def, err = gets();
+putln(abc, def, err);
+`
+	// The same with the error checked in between, which is how the examples
+	// write it.
+	const nextPairAfterTheCheck = `let abc, err = gets();
+if (err) { putln(err); }
+let def, err = gets();
+putln(abc, def, err);
+`
+	for _, src := range []string{nextPair, nextPairAfterTheCheck} {
+		if message, refused := compilerComplaint(src); refused {
+			t.Errorf("the compiler refuses the idiom (%q), so this is not the "+
+				"program under test:\n\n%s", message, src)
+			continue
+		}
+		if said := duplicateComplaints(src); len(said) != 0 {
+			t.Errorf("the idiom was called a duplicate: %v\n\n%s", said, src)
+		}
+		if refusals := redeclarationRefusals(src); len(refusals) != 0 {
+			t.Errorf("the idiom was refused: %v\n\n%s", refusals, src)
+		}
+	}
+
+	// Rebinding the value half alone declares nothing new, whether or not the
+	// first binding was read. The first two are the programs this test used to
+	// excuse: the value read before it is rebound, and the error checked first,
+	// which is the idiom's recommended order. (checkedFirst used to test `err
+	// != null` and call puts, neither of which this language has, so the
+	// compiler stopped there and never reached the let.)
 	const consumed = `let abc, err = gets();
 abc;
 let abc = 1;
 abc;
 err;
 `
-	// The idiom's recommended shape, which is the one that used to be reported:
-	// the error is checked first, so the value is never read on the line
-	// directly below the binding.
 	const checkedFirst = `let abc, err = gets();
-if (err != null) { puts("bad"); }
+if (err) { putln("bad"); }
 abc;
 let abc = 1;
 abc;
@@ -257,29 +336,157 @@ let abc = 1;
 abc;
 err;
 `
-
-	if said := duplicateComplaints(consumed); len(said) != 0 {
-		t.Fatalf("rebinding a consumed half of a pair was reported: %v\n\n%s", said, consumed)
-	}
-	if said := duplicateComplaints(checkedFirst); len(said) != 0 {
-		t.Fatalf("checking the error half before using the value half made the "+
-			"rebinding a duplicate: %v\n\n%s", said, checkedFirst)
-	}
-	if said := duplicateComplaints(notConsumed); len(said) == 0 {
-		t.Fatalf("a rebinding with no use in between went unreported\n\n%s", notConsumed)
-	}
-
-	// The exception is the PAIR, not the use. A plain let read on the next line
-	// and then declared again is the thing the rule is for: nothing consumed
-	// the first binding, it was simply replaced.
+	// A plain let, read on the next line and then declared again: the pair was
+	// never what made the second let a refusal.
 	const plainLet = `let x = 1;
 x;
 let x = 2;
 x;
 `
-	if said := duplicateComplaints(plainLet); len(said) == 0 {
-		t.Fatalf("a plain let declared twice went unreported because it was read "+
-			"in between, which is the pair idiom's exception and not its own\n\n%s",
-			plainLet)
+	for _, src := range []string{consumed, checkedFirst, notConsumed, plainLet} {
+		message, refused := compilerRefusesADuplicate(src)
+		if !refused {
+			t.Errorf("the compiler does not refuse this as a redeclaration "+
+				"(%q), so this is not the program under test:\n\n%s", message, src)
+			continue
+		}
+		if refusals := redeclarationRefusals(src); !saysWhatTheBuildSays(refusals, message) {
+			t.Errorf("the build refuses this with %q, and the editor's "+
+				"refusals are %v\n\n%s", message, refusals, src)
+		}
+	}
+}
+
+// TestTheEditorRefusesALetExactlyWhenTheCompilerDoes holds the editor to the
+// compiler's rule for a let, row by row and in both directions.
+//
+// The compiler judges a let by its statement, not by its names: it refuses one
+// only when none of the names on its left is new to the scope it is written
+// in, and a blank counts as new. The rule the editor had judged name by name,
+// and was wrong both ways: it warned about the (value, err) idiom, which
+// compiles, and excused a pair's value half rebound alone, which does not
+// (M26-LSP-029).
+//
+// Every row is decided by compiling it, and the verdict is pinned beside it so
+// that a change to the compiler's rule shows up here as a stale row rather
+// than as two rules quietly agreeing on something new. A refused row must draw
+// an Error from "mutant-declarations" in exactly the compiler's sentence, and
+// no lint warning beside it; an accepted row must draw neither.
+func TestTheEditorRefusesALetExactlyWhenTheCompilerDoes(t *testing.T) {
+	for _, c := range []struct {
+		name, src string
+		refused   bool
+	}{
+		// Accepted: at least one name on the left is new, or a blank is.
+		{
+			name: "the (value, err) idiom with err unread between",
+			src: `let a, err = gets();
+let b, err = gets();
+putln(a, b, err);
+`,
+		},
+		{
+			name: "a blank counts as new",
+			src: `let a = 1;
+let _, a = [1, 2];
+putln(a);
+`,
+		},
+		{
+			name: "a parameter reused beside a new name",
+			src: `let f = fn(a) {
+    let err, a = [1, 2];
+    return a + err;
+};
+putln(f(1));
+`,
+		},
+		{
+			name: "sibling blocks",
+			src: `if (true) {
+    let m = 1;
+    putln(m);
+}
+if (true) {
+    let m = 2;
+    putln(m);
+}
+`,
+		},
+		{
+			name: "a shadow in a block",
+			src: `let x = 1;
+if (true) {
+    let x = 2;
+    putln(x);
+}
+putln(x);
+`,
+		},
+		// Refused: nothing on the left is new.
+		{
+			refused: true,
+			name:    "a let declared twice",
+			src: `let x = 1;
+let x = 2;
+putln(x);
+`,
+		},
+		{
+			refused: true,
+			name:    "a consumed half of a pair rebound alone",
+			src: `let abc, err = gets();
+abc;
+let abc = 1;
+putln(abc, err);
+`,
+		},
+		{
+			refused: true,
+			name:    "a pair rebound with nothing new",
+			src: `let a, err = gets();
+let a, err = gets();
+putln(a, err);
+`,
+		},
+		{
+			refused: true,
+			name:    "a parameter redeclared by its body",
+			src: `let f = fn(a) {
+    let a = 2;
+    return a;
+};
+putln(f(1));
+`,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			message, refused := compilerComplaint(c.src)
+			if refused != c.refused {
+				t.Fatalf("the compiler's verdict is refused=%v (%q) and the row "+
+					"says %v, so the row is stale:\n\n%s", refused, message, c.refused, c.src)
+			}
+			refusals := redeclarationRefusals(c.src)
+			said := duplicateComplaints(c.src)
+			if !refused {
+				if len(refusals) != 0 || len(said) != 0 {
+					t.Fatalf("the compiler accepts this, and the editor says "+
+						"%v %v\n\n%s", refusals, said, c.src)
+				}
+				return
+			}
+			if _, redeclaration := compilerRefusesADuplicate(c.src); !redeclaration {
+				t.Fatalf("the compiler refuses this for another reason (%q), so "+
+					"it is not a row of this table:\n\n%s", message, c.src)
+			}
+			if !saysWhatTheBuildSays(refusals, message) {
+				t.Fatalf("the compiler refuses this with %q, and the editor's "+
+					"refusals are %v\n\n%s", message, refusals, c.src)
+			}
+			if len(said) != 0 {
+				t.Fatalf("the editor reports the refusal and a lint warning in "+
+					"its own words as well: %v\n\n%s", said, c.src)
+			}
+		})
 	}
 }

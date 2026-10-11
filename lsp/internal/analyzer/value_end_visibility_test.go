@@ -157,3 +157,24 @@ func valueEndFirstLine(text string) string {
 	}
 	return text
 }
+
+// TestMemberCompletionOnALetsOwnNameInsideItsValueIsTheFamily: in
+// `let rand = rand.` the compiler reads the rand before the dot as the builtin
+// family, because a let's names are declared only after its value
+// (M26-SEM-021). While the walk declared the name first, member completion
+// there resolved to the let and offered nothing; it offers the family's
+// members now, as it always did in `let x = rand.`, the control.
+func TestMemberCompletionOnALetsOwnNameInsideItsValueIsTheFamily(t *testing.T) {
+	for _, src := range []string{"let rand = rand.", "let x = rand."} {
+		items, ok := New().Analyze(src).MemberCompletionsAt(lsp.Position{Character: lsp.UInteger(len(src))})
+		offered := map[string]bool{}
+		labels := make([]string, 0, len(items))
+		for _, item := range items {
+			offered[item.Label] = true
+			labels = append(labels, item.Label)
+		}
+		if !ok || !offered["bytes"] || !offered["int"] {
+			t.Errorf("%q: member completion offers %v (ok=%t), want the rand family's bytes and int", src, labels, ok)
+		}
+	}
+}

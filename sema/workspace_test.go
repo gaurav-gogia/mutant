@@ -271,6 +271,112 @@ func TestTwoImportsBindingOneAliasAreReported(t *testing.T) {
 	}
 }
 
+// M26-SEM-006: the build refuses an import cycle, and Diagnostics -- what is
+// wrong with one file's imports -- never reported one. Only Closure computed a
+// cycle, and only at the import that closes it: in the last file of the loop,
+// which is never the file asked about unless that file imports itself, with the
+// chain spelled in canonical keys and trimmed to the module it re-enters.
+//
+// Diagnostics(key) reports, at each of key's imports, the first refusal a build
+// entered at key meets through it: the cycle as module.CycleError prints it,
+// every file from key down to the one that repeats, spelled as the files are
+// spelled. A file in no cycle that imports one is refused by the build all the
+// same, and a file with two imports that each lead into the cycle is told so at
+// both.
+func TestDiagnosticsReportsACycleAtTheFilesOwnImport(t *testing.T) {
+	w, key := workspaceOf(t, map[string]string{
+		"A.mut":    `import b "B.mut"; let a = 1;`,
+		"B.mut":    `import a "A.mut"; let b = 1;`,
+		"main.mut": `import a "A.mut"; let m = 1;`,
+		"Via.mut":  `import a "A.mut"; let v = 1;`,
+		"both.mut": `import a "A.mut"; import via "Via.mut"; let x = 1;`,
+		"self.mut": `import me "self.mut"; let s = 1;`,
+	})
+	type cycleAt struct {
+		imported int      // which of the entry's imports it is reported at
+		chain    []string // the files the message names, in order
+	}
+	for _, c := range []struct {
+		entry  string
+		cycles []cycleAt
+	}{
+		{"A.mut", []cycleAt{{0, []string{"A.mut", "B.mut", "A.mut"}}}},
+		{"B.mut", []cycleAt{{0, []string{"B.mut", "A.mut", "B.mut"}}}},
+		{"main.mut", []cycleAt{{0, []string{"main.mut", "A.mut", "B.mut", "A.mut"}}}},
+		{"both.mut", []cycleAt{
+			{0, []string{"both.mut", "A.mut", "B.mut", "A.mut"}},
+			{1, []string{"both.mut", "Via.mut", "A.mut", "B.mut", "A.mut"}},
+		}},
+		{"self.mut", []cycleAt{{0, []string{"self.mut", "self.mut"}}}},
+	} {
+		facts, known := w.Facts(key(c.entry))
+		if !known {
+			t.Fatalf("%s was never filed", c.entry)
+		}
+		got := w.Diagnostics(key(c.entry))
+		if len(got) != len(c.cycles) {
+			t.Errorf("Diagnostics(%s) = %+v, want %d import cycles", c.entry, got, len(c.cycles))
+			continue
+		}
+		dir := filepath.Dir(facts.Path)
+		for i, want := range c.cycles {
+			named := make([]string, len(want.chain))
+			for j, rel := range want.chain {
+				named[j] = filepath.Join(dir, rel)
+			}
+			at := facts.Imports[want.imported].Range
+			if got[i].Code != DiagImportCycle || got[i].Module != key(c.entry) || got[i].Range != at {
+				t.Errorf("%s: diagnostic %d is code %d in %s at %v, want an import cycle at its own import %d, %v",
+					c.entry, i, got[i].Code, got[i].Module, got[i].Range, want.imported, at)
+			}
+			if message := "import cycle: " + strings.Join(named, " -> "); got[i].Message != message {
+				t.Errorf("%s: diagnostic %d says\n  %q\nwant\n  %q", c.entry, i, got[i].Message, message)
+			}
+		}
+	}
+}
+
+// A build of main.mut is refused by dep.mut's two imports binding one name, and
+// main.mut's import of dep.mut says so, in the loader's sentence naming dep.mut.
+// dep.mut's own refusal is at its second import, and nothing is reported
+// through that import: the loader refuses a repeated name before it resolves
+// it, so the cycle y/util.mut would close back into dep.mut is never reached,
+// and a build entered at y/util.mut is refused by the duplicate too.
+func TestDiagnosticsReportsADuplicateBelowAtTheImportThatLeadsThere(t *testing.T) {
+	w, key := workspaceOf(t, map[string]string{
+		"main.mut":   `import dep "dep.mut"; let m = 1;`,
+		"dep.mut":    `import "x/util.mut"; import "y/util.mut"; let d = 1;`,
+		"x/util.mut": `let one = 1;`,
+		"y/util.mut": `import dep "../dep.mut"; let two = 2;`,
+	})
+	depFacts, known := w.Facts(key("dep.mut"))
+	if !known {
+		t.Fatal("dep.mut was never filed")
+	}
+	want := depFacts.Path + `: two imports bind the name "util": "x/util.mut" and "y/util.mut"; ` +
+		"give one an alias, as in `import other \"y/util.mut\"`"
+
+	for _, c := range []struct {
+		file     string
+		imported int // which of the file's imports the duplicate is reported at
+	}{
+		{"main.mut", 0},
+		{"dep.mut", 1},
+		{"y/util.mut", 0},
+	} {
+		facts, known := w.Facts(key(c.file))
+		if !known {
+			t.Fatalf("%s was never filed", c.file)
+		}
+		got := w.Diagnostics(key(c.file))
+		if len(got) != 1 || got[0].Code != DiagDuplicateNamespace || got[0].Module != key(c.file) ||
+			got[0].Range != facts.Imports[c.imported].Range || got[0].Message != want {
+			t.Errorf("Diagnostics(%s) = %+v\nwant one DiagDuplicateNamespace at its import %d, saying %q",
+				c.file, got, c.imported, want)
+		}
+	}
+}
+
 // Typing inside a function body cannot change what another module sees, so it
 // must not bump the generation. This is the keystroke-cost property: a caller
 // that caches against Generation does no work at all for the common edit.

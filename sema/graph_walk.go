@@ -20,9 +20,8 @@ import "mutant/ast"
 //   - A multi-name `let` binds after its value, because the compiler declares
 //     its names after compiling the value: `let a, b = split();`. A function
 //     literal there is named after the first name, and DefineFunctionName lets
-//     it call itself by that name too. The walk does not model that yet, so
-//     such a call resolves to whatever the name meant before the let --
-//     usually nothing, which the undefined-name rule then reports.
+//     it call itself by that name too, so that one name binds first, as a
+//     single-name let's does; the others still bind after the value.
 //   - A `for (k, v in xs)` binds after its iterable is walked, because
 //     compileForInStatement compiles the iterable before it defines the
 //     bindings.
@@ -133,6 +132,24 @@ func (b *builder) letStatement(node *ast.LetStatement) {
 		return
 	}
 
+	// A function literal held by a multi-name let is named after the first name
+	// as well, and DefineFunctionName binds that name inside its body, so
+	// `let a, err = fn(n) { return a(n - 1); };` recurses. That one name binds
+	// before the value is walked, as a single-name let's does, and stays a
+	// value; the others bind after it. The walk used to bind none of them
+	// first, so the call was unbound and reported as undefined (M26-SEM-030).
+	var self *Node
+	if len(names) > 1 {
+		if literal, isLiteral := node.Value.(*ast.FunctionLiteral); isLiteral && literal.Name == names[0].Value {
+			if rng, ok := b.rangeOf(names[0]); ok {
+				self = b.declareIn(b.scope, names[0].Value, names[0], rng, spanning(rng, stmtRange), KindValue)
+				if self != nil {
+					self.Grouped = true
+				}
+			}
+		}
+	}
+
 	// Any other value is compiled before its names are declared (M26-CMP-001),
 	// so `let x = x + 1;` reads the x from before the statement. The walk used
 	// to declare a single-name let first whatever its value (M26-SEM-021).
@@ -159,7 +176,10 @@ func (b *builder) letStatement(node *ast.LetStatement) {
 	if len(names) == 1 {
 		kind = kindForValue(node.Value)
 	}
-	for _, name := range names {
+	for i, name := range names {
+		if i == 0 && self != nil {
+			continue
+		}
 		if rng, ok := b.rangeOf(name); ok {
 			// Grouped: this let bound more than one name, which in Mutant means
 			// the (value, err) idiom rather than a convenience. Both names reach

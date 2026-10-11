@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"mutant/compiler"
 	"mutant/global"
+	"mutant/lexer"
+	"mutant/parser"
 
 	"github.com/tliron/glsp"
 	lsp "github.com/tliron/glsp/protocol_3_16"
@@ -142,6 +145,16 @@ func TestInitializeAdvertisesMVPCapabilities(t *testing.T) {
 	}
 	if onType.FirstTriggerCharacter != "}" {
 		t.Fatalf("on-type first trigger = %q, want %q", onType.FirstTriggerCharacter, "}")
+	}
+	// Enter is not a trigger: reformatting the whole document on it removed
+	// the line Enter had just made, so a body could not be typed
+	// (M26-LSP-019). ';' still is.
+	triggers := append([]string{onType.FirstTriggerCharacter}, onType.MoreTriggerCharacter...)
+	if containsString(triggers, "\n") {
+		t.Fatalf("on-type triggers = %q, want no newline among them", triggers)
+	}
+	if !containsString(onType.MoreTriggerCharacter, ";") {
+		t.Fatalf("on-type more triggers = %q, want ';' among them", onType.MoreTriggerCharacter)
 	}
 }
 
@@ -307,10 +320,72 @@ func TestDidOpenPublishesMultipleParserDiagnosticsForRecoveredStatements(t *test
 	}
 }
 
+// TestDidOpenPublishesTheCompilersRefusal is the row's own repro (M26-LSP-028).
+// The editor never compiled the document, so a refusal reached it only when
+// some lint rule happened to reproduce it, and none reproduced this one: a
+// break inside a closure inside a loop belongs to no loop, `mutant gen` refuses
+// it, and the editor published nothing at all. The compiler's first refusal is
+// now published as an Error in its own words, on the node it was compiling.
+func TestDidOpenPublishesTheCompilersRefusal(t *testing.T) {
+	s := New(false)
+	initializeServer(t, s)
+
+	const text = "for (let i = 0; i < 2; i++) {\n    let f = fn() { break; };\n    f();\n}\n"
+	want, refused := compilerRefusalOf(text)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to publish", text)
+	}
+
+	notifications := make([]capturedNotification, 0, 1)
+	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///compiler-refusal.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       text,
+			},
+		}),
+		Notify: func(method string, params any) {
+			notifications = append(notifications, capturedNotification{method: method, params: params})
+		},
+	})
+	if err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+	if !validMethod || !validParams {
+		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
+	}
+
+	diag := onlyDiagnosticsNotification(t, notifications)
+	for _, d := range diag.Diagnostics {
+		if d.Message != want {
+			continue
+		}
+		if d.Severity == nil || *d.Severity != lsp.DiagnosticSeverityError {
+			t.Fatalf("the refusal's severity = %#v, want error", d.Severity)
+		}
+		if d.Source == nil || *d.Source != "mutant-compiler" {
+			t.Fatalf("the refusal's source = %#v, want mutant-compiler", d.Source)
+		}
+		// On `break;`, the statement the compiler was compiling, and not on the
+		// loop or the closure around it.
+		if d.Range.Start != (lsp.Position{Line: 1, Character: 19}) || d.Range.End.Line != 1 || d.Range.End.Character <= 19 {
+			t.Fatalf("the refusal's range = %+v, want one starting at 1:19 and ending on that line", d.Range)
+		}
+		return
+	}
+	t.Fatalf("published %#v; want the compiler's refusal %q", diagnosticMessages(diag.Diagnostics), want)
+}
+
 func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	// Two structs of one name compile -- the second replaces the first -- so
+	// that is a lint finding about a working program, a Warning in the rule's
+	// words. Two lets of one name do not compile, and that is the second half.
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -319,7 +394,7 @@ func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T
 				URI:        "file:///lint-duplicate.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let answer = 1;\nlet answer = 2;\n",
+				Text:       "struct Answer { value };\nstruct Answer { value };\n",
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -343,18 +418,70 @@ func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T
 	if diag.Diagnostics[0].Source == nil || *diag.Diagnostics[0].Source != "mutant-lint" {
 		t.Fatalf("diagnostic source = %#v, want mutant-lint", diag.Diagnostics[0].Source)
 	}
-	if diag.Diagnostics[0].Message != "duplicate top-level declaration `answer`" {
+	if diag.Diagnostics[0].Message != "duplicate top-level declaration `Answer`" {
 		t.Fatalf("diagnostic message = %q, want duplicate declaration message", diag.Diagnostics[0].Message)
+	}
+	if diag.Diagnostics[0].Range.Start.Line != 1 || diag.Diagnostics[0].Range.Start.Character != 7 {
+		t.Fatalf("diagnostic range start = %+v, want line 1 char 7", diag.Diagnostics[0].Range.Start)
+	}
+
+	// A second let of a name its scope already holds is refused by the
+	// compiler, so it is published as that refusal -- an Error, in the
+	// compiler's words -- and as nothing else. The warning it was reported as
+	// before called a failed build a matter of style (M26-LSP-029).
+	const refusedText = "let answer = 1;\nlet answer = 2;\n"
+	want, refused := compilerRefusalOf(refusedText)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to publish", refusedText)
+	}
+	notifications = notifications[:0]
+	if _, _, _, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///lint-duplicate-let.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       refusedText,
+			},
+		}),
+		Notify: func(method string, params any) {
+			notifications = append(notifications, capturedNotification{method: method, params: params})
+		},
+	}); err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+
+	diag = onlyDiagnosticsNotification(t, notifications)
+	if len(diag.Diagnostics) != 1 {
+		t.Fatalf("diagnostic count = %d, want 1: %#v", len(diag.Diagnostics), diagnosticMessages(diag.Diagnostics))
+	}
+	if diag.Diagnostics[0].Severity == nil || *diag.Diagnostics[0].Severity != lsp.DiagnosticSeverityError {
+		t.Fatalf("diagnostic severity = %#v, want error", diag.Diagnostics[0].Severity)
+	}
+	if diag.Diagnostics[0].Source == nil || *diag.Diagnostics[0].Source != "mutant-declarations" {
+		t.Fatalf("diagnostic source = %#v, want mutant-declarations", diag.Diagnostics[0].Source)
+	}
+	if diag.Diagnostics[0].Message != want {
+		t.Fatalf("diagnostic message = %q, want the compiler's %q", diag.Diagnostics[0].Message, want)
 	}
 	if diag.Diagnostics[0].Range.Start.Line != 1 || diag.Diagnostics[0].Range.Start.Character != 4 {
 		t.Fatalf("diagnostic range start = %+v, want line 1 char 4", diag.Diagnostics[0].Range.Start)
 	}
 }
 
-func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLine(t *testing.T) {
+// TestRebindingTheReadValueHalfOfAPairIsReportedAsTheCompilersRefusal was
+// TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLine,
+// and pinned a silence. The rule excused this program by a heuristic -- a
+// grouped binding that was read could be rebound alone -- but the compiler
+// refuses it: the second let declares nothing its scope does not already hold.
+// The editor was quiet where the build failed (M26-LSP-029). It now publishes
+// the compiler's refusal, and still no duplicate warning beside it.
+func TestRebindingTheReadValueHalfOfAPairIsReportedAsTheCompilersRefusal(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let abc, err = gets();\nabc;\nerr;\nlet abc = 1;\nabc;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -363,7 +490,7 @@ func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLi
 				URI:        "file:///lint-duplicate-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let abc, err = gets();\nabc;\nerr;\nlet abc = 1;\nabc;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -383,12 +510,17 @@ func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLi
 			t.Fatalf("unexpected duplicate diagnostic for immediate-next-line usage case: %#v", d)
 		}
 	}
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 3 || refusal.Range.Start.Character != 4 {
+		t.Fatalf("refusal range start = %+v, want line 3 char 4", refusal.Range.Start)
+	}
 }
 
 func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let abc, err = gets();\nlet abc = 1;\nabc;\nerr;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -397,7 +529,7 @@ func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testi
 				URI:        "file:///lint-duplicate-not-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let abc, err = gets();\nlet abc = 1;\nabc;\nerr;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -411,23 +543,36 @@ func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testi
 		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// The compiler refuses the second let -- abc is already declared, and the
+	// let declares nothing else -- so what is reported is that refusal, an
+	// Error in the compiler's words, and not a lint warning (M26-LSP-029).
 	diag := onlyDiagnosticsNotification(t, notifications)
-	foundDuplicate := false
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 1 || refusal.Range.Start.Character != 4 {
+		t.Fatalf("refusal range start = %+v, want line 1 char 4", refusal.Range.Start)
+	}
 	for _, d := range diag.Diagnostics {
 		if d.Message == "duplicate top-level declaration `abc`" {
-			foundDuplicate = true
-			break
+			t.Fatalf("the refusal is reported a second time, as a lint warning: %#v", d)
 		}
-	}
-	if !foundDuplicate {
-		t.Fatalf("expected duplicate diagnostic, got messages: %#v", diagnosticMessages(diag.Diagnostics))
 	}
 }
 
-func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
+// TestRebindingTheReadValueHalfOfAPairInAFunctionIsReportedAsTheCompilersRefusal
+// was TestDuplicateDeclarationSuppressionAppliesInFunctionScope, the same
+// silence one scope down: a function body is a scope of its own, and the
+// compiler refuses the rebinding there too (M26-LSP-029).
+func TestRebindingTheReadValueHalfOfAPairInAFunctionIsReportedAsTheCompilersRefusal(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let run = fn() {\n" +
+		"  let abc, err = gets();\n" +
+		"  abc;\n" +
+		"  let abc = 1;\n" +
+		"  err;\n" +
+		"};\n" +
+		"run;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -436,13 +581,7 @@ func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
 				URI:        "file:///lint-duplicate-local-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text: "let run = fn() {\n" +
-					"  let abc, err = gets();\n" +
-					"  abc;\n" +
-					"  let abc = 1;\n" +
-					"  err;\n" +
-					"};\n" +
-					"run;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -462,12 +601,23 @@ func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
 			t.Fatalf("unexpected local duplicate diagnostic in suppression case: %#v", d)
 		}
 	}
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 3 || refusal.Range.Start.Character != 6 {
+		t.Fatalf("refusal range start = %+v, want line 3 char 6", refusal.Range.Start)
+	}
 }
 
 func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let run = fn() {\n" +
+		"  let abc, err = gets();\n" +
+		"  let abc = 1;\n" +
+		"  abc;\n" +
+		"  err;\n" +
+		"};\n" +
+		"run;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -476,13 +626,7 @@ func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *tes
 				URI:        "file:///lint-duplicate-local.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text: "let run = fn() {\n" +
-					"  let abc, err = gets();\n" +
-					"  let abc = 1;\n" +
-					"  abc;\n" +
-					"  err;\n" +
-					"};\n" +
-					"run;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -496,16 +640,17 @@ func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *tes
 		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// Reported as the compiler's refusal, an Error in its words, and not as
+	// the local duplicate warning it once was (M26-LSP-029).
 	diag := onlyDiagnosticsNotification(t, notifications)
-	foundDuplicate := false
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 2 || refusal.Range.Start.Character != 6 {
+		t.Fatalf("refusal range start = %+v, want line 2 char 6", refusal.Range.Start)
+	}
 	for _, d := range diag.Diagnostics {
 		if d.Message == "duplicate declaration `abc`" {
-			foundDuplicate = true
-			break
+			t.Fatalf("the refusal is reported a second time, as a lint warning: %#v", d)
 		}
-	}
-	if !foundDuplicate {
-		t.Fatalf("expected local duplicate diagnostic, got messages: %#v", diagnosticMessages(diag.Diagnostics))
 	}
 }
 
@@ -1798,11 +1943,15 @@ func TestCodeActionQuickFixForDuplicateDeclaration(t *testing.T) {
 		t.Fatalf("codeAction validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// The compiler refuses the second let, and its sentence names the remedy:
+	// write answer = ... instead. The fix is that edit. Deleting the line, the
+	// fix this once offered, compiled and quietly kept the first value
+	// (M26-LSP-029).
 	actions, ok := actionsAny.([]lsp.CodeAction)
 	if !ok || len(actions) == 0 {
 		t.Fatalf("codeAction result = %T (len=%d), want non-empty []CodeAction", actionsAny, len(actions))
 	}
-	if actions[0].Title != "Remove duplicate top-level declaration" {
+	if actions[0].Title != "Change the let to an assignment" {
 		t.Fatalf("code action title = %q", actions[0].Title)
 	}
 	if actions[0].Edit == nil {
@@ -1813,7 +1962,62 @@ func TestCodeActionQuickFixForDuplicateDeclaration(t *testing.T) {
 		t.Fatal("expected code action text edits")
 	}
 	updated := applyTextEdits(t, text, edits)
-	want := "let answer = 1;\n"
+	want := "let answer = 1;\nanswer = 2;\n"
+	if updated != want {
+		t.Fatalf("updated text = %q, want %q", updated, want)
+	}
+	if message, refused := compilerRefusalOf(updated); refused {
+		t.Fatalf("the compiler refuses the fixed text: %s", message)
+	}
+
+	// Two structs of one name compile, so that duplicate is still a lint
+	// warning, and its fix still removes the later declaration.
+	typeText := "struct Answer { value };\nstruct Answer { value };\nputln(Answer{value: 1});\n"
+	openNotifications = openNotifications[:0]
+	if _, _, _, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///code-action-duplicate-type.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       typeText,
+			},
+		}),
+		Notify: func(method string, params any) {
+			openNotifications = append(openNotifications, capturedNotification{method: method, params: params})
+		},
+	}); err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+
+	typeDiags := onlyDiagnosticsNotification(t, openNotifications).Diagnostics
+	if len(typeDiags) != 1 || typeDiags[0].Message != "duplicate top-level declaration `Answer`" {
+		t.Fatalf("diagnostics = %#v, want the one duplicate warning", diagnosticMessages(typeDiags))
+	}
+	actionsAny, _, _, err = s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentCodeAction),
+		Params: mustJSON(t, lsp.CodeActionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file:///code-action-duplicate-type.mut"},
+			Range:        typeDiags[0].Range,
+			Context:      lsp.CodeActionContext{Diagnostics: typeDiags},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("codeAction returned error: %v", err)
+	}
+	actions, ok = actionsAny.([]lsp.CodeAction)
+	if !ok || len(actions) == 0 {
+		t.Fatalf("codeAction result = %T (len=%d), want non-empty []CodeAction", actionsAny, len(actions))
+	}
+	if actions[0].Title != "Remove duplicate top-level declaration" {
+		t.Fatalf("code action title = %q", actions[0].Title)
+	}
+	if actions[0].Edit == nil {
+		t.Fatal("code action edit is nil")
+	}
+	updated = applyTextEdits(t, typeText, actions[0].Edit.Changes["file:///code-action-duplicate-type.mut"])
+	want = "struct Answer { value };\nputln(Answer{value: 1});\n"
 	if updated != want {
 		t.Fatalf("updated text = %q, want %q", updated, want)
 	}
@@ -5554,6 +5758,43 @@ func diagnosticMessages(diagnostics []lsp.Diagnostic) []string {
 		messages = append(messages, diagnostic.Message)
 	}
 	return messages
+}
+
+// compilerRefusalOf compiles src as `mutant gen` compiles a file with no
+// imports and no macros, and returns the first line of what the compiler
+// refused, if it refused anything. A test that says the build refuses a
+// program decides it here, by compiling, rather than by assertion.
+func compilerRefusalOf(src string) (string, bool) {
+	err := compiler.New().Compile(parser.New(lexer.New(src)).ParseProgram())
+	if err == nil {
+		return "", false
+	}
+	return strings.SplitN(err.Error(), "\n", 2)[0], true
+}
+
+// redeclarationRefusal returns the refusal of a redeclaring let that was
+// published for text. It must be an Error from mutant-declarations, in exactly
+// the words the compiler refuses text with.
+func redeclarationRefusal(t *testing.T, published []lsp.Diagnostic, text string) lsp.Diagnostic {
+	t.Helper()
+	want, refused := compilerRefusalOf(text)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to report", text)
+	}
+	for _, diagnostic := range published {
+		if diagnostic.Source == nil || *diagnostic.Source != "mutant-declarations" {
+			continue
+		}
+		if diagnostic.Message != want {
+			t.Fatalf("the refusal reads %q, want the compiler's %q", diagnostic.Message, want)
+		}
+		if diagnostic.Severity == nil || *diagnostic.Severity != lsp.DiagnosticSeverityError {
+			t.Fatalf("the refusal's severity = %#v, want error", diagnostic.Severity)
+		}
+		return diagnostic
+	}
+	t.Fatalf("no mutant-declarations refusal was published for %q; published %#v", text, diagnosticMessages(published))
+	return lsp.Diagnostic{}
 }
 
 type decodedSemanticToken struct {

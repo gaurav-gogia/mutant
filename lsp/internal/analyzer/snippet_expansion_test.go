@@ -1,8 +1,14 @@
 package analyzer
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
+
+	mast "mutant/ast"
 )
 
 // absentValueLiterals are value spellings other languages have and Mutant does
@@ -80,4 +86,125 @@ func TestTheAbsentValueLiteralsAreStillAbsent(t *testing.T) {
 				"absentValueLiterals needs revisiting: %q", literal, src)
 		}
 	}
+}
+
+// extensionSnippetBodies decodes a VS Code snippet file into the text each
+// snippet inserts: its body lines joined with newlines, the way VS Code joins
+// them. A body may be one string or an array of them.
+func extensionSnippetBodies(t *testing.T, raw []byte) map[string]string {
+	t.Helper()
+	var file map[string]struct {
+		Body json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("the snippet file does not parse: %v", err)
+	}
+	bodies := make(map[string]string, len(file))
+	for name, snippet := range file {
+		var lines []string
+		if err := json.Unmarshal(snippet.Body, &lines); err != nil {
+			var line string
+			if err := json.Unmarshal(snippet.Body, &line); err != nil {
+				t.Fatalf("snippet %q: its body is neither a string nor an array of strings", name)
+			}
+			lines = []string{line}
+		}
+		bodies[name] = strings.Join(lines, "\n")
+	}
+	return bodies
+}
+
+// guardIfIn returns the first if statement in the body of the function the
+// program's first let binds, or nil.
+func guardIfIn(program *mast.Program) *mast.IfExpression {
+	if program == nil || len(program.Statements) == 0 {
+		return nil
+	}
+	let, ok := program.Statements[0].(*mast.LetStatement)
+	if !ok {
+		return nil
+	}
+	fn, ok := let.Value.(*mast.FunctionLiteral)
+	if !ok || fn.Body == nil {
+		return nil
+	}
+	for _, statement := range fn.Body.Statements {
+		if expression, ok := statement.(*mast.ExpressionStatement); ok {
+			if guard, ok := expression.Expression.(*mast.IfExpression); ok {
+				return guard
+			}
+		}
+	}
+	return nil
+}
+
+// firstReturnedName is the name the first statement of block returns, or ""
+// when that statement is not a return of a bare name.
+func firstReturnedName(block *mast.BlockStatement) string {
+	if block == nil || len(block.Statements) == 0 {
+		return ""
+	}
+	ret, ok := block.Statements[0].(*mast.ReturnStatement)
+	if !ok {
+		return ""
+	}
+	value := ret.ReturnValue
+	if value == nil && len(ret.ReturnValues) == 1 {
+		value = ret.ReturnValues[0]
+	}
+	if name, ok := value.(*mast.Identifier); ok {
+		return name.Value
+	}
+	return ""
+}
+
+// assertTheGuardTestsTheError expands the "guard return" snippet of the snippet
+// file raw with every default accepted, inside a function that takes err, and
+// asserts that what the reader is left with builds, tests the error itself and
+// returns it. The failure quotes the expanded text rather than the tree,
+// because the tree prints an empty string literal as nothing.
+func assertTheGuardTestsTheError(t *testing.T, raw []byte) {
+	t.Helper()
+	body, ok := extensionSnippetBodies(t, raw)["guard return"]
+	if !ok {
+		t.Fatal(`the extension has no "guard return" snippet`)
+	}
+	expanded := expandSnippetDefaults(body)
+	src := "let guarded = fn(err) {\n" + expanded + "\nreturn 0;\n};\nputln(guarded(0));\n"
+	if refusal, _ := buildRefusal(src); refusal != "" {
+		t.Fatalf("the guard snippet's default expansion does not build (%s):\n%s", refusal, expanded)
+	}
+	guard := guardIfIn(New().Analyze(src).Program)
+	if guard == nil {
+		t.Fatalf("the guard snippet's default expansion holds no if:\n%s", expanded)
+	}
+	condition, isName := guard.Condition.(*mast.Identifier)
+	if !isName {
+		t.Fatalf("the guard snippet expands to\n%s\nand its condition must be the error itself, "+
+			"`if (err)`. A call that succeeds leaves err null, and null != \"\" is false today "+
+			"only because == falls back to comparing rendered text, where null renders as \"\" "+
+			"(M26-VM-010)", expanded)
+	}
+	if returned := firstReturnedName(guard.Consequence); returned != condition.Value {
+		t.Errorf("the guard snippet tests %q but returns %q:\n%s", condition.Value, returned, expanded)
+	}
+}
+
+// The extension's snippets teach the language too, and its guard clause taught
+// a test that is right only by accident: `if (err != "")`. A call that succeeds
+// leaves err null, and null != "" is false today only because == falls back to
+// comparing rendered text, where null renders as "" (M26-VM-010) -- the day that
+// fallback goes, the guard fires on every success. The language's test of an
+// error is the error itself, `if (err)`: null is falsy and an error is truthy,
+// whatever == does. That is what the unchecked-error lint and the language
+// reference teach (M26-LSP-023).
+//
+// The snippet file is read from the extension rather than restated here, so the
+// assertion is about what a reader is actually offered.
+func TestTheExtensionGuardSnippetTestsTheErrorItself(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "mutant-vscode-extension", "snippets", "mutant.json"))
+	if err != nil {
+		t.Skipf("extension snippets not readable here: %v", err)
+	}
+	assertTheGuardTestsTheError(t, raw)
 }

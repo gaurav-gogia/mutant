@@ -227,10 +227,14 @@ func FactsOf(key, uri, path string, program *ast.Program) *ModuleFacts {
 					}
 				}
 			}
-			// Name and Names are both populated forms: `let x = ...` uses the
-			// first, `let value, err = ...` the second. A destructured binding
-			// is never a function however it was produced, so only the single
-			// form can carry SymFunction.
+			// The parser fills both fields for every let: Name is the first
+			// name and Names is every name, the first included, so the loop
+			// below adds only the others -- addExport keeps the first export
+			// of a name. The first name takes the value's kind in a multi-name
+			// let too: destructuring puts a value that is neither an array nor
+			// a multi-value whole into the first name and null into the rest,
+			// so `let f, err = fn() { ... };` binds f to the function. Every
+			// other name is a value.
 			if node.Name != nil {
 				facts.addExport(node.Name.Value, kind, rangeOf(node.Name), params)
 			}

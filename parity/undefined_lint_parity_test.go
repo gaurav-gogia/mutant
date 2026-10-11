@@ -364,6 +364,19 @@ func TestTheUndefinedRuleAgreesWithTheBuildAboutANameInItsOwnDeclaration(t *test
 			src:         "let down = fn(n) { if (n > 0) { return down(n - 1); } return 0; };\ndown(2);\n",
 			wantRefused: false,
 		},
+		{
+			// The literal is named after the first name of a multi-name let
+			// too, and the compiler binds that name inside it (M26-SEM-030).
+			name:        "a pair let's function literal calling itself by its first name",
+			src:         "let down, err = fn(n) { if (n > 0) { return down(n - 1); } return 0; };\ndown(2);\n",
+			wantRefused: false,
+		},
+		{
+			// Only the first: the other names are declared after the value.
+			name:        "a pair let's function literal reading its second name",
+			src:         "let down, err = fn(n) { return err; };\ndown(2);\n",
+			wantRefused: true,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			refusal, refused := compilerRefusesAName(c.src)

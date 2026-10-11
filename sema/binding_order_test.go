@@ -298,6 +298,35 @@ func TestEveryNameOfAMultiNameLetIsAValue(t *testing.T) {
 	}
 }
 
+// TestAPairLetsFunctionCallsItselfByItsFirstName: the parser names a function
+// literal after the first name of the let that holds it, a multi-name let
+// included, and DefineFunctionName binds that name inside the body, so the
+// call on line 1 recurses in the build. The walk bound none of a multi-name
+// let's names before the value, so the call was unbound (M26-SEM-030). The
+// other names still bind after the value, and every name stays a value.
+func TestAPairLetsFunctionCallsItselfByItsFirstName(t *testing.T) {
+	// line 1: `let a, b = fn(n) { if (n > 0) { return a(n - 1); } return b; };`
+	// -- the self-call's a at 1:40, the b read inside the body at 1:59.
+	g := graphOf(t, "let a, b = fn(n) { if (n > 0) { return a(n - 1); } return b; };\na(3);\n")
+	a, b := find(t, g, "a"), find(t, g, "b")
+
+	if node, found := g.Resolve(1, 40); !found || node.ID != a.ID {
+		t.Errorf("the call of a inside its own literal resolves to %v (found=%t), want the let's a", node, found)
+	}
+	if node, found := g.Resolve(1, 59); found && node.ID == b.ID {
+		t.Errorf("b inside the literal resolves to the let's b, which the compiler declares only after the value")
+	}
+	if node, found := g.Resolve(2, 1); !found || node.ID != a.ID {
+		t.Errorf("a on line 2 resolves to %v (found=%t), want the let's a", node, found)
+	}
+	if a.Kind != KindValue || b.Kind != KindValue {
+		t.Errorf("a is a %s and b a %s; every name of a multi-name let is a value", a.Kind, b.Kind)
+	}
+	if !a.Grouped || !b.Grouped {
+		t.Errorf("a grouped=%t, b grouped=%t; both come from one multi-name let", a.Grouped, b.Grouped)
+	}
+}
+
 // TestALetWhoseValueDidNotParseIsSeenOnlyAfterItsStatement: while a value is
 // half typed the parser can drop it, leaving the let with no value to be seen
 // after. Its names were then seen from the name on, so at the cursor typing

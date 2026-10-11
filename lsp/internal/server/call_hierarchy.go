@@ -254,6 +254,12 @@ func (s *Server) snapshotFor(uri lsp.DocumentUri) (*analyzer.Snapshot, bool) {
 		return snapshot, true
 	}
 	if doc, ok := s.documents.Snapshot(uri); ok && doc != nil {
+		// An open document's text is the client's only while it is in step,
+		// and a desynced one is not read from disk either: the disk is not
+		// what the client has open (M26-LSP-034).
+		if doc.Desynced {
+			return nil, false
+		}
 		return s.analyzeDoc(uri, doc.Text), true
 	}
 	path, ok := uriToPath(uri)
