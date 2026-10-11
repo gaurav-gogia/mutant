@@ -232,6 +232,24 @@ Diagnostics sources:
 - `mutant-lint`: semantic lint rules.
 - `mutant-format`: strict-formatting rules (the semicolon rule) — distinct from
   `mutant-lint` so quick fixes can key off it.
+- `mutant-modules`: refusals that cross a module boundary — a member another
+  module does not declare or exports privately, an import cycle, and two
+  imports binding one namespace — in the module loader's own words. A cycle
+  is shown on every import a build entered at this file would meet it
+  through, not only on the files inside it.
+- `mutant-structs`: a field a struct does not declare, read or written, in
+  the compiler's words.
+- `mutant-declarations`: a `let` the compiler refuses because it declares
+  nothing new in its scope, on the compiler's rule and in its words. Its quick
+  fix turns a single-name `let` into an assignment, which is the remedy the
+  refusal names.
+- `mutant-compiler`: the compiler's own first refusal for the file. The editor
+  compiles a document that parses, the way `mutant gen` would, and reports what
+  the compiler says at the node that raised it, unless a refusal above already
+  covers that range. A file that defines or calls macros is not compiled here,
+  because expanding a macro runs code. None of these four sources is
+  configurable: each is a refusal the build makes, and `mutant lint` exits 1
+  on any of them.
 
 Current lint rules (rule id -> default severity):
 
@@ -537,9 +555,15 @@ Canonical style policy:
 On-type formatting behavior:
 
 - Server advertises `textDocument/onTypeFormatting` and supports triggers for
-  `}`, `;`, and newline.
-- Extension keeps on-type formatting disabled by default to avoid intrusive
-  edits, and exposes an opt-in setting.
+  `}` and `;`. Newline is not one: formatting the whole document on Enter
+  collapsed the block the user had just opened, because the printer has no
+  form for an empty line, and the editor's own indentation rules already
+  indent the new line.
+- Extension keeps on-type formatting off by default to avoid intrusive edits,
+  and exposes the opt-in setting `mutant.format.onType.enabled`. It writes
+  nothing into the user's settings to arrange this: the manifest turns
+  `editor.formatOnType` on for Mutant files as a default, and a language
+  client middleware asks the server only while the setting is on.
 
 Important safety guarantees:
 

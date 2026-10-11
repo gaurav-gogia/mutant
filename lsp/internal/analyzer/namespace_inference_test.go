@@ -115,21 +115,23 @@ func TestADottedCallConstrainsAParameter(t *testing.T) {
 	}
 }
 
-// parameterTypeOf returns the display type of the single parameter `p` of the
-// function declared on line 0.
+// parameterTypeOf returns the solver's kinds for the function's single
+// parameter `p`, which is what its card shows as "used as". Signature help shows
+// none of it (M26-SEM-019). It reads the solver rather than TypeOf, because
+// inference types every parameter as Any -- a solved kind is a deduction about
+// how the body uses the name and feeds no inferred type.
 func parameterTypeOf(t *testing.T, src string) string {
 	t.Helper()
 	snapshot := New().Analyze(src)
-	col := strings.Index(src, "fn(p)") + 3
-	node, _, ok := snapshot.NodeAt(lsp.Position{Character: lsp.UInteger(col)})
-	if !ok {
-		t.Fatalf("no node at the parameter in %q", src)
+	for _, fn := range snapshot.solvedFunctions() {
+		for i, name := range fn.params {
+			if name == "p" {
+				return fn.kinds[i].text()
+			}
+		}
 	}
-	ty, ok := snapshot.TypeOf(node)
-	if !ok {
-		return ""
-	}
-	return ty.String()
+	t.Fatalf("no function with a parameter p in %q", src)
+	return ""
 }
 
 // TestAMistypedMemberIsReportedInBothSpellings is the diagnostic half. The

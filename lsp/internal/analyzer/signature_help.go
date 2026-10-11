@@ -3,6 +3,7 @@ package analyzer
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	mast "mutant/ast"
 	"mutant/builtin"
@@ -25,6 +26,9 @@ func (s *Snapshot) SignatureHelp(pos lsp.Position) (*lsp.SignatureHelp, bool) {
 	if !ok {
 		return nil, false
 	}
+	// The offsets stay bytes inside the package, where InlayHints reads them,
+	// and become UTF-16 units here, where they leave for the client.
+	sig = withUTF16ParameterOffsets(sig)
 
 	activeSignature := lsp.UInteger(0)
 	activeParameter := lsp.UInteger(s.activeParameterForCall(call, pos))
@@ -89,14 +93,18 @@ func (s *Snapshot) signatureInformationForCall(call *mast.CallExpression, pos ls
 		if sig, ok := macroSpecialFormSignatureInformation(fn.Value); ok {
 			return sig, true
 		}
-		if builtin.GetBuiltinByName(fn.Value) != nil {
+		// A binding of a builtin's name is what the VM calls, so it is asked
+		// about first, with the compiler's own predicate: `let max = fn(a, b,
+		// c)` followed by `max(1, 2, 3)` is the user's max (M26-SEM-011).
+		at := positionInsideIdentifier(s, fn, pos)
+		if builtin.GetBuiltinByName(fn.Value) != nil && !s.isBoundAt(fn.Value, at) {
 			if sig, ok := builtinSignatureInformation(fn.Value); ok {
 				return sig, true
 			}
 			return lsp.SignatureInformation{Label: fmt.Sprintf("%s(...)", fn.Value)}, true
 		}
 
-		resolved, ok := s.resolveDefinition(positionInsideIdentifier(s, fn, pos))
+		resolved, ok := s.resolveDefinition(at)
 		if !ok || resolved.ident == nil {
 			return lsp.SignatureInformation{}, false
 		}
@@ -109,7 +117,11 @@ func (s *Snapshot) signatureInformationForCall(call *mast.CallExpression, pos ls
 		// The dotted spelling of a builtin. Without this arm it fell to the
 		// default below, so `fs.read(` offered nothing while `fs_read(` offered
 		// the typed signature -- and the inlay hints built on this went with it.
-		name, _, ok := builtinCalleeIn(fn, s.localScopeAt(pos))
+		//
+		// The scope is the callee's own, not the one at pos: InlayHints asks
+		// with the zero position, where a parameter named str is not yet bound,
+		// and `str.repeat(3)` inside the function would become str_repeat.
+		name, _, ok := builtinCalleeIn(fn, s.localScopeAtNode(fn))
 		if !ok {
 			return lsp.SignatureInformation{}, false
 		}
@@ -122,45 +134,81 @@ func (s *Snapshot) signatureInformationForCall(call *mast.CallExpression, pos ls
 	}
 }
 
-// functionLiteralSignature builds signature help for a user-defined function,
-// carrying the parameter kinds the solver worked out.
+// functionLiteralSignature builds signature help for a user-defined function:
+// its parameter names.
 //
-// A builtin's signature help has shown types since the parameter contracts
-// landed. Without this a user function's showed bare names, so the popup that
-// appears while typing a call said less about the code in front of you than
-// about the standard library.
+// It used to append the kinds fn_solver.go deduced, `low_byte(v: INTEGER)`,
+// which read as a type the parameter is held to. A user function has no
+// parameter types; the solver describes how the body uses a name, and working
+// programs pass that parameter other kinds (M26-SEM-019). The function card
+// says it as what it is, "used as INTEGER".
 func (s *Snapshot) functionLiteralSignature(fn *mast.FunctionLiteral, displayName string) lsp.SignatureInformation {
 	if fn == nil {
 		return lsp.SignatureInformation{Label: fmt.Sprintf("%s()", displayName)}
 	}
 
-	var solved *solvedFunction
-	if s != nil {
-		solved = s.solvedFunctions()[fn]
-	}
-
-	paramNames := make([]string, 0, len(fn.Parameters))
+	var label strings.Builder
+	label.WriteString(displayName)
+	label.WriteString("(")
 	parameters := make([]lsp.ParameterInformation, 0, len(fn.Parameters))
-	for i, p := range fn.Parameters {
+	for _, p := range fn.Parameters {
 		if p == nil {
 			continue
 		}
-		label := p.Value
-		if solved != nil && i < len(solved.kinds) {
-			if kinds := solved.kinds[i].text(); kinds != "" {
-				label += ": " + kinds
-			}
+		if len(parameters) > 0 {
+			label.WriteString(", ")
 		}
-		paramNames = append(paramNames, label)
-		// A string parameter label is matched as a substring of the signature
-		// label, so it has to be the decorated spelling that appears there.
-		parameters = append(parameters, lsp.ParameterInformation{Label: label})
+		// A parameter is addressed by where it lies in the label, recorded
+		// as the label is joined, the way a builtin's is. A string label is
+		// found by the client as the first whole-word match of the name, so
+		// once the solver's kinds stopped making each label unique, the x of
+		// `let x = fn(x)` was highlighted on the function's name in x(x). The
+		// offsets are bytes, which is what parameterHintName reads them as;
+		// SignatureHelp converts them to the protocol's UTF-16 units.
+		start := label.Len()
+		label.WriteString(p.Value)
+		parameters = append(parameters, lsp.ParameterInformation{
+			Label: [2]lsp.UInteger{lsp.UInteger(start), lsp.UInteger(label.Len())},
+		})
 	}
+	label.WriteString(")")
 
 	return lsp.SignatureInformation{
-		Label:      fmt.Sprintf("%s(%s)", displayName, joinParamNames(paramNames)),
+		Label:      label.String(),
 		Parameters: parameters,
 	}
+}
+
+// withUTF16ParameterOffsets converts sig's parameter offsets from the bytes
+// they are recorded in to the UTF-16 code units LSP 3.16 counts a label in.
+// The two agree on an ASCII label, which every builtin signature is, but a
+// user function's label is made of its names, and the lexer admits any Unicode
+// letter in a name: in f(é, b) the b starts at byte 6 and at unit 5, and its
+// byte pair [6,7), counted by the client in units, would mark the ")" after it.
+//
+// A pair that does not fit the label is sent as the empty range, which
+// highlights nothing, rather than as offsets that would mark some other text.
+func withUTF16ParameterOffsets(sig lsp.SignatureInformation) lsp.SignatureInformation {
+	if len(sig.Parameters) == 0 {
+		return sig
+	}
+	parameters := make([]lsp.ParameterInformation, len(sig.Parameters))
+	for i, param := range sig.Parameters {
+		if span, ok := param.Label.([2]lsp.UInteger); ok {
+			start, end := int(span[0]), int(span[1])
+			if start <= end && end <= len(sig.Label) {
+				param.Label = [2]lsp.UInteger{
+					lsp.UInteger(utf16Len(sig.Label[:start])),
+					lsp.UInteger(utf16Len(sig.Label[:end])),
+				}
+			} else {
+				param.Label = [2]lsp.UInteger{0, 0}
+			}
+		}
+		parameters[i] = param
+	}
+	sig.Parameters = parameters
+	return sig
 }
 
 func functionDisplayName(fallback, literalName string) string {
@@ -168,17 +216,6 @@ func functionDisplayName(fallback, literalName string) string {
 		return literalName
 	}
 	return fallback
-}
-
-func joinParamNames(params []string) string {
-	if len(params) == 0 {
-		return ""
-	}
-	out := params[0]
-	for i := 1; i < len(params); i++ {
-		out += ", " + params[i]
-	}
-	return out
 }
 
 func (s *Snapshot) activeParameterForCall(call *mast.CallExpression, pos lsp.Position) int {
@@ -245,231 +282,48 @@ func positionInsideIdentifier(s *Snapshot, ident *mast.Identifier, fallback lsp.
 	return s.Position(rng.Start)
 }
 
+// functionLiteralForBindingIdent returns the function literal a let bound to
+// target, at any depth.
+//
+// It used to walk the program for each question and stop at the first function
+// literal it met, so a helper declared inside main never had signature help, a
+// function card or parameter hints (M26-SEM-008). Searching each body as well
+// would have answered correctly and made InlayHints, which asks once per call,
+// quadratic in the size of the file; the index is built once per snapshot
+// instead.
 func (s *Snapshot) functionLiteralForBindingIdent(target *mast.Identifier) (*mast.FunctionLiteral, bool) {
 	if s == nil || s.Program == nil || target == nil {
 		return nil, false
 	}
-
-	for _, stmt := range s.Program.Statements {
-		if literal, ok := functionLiteralInStatementForIdent(stmt, target); ok {
-			return literal, true
-		}
-	}
-	return nil, false
+	literal, ok := s.boundFunctionLiterals()[target]
+	return literal, ok
 }
 
-func functionLiteralInStatementForIdent(stmt mast.Statement, target *mast.Identifier) (*mast.FunctionLiteral, bool) {
-	switch node := stmt.(type) {
-	case *mast.LetStatement:
-		names := node.Names
-		if len(names) == 0 && node.Name != nil {
-			names = []*mast.Identifier{node.Name}
-		}
-		for _, name := range names {
-			if name == target {
-				literal, ok := node.Value.(*mast.FunctionLiteral)
-				if ok && literal != nil {
-					return literal, true
-				}
-				return nil, false
-			}
-		}
-		if node.Value != nil {
-			return functionLiteralInExpressionForIdent(node.Value, target)
-		}
-	case *mast.ReturnStatement:
-		for _, expr := range node.ReturnValues {
-			if literal, ok := functionLiteralInExpressionForIdent(expr, target); ok {
-				return literal, true
-			}
-		}
-		if len(node.ReturnValues) == 0 && node.ReturnValue != nil {
-			return functionLiteralInExpressionForIdent(node.ReturnValue, target)
-		}
-	case *mast.ExpressionStatement:
-		if node.Expression != nil {
-			return functionLiteralInExpressionForIdent(node.Expression, target)
-		}
-	case *mast.BlockStatement:
-		for _, inner := range node.Statements {
-			if literal, ok := functionLiteralInStatementForIdent(inner, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.ForInStatement:
-		if node.Iterable != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Iterable, target); ok {
-				return literal, true
-			}
-		}
-		if node.Body != nil {
-			if literal, ok := functionLiteralInStatementForIdent(node.Body, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.WhileStatement:
-		if node.Condition != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Condition, target); ok {
-				return literal, true
-			}
-		}
-		if node.Body != nil {
-			if literal, ok := functionLiteralInStatementForIdent(node.Body, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.ForStatement:
-		if node.Init != nil {
-			if literal, ok := functionLiteralInStatementForIdent(node.Init, target); ok {
-				return literal, true
-			}
-		}
-		if node.Condition != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Condition, target); ok {
-				return literal, true
-			}
-		}
-		if node.Post != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Post, target); ok {
-				return literal, true
-			}
-		}
-		if node.Body != nil {
-			return functionLiteralInStatementForIdent(node.Body, target)
-		}
-	}
-
-	return nil, false
-}
-
-func functionLiteralInExpressionForIdent(expr mast.Expression, target *mast.Identifier) (*mast.FunctionLiteral, bool) {
-	switch node := expr.(type) {
-	case *mast.FunctionLiteral:
-		return nil, false
-	case *mast.IfExpression:
-		if node.Condition != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Condition, target); ok {
-				return literal, true
-			}
-		}
-		if node.Consequence != nil {
-			if literal, ok := functionLiteralInStatementForIdent(node.Consequence, target); ok {
-				return literal, true
-			}
-		}
-		if node.Alternative != nil {
-			if literal, ok := functionLiteralInStatementForIdent(node.Alternative, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.MatchExpression:
-		// Patterns cannot hold a function literal -- the pattern grammar admits
-		// literals and enum paths only -- so only the subject and the bodies
-		// are worth searching.
-		if node.Subject != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Subject, target); ok {
-				return literal, true
-			}
-		}
-		for _, arm := range node.Arms {
-			if arm == nil || arm.Body == nil {
+// boundFunctionLiterals maps each name a let binds to a function literal to
+// that literal. NodePositions records every let at any depth, so one pass over
+// it stands in for the walk.
+func (s *Snapshot) boundFunctionLiterals() map[*mast.Identifier]*mast.FunctionLiteral {
+	s.boundFnOnce.Do(func() {
+		s.boundFns = make(map[*mast.Identifier]*mast.FunctionLiteral)
+		for node := range s.Program.NodePositions {
+			let, ok := node.(*mast.LetStatement)
+			if !ok || let == nil {
 				continue
 			}
-			if literal, ok := functionLiteralInStatementForIdent(arm.Body, target); ok {
-				return literal, true
+			literal, ok := let.Value.(*mast.FunctionLiteral)
+			if !ok || literal == nil {
+				continue
 			}
-		}
-	case *mast.CallExpression:
-		if node.Function != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Function, target); ok {
-				return literal, true
+			names := let.Names
+			if len(names) == 0 && let.Name != nil {
+				names = []*mast.Identifier{let.Name}
 			}
-		}
-		for _, arg := range node.Arguments {
-			if literal, ok := functionLiteralInExpressionForIdent(arg, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.PrefixExpression:
-		if node.Right != nil {
-			return functionLiteralInExpressionForIdent(node.Right, target)
-		}
-	case *mast.InfixExpression:
-		if node.Left != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Left, target); ok {
-				return literal, true
-			}
-		}
-		if node.Right != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Right, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.IndexExpression:
-		if node.Left != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Left, target); ok {
-				return literal, true
-			}
-		}
-		if node.Index != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Index, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.AssignExpression:
-		if node.Left != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Left, target); ok {
-				return literal, true
-			}
-		}
-		if node.Value != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Value, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.FieldExpression:
-		if node.Left != nil {
-			return functionLiteralInExpressionForIdent(node.Left, target)
-		}
-	case *mast.StructLiteral:
-		if node.Name != nil {
-			if literal, ok := functionLiteralInExpressionForIdent(node.Name, target); ok {
-				return literal, true
-			}
-		}
-		for _, field := range node.Fields {
-			if field != nil && field.Value != nil {
-				if literal, ok := functionLiteralInExpressionForIdent(field.Value, target); ok {
-					return literal, true
+			for _, name := range names {
+				if name != nil {
+					s.boundFns[name] = literal
 				}
 			}
 		}
-	case *mast.ArrayLiteral:
-		for _, element := range node.Elements {
-			if literal, ok := functionLiteralInExpressionForIdent(element, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.TemplateLiteral:
-		for _, element := range node.Parts {
-			if literal, ok := functionLiteralInExpressionForIdent(element, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.HashLiteral:
-		for _, pair := range node.Pairs {
-			if literal, ok := functionLiteralInExpressionForIdent(pair.Key, target); ok {
-				return literal, true
-			}
-			if literal, ok := functionLiteralInExpressionForIdent(pair.Value, target); ok {
-				return literal, true
-			}
-		}
-	case *mast.MacroLiteral:
-		if node.Body != nil {
-			return functionLiteralInStatementForIdent(node.Body, target)
-		}
-	}
-
-	return nil, false
+	})
+	return s.boundFns
 }

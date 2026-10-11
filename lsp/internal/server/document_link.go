@@ -55,7 +55,14 @@ func (s *Server) documentLinks(_ *glsp.Context, params *lsp.DocumentLinkParams) 
 		if resolved == "" {
 			continue
 		}
+		// pathToURI answers "" for a path that no URI uriToPath accepts reads
+		// back to: one reached through a raw workspace root such as a WebDAV
+		// share, or a \\?\ path naming a segment Windows renames without that
+		// prefix. No link beats a link to nowhere (M26-LSP-031).
 		target := pathToURI(resolved)
+		if target == "" {
+			continue
+		}
 		links = append(links, lsp.DocumentLink{Range: ref.Range, Target: &target})
 	}
 	return links, nil

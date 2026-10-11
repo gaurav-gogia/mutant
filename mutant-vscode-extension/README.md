@@ -155,9 +155,14 @@ One is about when code runs rather than what it does.
   (`false` by default)
 
 By default, Mutant files use `editor.formatOnSave: true` via extension
-configuration defaults, so canonical style is enforced when saving. By default,
-`editor.formatOnType` remains disabled for Mutant files; enable
-`mutant.format.onType.enabled` if you want live formatting while typing.
+configuration defaults, so canonical style is enforced when saving. On-type
+formatting is off unless `mutant.format.onType.enabled` is set, and then it runs
+on `;` and `}`. The extension writes nothing to your settings to arrange this:
+it turns `editor.formatOnType` on for Mutant files as a default and asks the
+language server only while `mutant.format.onType.enabled` is set. Your own
+`"[mutant]": { "editor.formatOnType": false }` still turns it off. Earlier
+versions wrote an `editor.formatOnType` line into the open folder's workspace
+settings; you may delete it.
 
 When `mutant.languageServer.path` is empty, the extension first tries packaged
 platform binaries in `bin/`:

@@ -322,3 +322,66 @@ unless(true, 1);
 		})
 	}
 }
+
+// TestTheUndefinedRuleAgreesWithTheBuildAboutANameInItsOwnDeclaration covers a
+// name read inside the statement that declares it. The compiler compiles a
+// for-in's iterable before it defines the bindings, and a let's value before
+// it declares the name (M26-CMP-001); only a function literal sees its own
+// name. The editor used to declare first in both, so `for (y in y)` and
+// `let z = z + 1;` drew nothing although the build refuses both (M26-SEM-007,
+// M26-SEM-021).
+//
+// Each row also states what the compiler does, so a row that stops exercising
+// its direction fails rather than agreeing vacuously.
+func TestTheUndefinedRuleAgreesWithTheBuildAboutANameInItsOwnDeclaration(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		src         string
+		wantRefused bool
+	}{
+		{
+			name:        "a for-in binding read by its own iterable",
+			src:         "for (y in y) { }\n",
+			wantRefused: true,
+		},
+		{
+			name:        "a let read by its own value",
+			src:         "let z = z + 1;\n",
+			wantRefused: true,
+		},
+		{
+			name:        "a for-in iterable naming the outer binding the loop shadows",
+			src:         "let xs = [1];\nfor (xs in xs) { xs; }\n",
+			wantRefused: false,
+		},
+		{
+			name:        "a block's let initialised from the name it shadows",
+			src:         "let w = 1;\nif (true) { let w = w + 1; w; }\nw;\n",
+			wantRefused: false,
+		},
+		{
+			name:        "a function literal calling itself by its let's name",
+			src:         "let down = fn(n) { if (n > 0) { return down(n - 1); } return 0; };\ndown(2);\n",
+			wantRefused: false,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			refusal, refused := compilerRefusesAName(c.src)
+			if refused != c.wantRefused {
+				t.Fatalf("the compiler refused=%v (%q), but this row was written for "+
+					"refused=%v, so it no longer tests what its name says\n\n%s",
+					refused, refusal, c.wantRefused, c.src)
+			}
+			said := undefinedComplaints(c.src)
+
+			switch {
+			case refused && len(said) == 0:
+				t.Fatalf("the build refuses this program -- %s -- and the editor "+
+					"reports nothing\n\n%s", refusal, c.src)
+			case !refused && len(said) != 0:
+				t.Fatalf("the editor reports %v on a program the compiler "+
+					"accepts\n\n%s", said, c.src)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -52,7 +53,6 @@ type Server struct {
 	// format at all. There is deliberately no setting that changes *how*
 	// formatting is done.
 	strictFormatting       bool
-	shutdown               bool
 	semanticFallbackWarned bool
 
 	// semanticPrev caches the last full semantic-token result per document so
@@ -68,6 +68,11 @@ type Server struct {
 	// evict the stale entry. Both are guarded by mu.
 	roots   []string
 	scanned map[string]lsp.DocumentUri
+
+	// desyncNoticed holds each document the user has been told is out of step
+	// with the editor, so the notice comes once rather than on every refused
+	// keystroke. setSnapshot and didClose clear it. Guarded by mu.
+	desyncNoticed map[lsp.DocumentUri]struct{}
 }
 
 // semanticResult is a cached full semantic-token response keyed by its result id.
@@ -79,15 +84,16 @@ type semanticResult struct {
 func New(debug bool) *Server {
 	handler := &lsp.Handler{}
 	s := &Server{
-		handler:      handler,
-		documents:    workspace.NewStore(),
-		symbols:      workspace.NewSymbolIndex(),
-		analyzer:     analyzer.New(),
-		sema:         sema.NewWorkspace(nil),
-		snapshots:    make(map[lsp.DocumentUri]*analyzer.Snapshot),
-		semanticPrev: make(map[lsp.DocumentUri]semanticResult),
-		scanned:      make(map[string]lsp.DocumentUri),
-		lintConfig:   analyzer.DefaultLintConfig(),
+		handler:       handler,
+		documents:     workspace.NewStore(),
+		symbols:       workspace.NewSymbolIndex(),
+		analyzer:      analyzer.New(),
+		sema:          sema.NewWorkspace(nil),
+		snapshots:     make(map[lsp.DocumentUri]*analyzer.Snapshot),
+		semanticPrev:  make(map[lsp.DocumentUri]semanticResult),
+		scanned:       make(map[string]lsp.DocumentUri),
+		lintConfig:    analyzer.DefaultLintConfig(),
+		desyncNoticed: make(map[lsp.DocumentUri]struct{}),
 		// Strict formatting is the default; opting out is explicit.
 		strictFormatting: true,
 	}
@@ -160,7 +166,10 @@ func (s *Server) initialize(_ *glsp.Context, params *lsp.InitializeParams) (any,
 	prepareRename := true
 	completion := &lsp.CompletionOptions{TriggerCharacters: []string{".", ":"}}
 	signatureHelp := &lsp.SignatureHelpOptions{TriggerCharacters: []string{"(", ","}, RetriggerCharacters: []string{","}}
-	onTypeFormatting := &lsp.DocumentOnTypeFormattingOptions{FirstTriggerCharacter: "}", MoreTriggerCharacter: []string{";", "\n"}}
+	// No newline trigger: the editor's own indentation rules place the cursor
+	// after Enter, and reformatting the document then removed the line Enter
+	// had just made, so typing a body undid itself (M26-LSP-019).
+	onTypeFormatting := &lsp.DocumentOnTypeFormattingOptions{FirstTriggerCharacter: "}", MoreTriggerCharacter: []string{";"}}
 	// Advertise the concrete kinds/options rather than a bare `true`, so clients
 	// know we only offer quick fixes and that a prepareRename handler exists.
 	codeAction := &lsp.CodeActionOptions{CodeActionKinds: []lsp.CodeActionKind{lsp.CodeActionKindQuickFix}}
@@ -305,10 +314,7 @@ func (s *Server) didChangeWatchedFiles(_ *glsp.Context, params *lsp.DidChangeWat
 		}
 		switch change.Type {
 		case lsp.FileChangeTypeDeleted:
-			s.safeSymbolDelete(change.URI)
-			s.mu.Lock()
-			delete(s.scanned, canonicalPath(path))
-			s.mu.Unlock()
+			s.forgetDeletedFile(change.URI, path)
 		case lsp.FileChangeTypeCreated, lsp.FileChangeTypeChanged:
 			// Skip if an editor has the document open; its snapshot is authoritative.
 			if _, open := s.documents.Snapshot(change.URI); open {
@@ -328,9 +334,6 @@ func (s *Server) didChangeConfiguration(ctx *glsp.Context, params *lsp.DidChange
 }
 
 func (s *Server) shutdownRequest(_ *glsp.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.shutdown = true
 	return nil
 }
 
@@ -364,6 +367,15 @@ func (s *Server) didChange(ctx *glsp.Context, params *lsp.DidChangeTextDocumentP
 		// worse than no squiggle at all (M26-LSP-004).
 		log.Printf("didChange uri=%s version=%d refused: %v", params.TextDocument.URI, params.TextDocument.Version, err)
 		s.publishDiagnostics(ctx, params.TextDocument.URI, lsp.UInteger(params.TextDocument.Version), &analyzer.Snapshot{})
+		s.forgetDesynced(params.TextDocument.URI)
+		// Every feature for the document now answers nothing, and without a
+		// word that reads as the editor breaking. Say why, once (M26-LSP-034).
+		if s.firstDesyncNotice(params.TextDocument.URI) && ctx != nil && ctx.Notify != nil {
+			ctx.Notify(string(lsp.ServerWindowShowMessage), lsp.ShowMessageParams{
+				Type:    lsp.MessageTypeWarning,
+				Message: desyncNotice(params.TextDocument.URI),
+			})
+		}
 		return err
 	}
 	snapshot := s.analyzeDoc(doc.URI, doc.Text)
@@ -372,11 +384,51 @@ func (s *Server) didChange(ctx *glsp.Context, params *lsp.DidChangeTextDocumentP
 	return nil
 }
 
+// forgetDesynced drops everything the server derived from a document whose
+// stored text is no longer the client's: its analysis, its semantic-token
+// baseline, its entry in the cross-file index and its declarations in the
+// shared workspace. Every handler that reads s.snapshot then answers for it as
+// for a document nothing has analysed -- with nothing -- and nothing another
+// file asks reaches into it. A whole-document change or a fresh didOpen
+// analyses it again through setSnapshot, which puts all four back.
+func (s *Server) forgetDesynced(uri lsp.DocumentUri) {
+	s.mu.Lock()
+	delete(s.snapshots, uri)
+	delete(s.semanticPrev, uri)
+	s.mu.Unlock()
+	s.safeSymbolDelete(uri)
+	if s.sema != nil {
+		s.sema.RemoveFile(string(uri))
+	}
+}
+
+// firstDesyncNotice reports whether uri has not yet been noticed as out of
+// step, and notes that it now has.
+func (s *Server) firstDesyncNotice(uri lsp.DocumentUri) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, noticed := s.desyncNoticed[uri]; noticed {
+		return false
+	}
+	s.desyncNoticed[uri] = struct{}{}
+	return true
+}
+
+// desyncNotice is the message shown once when a document falls out of step.
+func desyncNotice(uri lsp.DocumentUri) string {
+	name := string(uri)
+	if path, ok := uriToPath(uri); ok {
+		name = filepath.Base(path)
+	}
+	return fmt.Sprintf("Mutant: %s is out of step with the editor, so hover, completion, navigation and diagnostics for it are paused. Close and reopen it to restore them.", name)
+}
+
 func (s *Server) didClose(ctx *glsp.Context, params *lsp.DidCloseTextDocumentParams) error {
 	s.documents.Close(params.TextDocument.URI)
 	s.mu.Lock()
 	delete(s.snapshots, params.TextDocument.URI)
 	delete(s.semanticPrev, params.TextDocument.URI)
+	delete(s.desyncNoticed, params.TextDocument.URI)
 	s.mu.Unlock()
 	s.safeSymbolDelete(params.TextDocument.URI)
 	s.publishDiagnostics(ctx, params.TextDocument.URI, 0, &analyzer.Snapshot{})
@@ -384,9 +436,56 @@ func (s *Server) didClose(ctx *glsp.Context, params *lsp.DidCloseTextDocumentPar
 	// Keep cross-file navigation working after the tab closes: if the file still
 	// exists on disk, re-index it from disk under its own URI.
 	if path, ok := uriToPath(params.TextDocument.URI); ok {
-		s.indexFileFromDisk(path)
+		// Nothing on disk replaced what this buffer filed -- it was never saved,
+		// its file was deleted, or the file is one the scan does not index -- so
+		// it is forgotten, or every importer keeps resolving against a closed
+		// buffer. Another open spelling of the same file still owns it.
+		if !s.indexFileFromDisk(path) && !s.anOpenDocumentIsTheFile(path) {
+			s.safeSemaRemove(params.TextDocument.URI)
+		}
 	}
 	return nil
+}
+
+// forgetDeletedFile drops what the server knew about a file that is gone from
+// disk: its symbol-index entry and its sema facts, under the URI the scan filed
+// them by as well as the one the client reports. The two are different strings
+// on Windows -- the scan spells file:///C:/..., VS Code file:///c%3A/... -- and
+// both indexes are keyed by the string.
+//
+// An editor that still has the file open keeps it, as the Created and Changed
+// events leave an open document alone: its buffer is authoritative until it
+// closes, and didClose forgets it then if there is still nothing on disk.
+func (s *Server) forgetDeletedFile(uri lsp.DocumentUri, path string) {
+	key := canonicalPath(path)
+	s.mu.Lock()
+	filed, tracked := s.scanned[key]
+	delete(s.scanned, key)
+	s.mu.Unlock()
+
+	if s.anOpenDocumentIsTheFile(path) {
+		return
+	}
+	s.safeSymbolDelete(uri)
+	s.safeSemaRemove(uri)
+	if tracked && filed != uri {
+		s.safeSymbolDelete(filed)
+		s.safeSemaRemove(filed)
+	}
+}
+
+// safeSemaRemove forgets what uri filed in the shared workspace, with
+// safeSemaUpdate's panic recovery for safeSemaUpdate's reason.
+func (s *Server) safeSemaRemove(uri lsp.DocumentUri) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logRecoveredPanic("sema.RemoveFile", uri, recovered)
+		}
+	}()
+	if s.sema == nil {
+		return
+	}
+	s.sema.RemoveFile(string(uri))
 }
 
 func (s *Server) hover(_ *glsp.Context, params *lsp.HoverParams) (*lsp.Hover, error) {
@@ -486,7 +585,7 @@ func quickFixesForDiagnostic(uri lsp.DocumentUri, text string, snapshot *analyze
 
 	if *diagnostic.Source == "mutant-lint" {
 		if strings.HasPrefix(diagnostic.Message, "duplicate top-level declaration `") {
-			rng, ok := lineDeleteRange(text, diagnostic.Range.Start.Line)
+			rng, ok := declarationRemovalRange(snapshot, diagnostic)
 			if !ok {
 				return nil
 			}
@@ -503,8 +602,14 @@ func quickFixesForDiagnostic(uri lsp.DocumentUri, text string, snapshot *analyze
 		}
 
 		if strings.HasPrefix(diagnostic.Message, "unused declaration `") {
-			rng, ok := lineDeleteRange(text, diagnostic.Range.Start.Line)
+			rng, ok := declarationRemovalRange(snapshot, diagnostic)
 			if !ok {
+				return nil
+			}
+			// The rule's own test, asked of the text the edit will be applied
+			// to: a diagnostic from an older publish can name a binding that
+			// has since gained a use.
+			if uses, found := snapshot.ReferenceLocations("", diagnostic.Range.Start, false); found && len(uses) > 0 {
 				return nil
 			}
 			actions = append(actions, lsp.CodeAction{
@@ -529,6 +634,32 @@ func quickFixesForDiagnostic(uri lsp.DocumentUri, text string, snapshot *analyze
 		if fixes := quickFixesForBuiltinArgType(uri, diagnostic); len(fixes) > 0 {
 			return fixes
 		}
+	}
+
+	if *diagnostic.Source == analyzer.DiagnosticSourceDeclarations {
+		// A let the compiler refuses because it declares nothing new. Its own
+		// sentence names the remedy, `x = ...`, and the fix is that edit: the
+		// `let` goes and the statement assigns (M26-LSP-029). Deleting the line,
+		// which is what the fix offered before, compiled and quietly kept the
+		// first value. A let binding several names gets no fix, because the
+		// language has no assignment to several names at once.
+		name, ok := redeclaredName(diagnostic.Message)
+		if !ok {
+			return nil
+		}
+		rng, ok := snapshot.RedeclarationAssignmentRange(diagnostic.Range.Start, name)
+		if !ok {
+			return nil
+		}
+		return append(actions, lsp.CodeAction{
+			Title:       "Change the let to an assignment",
+			Kind:        &kind,
+			Diagnostics: []lsp.Diagnostic{diagnostic},
+			IsPreferred: &preferred,
+			Edit: &lsp.WorkspaceEdit{Changes: map[lsp.DocumentUri][]lsp.TextEdit{
+				uri: {{Range: rng, NewText: ""}},
+			}},
+		})
 	}
 
 	if *diagnostic.Source == analyzer.DiagnosticSourceFormat {
@@ -701,6 +832,29 @@ func quickFixesForUndefinedIdentifier(uri lsp.DocumentUri, text string, snapshot
 	}
 
 	return actions
+}
+
+// declarationRemovalRange is the range a quick fix deletes to remove the
+// declaration a diagnostic names: the declaring statement's own extent, widened
+// to whole lines only when nothing else is on them.
+func declarationRemovalRange(snapshot *analyzer.Snapshot, diagnostic lsp.Diagnostic) (lsp.Range, bool) {
+	name, ok := diagnosticBacktickName(diagnostic.Message)
+	if !ok {
+		return lsp.Range{}, false
+	}
+	return snapshot.DeclarationRemovalRange(diagnostic.Range.Start, name)
+}
+
+// redeclaredName is the one name a single-name redeclaration refusal names,
+// read from sema.DuplicateDeclarationRefusal's sentence. A refusal naming
+// several names is worded differently and has no assignment to offer, so it
+// answers false, as does a message in any other shape.
+func redeclaredName(message string) (string, bool) {
+	name, _, found := strings.Cut(message, " is already declared in this scope")
+	if !found || name == "" || strings.ContainsAny(name, " ,`") {
+		return "", false
+	}
+	return name, true
 }
 
 func diagnosticBacktickName(message string) (string, bool) {
@@ -885,31 +1039,6 @@ func levenshteinDistance(a, b string) int {
 	return prev[len(br)]
 }
 
-func lineDeleteRange(text string, line lsp.UInteger) (lsp.Range, bool) {
-	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-	lines := strings.Split(normalized, "\n")
-	if len(lines) == 0 {
-		return lsp.Range{}, false
-	}
-
-	idx := int(line)
-	if idx < 0 || idx >= len(lines) {
-		return lsp.Range{}, false
-	}
-
-	if idx == len(lines)-1 {
-		return lsp.Range{
-			Start: lsp.Position{Line: lsp.UInteger(idx), Character: 0},
-			End:   lsp.Position{Line: lsp.UInteger(idx), Character: lsp.UInteger(localprotocol.UTF16Len(lines[idx]))},
-		}, true
-	}
-
-	return lsp.Range{
-		Start: lsp.Position{Line: lsp.UInteger(idx), Character: 0},
-		End:   lsp.Position{Line: lsp.UInteger(idx + 1), Character: 0},
-	}, true
-}
-
 func (s *Server) documentSymbols(_ *glsp.Context, params *lsp.DocumentSymbolParams) (any, error) {
 	snapshot, ok := s.snapshot(params.TextDocument.URI)
 	if !ok {
@@ -1081,6 +1210,11 @@ func (s *Server) rename(_ *glsp.Context, params *lsp.RenameParams) (*lsp.Workspa
 	if len(locations) == 0 {
 		return nil, nil
 	}
+	if declared, workspaceWide := s.workspaceDeclarationAt(snapshot, params.TextDocument.URI, params.Position); workspaceWide {
+		if err := s.refuseWorkspaceRename(declared, params.NewName); err != nil {
+			return nil, err
+		}
+	}
 
 	editsByURI := make(map[lsp.DocumentUri][]lsp.TextEdit)
 	for _, location := range locations {
@@ -1101,6 +1235,34 @@ func (s *Server) rename(_ *glsp.Context, params *lsp.RenameParams) (*lsp.Workspa
 	}
 
 	return &lsp.WorkspaceEdit{Changes: editsByURI}, nil
+}
+
+// refuseWorkspaceRename is why a rename that reaches past its own file cannot
+// be made, or nil when it can.
+//
+// Two reasons, both about text the edit would be wrong for. A document the
+// store could not keep in step may name the declaration in text the server does
+// not have, so no set of edits can be known to be complete (M26-LSP-034). And a
+// value read from another module is read as `alias.name`, which the compiler
+// refuses for a name beginning with _ -- types and macros cross written bare and
+// are not filtered by that rule (sema/toplevel.go), so only values are refused
+// (M26-LSP-021).
+func (s *Server) refuseWorkspaceRename(declared workspaceDeclaration, newName string) error {
+	for _, uri := range s.documents.URIs() {
+		if doc, ok := s.documents.Snapshot(uri); ok && doc != nil && doc.Desynced {
+			return fmt.Errorf("cannot rename %s: %s is out of step with the editor, so its uses cannot be known; close and reopen it first", declared.name, uri)
+		}
+	}
+	// Only a rename that makes a public value private breaks a reader: a
+	// reader of a name that is already private is already refused.
+	if !sema.IsModulePrivate(newName) || sema.IsModulePrivate(declared.name) || declared.writtenBare {
+		return nil
+	}
+	if readers := s.workspaceReferenceLocations(declared, false); len(readers) > 0 {
+		return fmt.Errorf("cannot rename %s to %s: a top-level name beginning with _ is visible only inside the module that declares it, and %d use(s) in other files read it as a namespace member",
+			declared.name, newName, len(readers))
+	}
+	return nil
 }
 
 func (s *Server) semanticTokensFull(ctx *glsp.Context, params *lsp.SemanticTokensParams) (tokens *lsp.SemanticTokens, err error) {
@@ -1320,7 +1482,9 @@ func (s *Server) onTypeFormatting(_ *glsp.Context, params *lsp.DocumentOnTypeFor
 		return nil, nil
 	}
 
-	allowed := params.Ch == "}" || params.Ch == ";" || params.Ch == "\n"
+	// A client that sends a character it was not offered is answered as if it
+	// had not: "\n" in particular, which this server no longer registers.
+	allowed := params.Ch == "}" || params.Ch == ";"
 	if !allowed {
 		return nil, nil
 	}
@@ -1435,7 +1599,7 @@ func (s *Server) republishAllDiagnostics(ctx *glsp.Context) {
 
 	for _, uri := range uris {
 		doc, ok := s.documents.Snapshot(uri)
-		if !ok || doc == nil {
+		if !ok || doc == nil || doc.Desynced {
 			continue
 		}
 		snapshot, ok := s.snapshot(uri)
@@ -1473,6 +1637,8 @@ func (s *Server) setSnapshot(uri lsp.DocumentUri, snapshot *analyzer.Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snapshots[uri] = snapshot
+	// Analysed again, so in step again: a later desync is news.
+	delete(s.desyncNoticed, uri)
 	s.safeSymbolUpdate(uri, snapshot)
 	s.safeSemaUpdate(uri, snapshot)
 }
@@ -1712,14 +1878,19 @@ func strptr(value string) *string {
 }
 
 func isValidIdentifierName(name string) bool {
-	if name == "" || token.LookupIdent(name) != token.IDENT {
+	// `_` alone is the discard, which the one-declaration rule exempts: a
+	// binding renamed to it would be silently rebound by the next
+	// `let _, err = f();`.
+	if name == "" || name == "_" || token.LookupIdent(name) != token.IDENT {
 		return false
 	}
 	first := true
 	for _, ch := range name {
 		if first {
 			first = false
-			if !unicode.IsLetter(ch) {
+			// The lexer's own start set: lexer.go begins an identifier on
+			// unicode.IsLetter or '_'.
+			if !unicode.IsLetter(ch) && ch != '_' {
 				return false
 			}
 			continue
@@ -1847,15 +2018,6 @@ func fullDocumentRange(text string) lsp.Range {
 	return lsp.Range{
 		Start: lsp.Position{Line: 0, Character: 0},
 		End:   lsp.Position{Line: lsp.UInteger(lastLine), Character: lsp.UInteger(lastCharacter)},
-	}
-}
-
-func isWorkspaceResolvableTopLevelKind(kind lsp.SymbolKind) bool {
-	switch kind {
-	case lsp.SymbolKindVariable, lsp.SymbolKindFunction, lsp.SymbolKindStruct, lsp.SymbolKindEnum:
-		return true
-	default:
-		return false
 	}
 }
 

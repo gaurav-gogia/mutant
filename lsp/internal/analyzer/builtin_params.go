@@ -310,21 +310,21 @@ func reassignedNames(snapshot *Snapshot) map[string]struct{} {
 				names[ident.Value] = struct{}{}
 			}
 		case *mast.FunctionLiteral:
-			// Function parameters are excluded for a different reason than
-			// assignment, and a more important one.
+			// Function parameters are excluded as well, for a different reason
+			// than assignment.
 			//
-			// A parameter's type does not come from inference at all: it comes
-			// from the constraint solver in fn_solver.go, which deduces it from
-			// how the body uses it. That is a sound basis for *describing* a
-			// function in hover, and not a sound basis for underlining a call —
-			// a deduction about a dynamically-typed program is not the same kind
-			// of fact as a builtin's verified contract.
+			// A parameter has no known type: inference types every parameter
+			// Any. fn_solver.go deduces how the body uses one, which is a basis
+			// for describing a function on its card and not for underlining a
+			// call -- a deduction about a dynamically-typed program is not the
+			// same kind of fact as a builtin's verified contract.
 			//
-			// Excluding the names here is what makes "solved types are
-			// display-only" a property of the code rather than an argument about
-			// it. It costs nothing in practice: contradictory constraints
-			// collapse to Any, so a solved parameter could not have produced a
-			// diagnostic anyway.
+			// This exclusion alone never made that deduction display-only.
+			// Inference used to seed it into the body, and it reached this rule
+			// through aliases and return types (M26-SEM-003); what keeps it out
+			// now is that inference no longer reads the solver at all. The
+			// exclusion stays as a second guard, because a parameter is exactly
+			// the name a future change could type from a deduction again.
 			for _, p := range n.Parameters {
 				if p != nil && p.Value != "" {
 					names[p.Value] = struct{}{}

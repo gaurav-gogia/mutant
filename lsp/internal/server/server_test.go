@@ -1674,10 +1674,11 @@ func TestSignatureHelpForUserDefinedFunctionCall(t *testing.T) {
 	if len(help.Signatures) != 1 {
 		t.Fatalf("signature count = %d, want 1", len(help.Signatures))
 	}
-	// Signature help for a user function now carries the solved kinds, the same
-	// way it has carried a builtin's declared ones since the parameter contracts
-	// landed.
-	wantLabel := "add(a: STRING|INTEGER|FLOAT, b: STRING|INTEGER|FLOAT)"
+	// Signature help for a user function shows its parameter names. The kinds
+	// the solver deduces describe how the body uses a parameter, not a type a
+	// caller is held to, so they are on the function card as "used as" and not
+	// here (M26-SEM-019).
+	wantLabel := "add(a, b)"
 	if help.Signatures[0].Label != wantLabel {
 		t.Fatalf("signature label = %q, want %q", help.Signatures[0].Label, wantLabel)
 	}
@@ -3347,13 +3348,14 @@ func TestHoverOnFunctionIdentifierIncludesSignatureAndDocComment(t *testing.T) {
 		t.Fatalf("hover contents type = %T, want MarkupContent", hover.Contents)
 	}
 	// `a + b` is the VM's binary operation, which accepts INTEGER x INTEGER,
-	// STRING x STRING, or numeric x numeric — so the solver narrows both
-	// parameters to exactly those three kinds and no further.
-	if !strings.Contains(contents.Value, "function `add(a: STRING|INTEGER|FLOAT, b: STRING|INTEGER|FLOAT)") {
-		t.Fatalf("hover contents = %q, want the solved function signature", contents.Value)
+	// STRING x STRING, BYTES x BYTES, or numeric x numeric — so the solver
+	// narrows both parameters to exactly those four kinds and no further. The
+	// card says it as a use and keeps it off the signature line (M26-SEM-019).
+	if !strings.Contains(contents.Value, "function `add(a, b)`") {
+		t.Fatalf("hover contents = %q, want the function signature", contents.Value)
 	}
-	if !strings.Contains(contents.Value, "- `a` · `STRING|INTEGER|FLOAT` _(inferred)_") {
-		t.Fatalf("hover contents = %q, want a typed parameter bullet", contents.Value)
+	if !strings.Contains(contents.Value, "- `a` _(used as STRING|BYTES|INTEGER|FLOAT)_") {
+		t.Fatalf("hover contents = %q, want a parameter bullet saying how a is used", contents.Value)
 	}
 	if !strings.Contains(contents.Value, "Adds two numbers together") {
 		t.Fatalf("hover contents = %q, want doc comment", contents.Value)

@@ -155,10 +155,13 @@ func (s *Snapshot) VisibleBindingsAt(pos lsp.Position) []binding {
 // struct a declaration holds, so that `p.x` resolves to Point's field rather
 // than to Vector's.
 //
-// Two sources, cheapest first. structTypeNameForDeclaration reads the statement
-// that declares the binding and needs no inference pass; TypeOf runs one, and
-// reaches a struct that arrived through a function's return or through another
-// binding. Neither is consulted unless a field expression is actually walked.
+// Two sources, cheapest first. structTypeNameForDeclaration answers from the
+// statement that declares the binding, out of an index built in one walk, and
+// needs no inference pass; TypeOf runs one, and reaches a struct that arrived
+// through a function's return or through another binding. Neither is consulted
+// unless a field expression is actually walked, and the build asks once per
+// field read, which is why the first must not be a walk of its own
+// (M26-SEM-004).
 //
 // This runs INSIDE Graph's sync.Once, so neither source may ask for the graph.
 // See the note on Graph: the failure would be a deadlock, not a stack overflow,

@@ -122,12 +122,18 @@ func (s *Snapshot) StructFieldDiagnostics() []lsp.Diagnostic {
 		// graph counts the same 1-based line and byte column the range does, so
 		// converting out and back is a round trip that M26-LSP-027 showed can be
 		// wrong in both directions at once.
-		declared, resolved := s.resolveDefinitionAt(field.rng.Start.Line, field.rng.Start.Column)
-		if !resolved || declared.ident == nil {
+		//
+		// Resolve rather than resolveDefinitionAt: when nothing binds the
+		// receiver, `str.upper`, that one falls back to a scan of every field
+		// name in the file, once per read, and what the scan finds is a field
+		// identifier, which can never be a struct literal's binding
+		// (M26-SEM-004).
+		declared, resolved := s.Graph().Resolve(field.rng.Start.Line, field.rng.Start.Column)
+		if !resolved || declared.Ident == nil {
 			continue
 		}
 
-		typeName, isStructBinding := s.structTypeNameForDeclaration(declared.ident)
+		typeName, isStructBinding := s.structTypeNameForDeclaration(declared.Ident)
 		if !isStructBinding {
 			continue
 		}

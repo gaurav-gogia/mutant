@@ -246,3 +246,88 @@ func TestBuiltinArgTypeAcceptsStructsWhereTheyAreTaken(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinArgTypeIgnoresWhatTheSolverDeduced pins that nothing fn_solver.go
+// deduced about a parameter reaches the argument-type rule. Inference used to
+// seed the solver's kinds into each function body, and they rode out on aliases
+// and return types into names the rule trusts (M26-SEM-003). Every program here
+// runs; the comment on each says what it prints.
+func TestBuiltinArgTypeIgnoresWhatTheSolverDeduced(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+	}{
+		{
+			// Prints `solver: ABC`: the guarded branch returns the string.
+			name: "through the return type, past a type guard",
+			src: `let low_byte = fn(v) {
+    if (type_of(v) == "STRING") { return v; }
+    return v & 255;
+};
+let s = low_byte("abc");
+putf("solver: %v\n", str_upper(s));
+`,
+		},
+		{
+			// Prints `alias: ABC`: v is "abc", so w is too.
+			name: "through an alias in the body",
+			src: `let low_byte = fn(v) {
+    if (type_of(v) == "STRING") { let w = v; return str_upper(w); }
+    return v & 255;
+};
+putf("alias: %v\n", low_byte("abc"));
+`,
+		},
+		{
+			// Prints `abs: 5`: str_upper(5) returns an error value, and the
+			// function carries on and returns 5.
+			name: "on a straight line, with no guard at all",
+			src: `let f = fn(a) {
+    let shout = str_upper(a);
+    return a;
+};
+let r = f(5);
+putf("abs: %v\n", abs(r));
+`,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if msgs := argTypeMessages(t, c.src); len(msgs) != 0 {
+				t.Errorf("a deduction about a parameter reached the diagnostic: %v\n%s", msgs, c.src)
+			}
+		})
+	}
+}
+
+// TestBuiltinArgTypeStillChecksWhatIsCertain is the control for the test above:
+// a name bound from a literal, or from a builtin's fixed pair contract, is
+// still checked.
+func TestBuiltinArgTypeStillChecksWhatIsCertain(t *testing.T) {
+	if msgs := argTypeMessages(t, "let s = 42;\nstr_upper(s);\n"); len(msgs) != 1 {
+		t.Errorf("a literal-bound name must still be checked, got %v", msgs)
+	}
+	if msgs := argTypeMessages(t, "let data, err = fs_read_bytes(\"disk.img\");\nstr_upper(data);\n"); len(msgs) != 1 {
+		t.Errorf("a builtin-pair-bound name must still be checked, got %v", msgs)
+	}
+}
+
+// TestBuiltinArgTypeKnowsAFunctionsOwnName pins that inside a function literal
+// its own name is the literal, as the compiler's DefineFunctionName makes it,
+// whatever an outer binding of that name holds. Inference used to see the outer
+// `let walk = 0` there and called map's second argument an INTEGER
+// (M26-SEM-020). The program prints [] and then 0.
+func TestBuiltinArgTypeKnowsAFunctionsOwnName(t *testing.T) {
+	src := `let walk = 0;
+if (true) {
+    let walk = fn(xs) {
+        if (len(xs) == 0) { return []; }
+        return map(xs, walk);
+    };
+    putf("%v\n", walk([]));
+}
+putf("%v\n", walk);
+`
+	if msgs := argTypeMessages(t, src); len(msgs) != 0 {
+		t.Errorf("a self-named function shadowing an outer binding was flagged: %v", msgs)
+	}
+}

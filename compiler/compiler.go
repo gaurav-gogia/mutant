@@ -763,7 +763,7 @@ func (c *Compiler) Compile(node ast.Node) error {
 
 	rng, ok := c.positions[node]
 	if !ok || !rng.Start.IsValid() || (!fromMacro && !anchorsPosition(node)) {
-		return c.compileNode(node)
+		return locate(c.compileNode(node), rng, ok)
 	}
 
 	savedLine, savedCol := c.posLine, c.posCol
@@ -789,7 +789,7 @@ func (c *Compiler) Compile(node ast.Node) error {
 	c.posLine, c.posCol = savedLine, savedCol
 	c.posEndLine, c.posEndCol = savedEndLine, savedEndCol
 	c.macroLine, c.macroCol = savedMacroLine, savedMacroCol
-	return err
+	return locate(err, rng, true)
 }
 
 // anchorsPosition reports whether a node should move the position instructions

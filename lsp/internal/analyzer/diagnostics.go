@@ -351,18 +351,33 @@ func Diagnostics(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnostic {
 	// Without a workspace this yields nothing, which is exactly right for
 	// api.Lint and the REPL: they are handed a string with no file context,
 	// so they cannot know what an import names and must not guess.
-	diagnostics = append(diagnostics, snapshot.ModuleMemberDiagnostics()...)
+	moduleMember := snapshot.ModuleMemberDiagnostics()
+	diagnostics = append(diagnostics, moduleMember...)
+	// An import cycle, or two imports binding one namespace: refusals the
+	// module loader makes before the compiler runs (M26-SEM-006).
+	diagnostics = append(diagnostics, snapshot.ImportDiagnostics()...)
 
 	// A field a struct does not declare, on the same terms and for the same
 	// reason: the build will refuse it, so the editor says so in the compiler's
 	// own words. lsp/internal/analyzer/struct_field.go.
-	diagnostics = append(diagnostics, snapshot.StructFieldDiagnostics()...)
+	structField := snapshot.StructFieldDiagnostics()
+	diagnostics = append(diagnostics, structField...)
+
+	// A let that declares nothing its scope did not already hold, in the
+	// compiler's words and on the compiler's rule (refuseIfNothingIsNew).
+	redeclared, redeclaredNames := snapshot.duplicateDeclarationRefusals()
+	diagnostics = append(diagnostics, redeclared...)
 
 	duplicateDiagnostics := lintDuplicateTopLevelDeclarations(snapshot, lintConfig)
 	diagnostics = append(diagnostics, duplicateDiagnostics...)
-	diagnostics = append(diagnostics, lintUnusedDeclarations(snapshot, lintConfig, duplicateNamesFromDiagnostics(duplicateDiagnostics))...)
+	skipUnused := duplicateNamesFromDiagnostics(duplicateDiagnostics)
+	for name := range redeclaredNames {
+		skipUnused[name] = struct{}{}
+	}
+	diagnostics = append(diagnostics, lintUnusedDeclarations(snapshot, lintConfig, skipUnused)...)
 	diagnostics = append(diagnostics, lintUnusedImports(snapshot, lintConfig)...)
-	diagnostics = append(diagnostics, lintUndefinedDeclarations(snapshot, lintConfig)...)
+	undefined := lintUndefinedDeclarations(snapshot, lintConfig)
+	diagnostics = append(diagnostics, undefined...)
 	diagnostics = append(diagnostics, lintNestingComplexity(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintSemicolons(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintUnreachableCode(snapshot, lintConfig)...)
@@ -377,7 +392,8 @@ func Diagnostics(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnostic {
 	diagnostics = append(diagnostics, lintWeakCrypto(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintHardcodedSecret(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintCommandInjection(snapshot, lintConfig)...)
-	diagnostics = append(diagnostics, lintAssignmentTargets(snapshot, lintConfig)...)
+	assignment := lintAssignmentTargets(snapshot, lintConfig)
+	diagnostics = append(diagnostics, assignment...)
 	diagnostics = append(diagnostics, lintEvidenceMutation(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintPathTraversal(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintClassifiedPlaintext(snapshot, lintConfig)...)
@@ -386,6 +402,18 @@ func Diagnostics(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnostic {
 	diagnostics = append(diagnostics, lintSecretOption(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintLifecycleState(snapshot, lintConfig)...)
 	diagnostics = append(diagnostics, lintMacroSafety(snapshot, lintConfig)...)
+
+	// Last, and told only what the rules that reproduce a compiler refusal
+	// found: a refusal one of them already reports where the compiler raised
+	// it is not reported twice. Nothing else may silence it -- a rule a user
+	// raised to error is not a refusal of the build.
+	refusals := make([]lsp.Diagnostic, 0, len(moduleMember)+len(structField)+len(redeclared)+len(undefined)+len(assignment))
+	refusals = append(refusals, moduleMember...)
+	refusals = append(refusals, structField...)
+	refusals = append(refusals, redeclared...)
+	refusals = append(refusals, undefined...)
+	refusals = append(refusals, assignment...)
+	diagnostics = append(diagnostics, snapshot.CompileDiagnostics(refusals)...)
 
 	if len(diagnostics) == 0 {
 		return nil
@@ -668,18 +696,18 @@ func lintDuplicateTopLevelDeclarations(snapshot *Snapshot, lintConfig LintConfig
 		if !isRedeclarable(node) {
 			continue
 		}
-
-		key := declarationKey{scope: node.Scope, name: node.Name}
-		previous, seen := first[key]
-		if !seen {
-			first[key] = node
+		// Values and parameters are judged by duplicateDeclarationRefusals, on
+		// the compiler's own rule and in its words (M26-LSP-029). What is left
+		// here is two structs or two enums of one name, which the compiler
+		// accepts -- the second replaces the first -- and this rule warns
+		// about.
+		if node.Kind != sema.KindStruct && node.Kind != sema.KindEnum {
 			continue
 		}
 
-		// previous stays the FIRST declaration rather than the one last
-		// reported: `let x = 1; let x = 2; let x = 3;` is two mistakes against
-		// one original, and the suppression below asks about the original.
-		if rebindsAConsumedName(graph, previous) {
+		key := declarationKey{scope: node.Scope, name: node.Name}
+		if _, seen := first[key]; !seen {
+			first[key] = node
 			continue
 		}
 
@@ -739,13 +767,14 @@ func isRedeclarable(node *sema.Node) bool {
 //
 // That is what the two messages distinguish, and the distinction is load
 // bearing rather than cosmetic: the "Remove duplicate top-level declaration"
-// quick fix is offered for one wording and not the other, and it deletes a
-// whole line.
+// quick fix is offered for one wording and not the other, and it deletes the
+// declaration.
 //
-// A value is top level exactly when it is in the root scope, because a block
-// opens no scope in Mutant and so there is nothing in between. A type name is
-// in no scope chain at all -- struct and enum names are program-global -- so
-// for one of those the question is put to the statement list instead.
+// A value is top level exactly when it is in the root scope: every block opens
+// a scope of its own, so a value declared anywhere else is in one of those. A
+// type name is in no scope chain at all -- struct and enum names are
+// program-global -- so for one of those the question is put to the statement
+// list instead.
 func declaredAtTopLevel(node *sema.Node, graph *sema.Graph, topLevelTypes map[*mast.Identifier]struct{}) bool {
 	if node == nil || graph == nil {
 		return false
@@ -776,38 +805,6 @@ func topLevelTypeNames(statements []mast.Statement) map[*mast.Identifier]struct{
 		}
 	}
 	return named
-}
-
-// rebindsAConsumedName reports whether the earlier declaration was part of a
-// multiple binding that was read before it was replaced.
-//
-//	let text, err = read(path);
-//	if (err != null) { return err; }
-//	text;
-//	let text = trim(text);
-//
-// is the error idiom rather than a mistake: the pair is bound, the error half
-// decides whether to go on, the value half is used while it is known good, and
-// the name is then rebound. The rule's premise is that one of two declarations
-// of a name is pointless, and a binding that was read is not that.
-//
-// The question is asked of UsesOf, which is keyed by the declaration's own
-// identity, so every use it returns belongs to THIS binding of the name and not
-// to the one that replaced it -- after the rebinding, a use of the name resolves
-// to the later declaration and is not in this list at all. That is what makes
-// "was it read" a sufficient question.
-//
-// It was not sufficient before. The check used to ask ReferenceLocations for a
-// POSITION, which cannot tell the two bindings apart, so it settled for a use on
-// the line directly below the declaration -- where the second binding does not
-// yet exist. The cost of that approximation was the idiom's own recommended
-// shape: a program that checks err before touching the value never has the use
-// on the line below, and was told it had declared the name twice.
-func rebindsAConsumedName(graph *sema.Graph, previous *sema.Node) bool {
-	if graph == nil || previous == nil || !previous.Grouped {
-		return false
-	}
-	return len(graph.UsesOf(previous.ID)) > 0
 }
 
 func syntaxBalanceDiagnostics(sourceText string) []lsp.Diagnostic {
@@ -1134,10 +1131,23 @@ func lintUnusedImports(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnost
 		return nil
 	}
 
+	// An alias two imports bind is not unused, whichever one a use reaches: the
+	// build refuses the file, ImportDiagnostics says so, and the graph resolves
+	// a use to the later import while the loader binds the first.
+	bindings := make(map[string]int, 4)
+	for _, node := range graph.TopLevel() {
+		if node != nil && node.Kind == sema.KindNamespace {
+			bindings[node.Name]++
+		}
+	}
+
 	source := "mutant-lint"
 	result := make([]lsp.Diagnostic, 0, 2)
 	for _, node := range graph.TopLevel() {
 		if node == nil || node.Kind != sema.KindNamespace {
+			continue
+		}
+		if bindings[node.Name] > 1 {
 			continue
 		}
 		if len(graph.UsesOf(node.ID)) > 0 {
@@ -1838,8 +1848,9 @@ func (c *builtinCallCollector) collectStatement(stmt mast.Statement) {
 	case *mast.ForInStatement:
 		// The loop's bindings used to be recorded here, so that `for (max in
 		// xs) { max(1, 2); }` was not held to the builtin's contract. The graph
-		// holds them -- in the enclosing scope, which is where the VM puts them
-		// -- so this walk has nothing to do but descend.
+		// holds them -- in the loop header's own scope, with the body nested
+		// inside it, which is where the compiler puts them -- so this walk has
+		// nothing to do but descend.
 		if node.Iterable != nil {
 			c.collectExpression(node.Iterable)
 		}
@@ -1966,29 +1977,6 @@ func (c *builtinCallCollector) collectExpression(expr mast.Expression) {
 	}
 }
 
-// checkCall runs both builtin-call rules at one call site: the argument count
-// against the curated arity table, then each argument's type against the
-// parameter kinds declared in builtin/metadata.go.
-//
-// A call that fails the arity check is not type-checked. Its arguments cannot be
-// mapped onto parameters with any confidence, and one clear complaint per call
-// beats a cascade of consequential ones.
-// checkMultiNameBinding flags `let a, b = f()` where f is a builtin that
-// returns a single value rather than the (value, err) pair the fallible parts of
-// the library use.
-//
-// Nothing fails when this is written: the extra names simply take whatever the
-// binding hands them. If the single value is an ARRAY the binding takes it
-// apart, so the first name receives the array's first element -- `let updated,
-// err = push(items, x)` leaves `updated` as `items[0]`. If it is anything else
-// the first name is correct and the rest are null, so an `if (err)` check
-// silently never fires. Both shapes run to completion with the wrong value,
-// which is exactly why a diagnostic is worth more here than a runtime error.
-//
-// The guards that keep it false-positive-free mirror checkCall's: the callee
-// must be an unshadowed live builtin, and it must carry a declared return
-// contract. A builtin whose contract says pair, or one with no contract at all,
-// is never reported.
 // checkDeprecated reports a call to a builtin that is kept only for
 // compatibility, and names what replaced it.
 //
@@ -2023,6 +2011,22 @@ func (c *builtinCallCollector) checkDeprecated(name string, anchor mast.Node) {
 	})
 }
 
+// checkMultiNameBinding flags `let a, b = f()` where f is a builtin that
+// returns a single value rather than the (value, err) pair the fallible parts of
+// the library use.
+//
+// Nothing fails when this is written: the extra names simply take whatever the
+// binding hands them. If the single value is an ARRAY the binding takes it
+// apart, so the first name receives the array's first element -- `let updated,
+// err = push(items, x)` leaves `updated` as `items[0]`. If it is anything else
+// the first name is correct and the rest are null, so an `if (err)` check
+// silently never fires. Both shapes run to completion with the wrong value,
+// which is exactly why a diagnostic is worth more here than a runtime error.
+//
+// The guards that keep it false-positive-free mirror checkCall's: the callee
+// must be an unshadowed live builtin, and it must carry a declared return
+// contract. A builtin whose contract says pair, or one with no contract at all,
+// is never reported.
 func (c *builtinCallCollector) checkMultiNameBinding(names []*mast.Identifier, value mast.Expression) {
 	if c == nil || c.returnSeverity == nil || len(names) < 2 || value == nil {
 		return
@@ -2078,6 +2082,13 @@ func (c *builtinCallCollector) checkMultiNameBinding(names []*mast.Identifier, v
 // fs_read(p), the whole `fs.read` for the dotted form. Shadowing has already
 // been decided by builtinCallee, which is what lets one predicate serve every
 // rule instead of each one spelling it slightly differently.
+//
+// It runs both builtin-call rules at the call site: the argument count against
+// the curated arity table, then each argument's type against the parameter
+// kinds declared in builtin/metadata.go. A call that fails the arity check is
+// not type-checked. Its arguments cannot be mapped onto parameters with any
+// confidence, and one clear complaint per call beats a cascade of consequential
+// ones.
 func (c *builtinCallCollector) checkCall(name string, anchor mast.Node, args []mast.Expression) {
 	if name == "" || anchor == nil {
 		return

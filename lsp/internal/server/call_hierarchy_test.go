@@ -148,8 +148,9 @@ func TestARecursiveCallIsAnEdge(t *testing.T) {
 	if got := outgoingNames(t, s, item); !equalStrings(got, []string{"down"}) {
 		t.Fatalf("callees = %v, want [down]", got)
 	}
-	if got := incomingNames(t, s, item); !equalStrings(got, []string{"down"}) {
-		t.Fatalf("callers = %v, want [down]", got)
+	// `down(1);` at the top level is a call too, made by the file.
+	if got := incomingNames(t, s, item); !equalStrings(got, []string{"down", "main.mut"}) {
+		t.Fatalf("callers = %v, want [down main.mut]", got)
 	}
 }
 
@@ -381,5 +382,147 @@ func TestACallHierarchyItemCoversTheWholeDeclarationNotJustTheName(t *testing.T)
 		item.Range.End.Line < item.SelectionRange.End.Line {
 		t.Fatalf("selectionRange %+v is not contained by range %+v, which the "+
 			"protocol requires", item.SelectionRange, item.Range)
+	}
+}
+
+// A file's top level is the caller of most calls in a script. The graph records
+// those with From == nil, and the analyzer's IncomingCalls skipped every one of
+// them while its comment said they were reported under the file
+// (M26-SEM-012). The server names that caller after the file, as it already
+// did for another file's top level.
+
+func incomingCallsOf(t *testing.T, s *Server, item lsp.CallHierarchyItem) []lsp.CallHierarchyIncomingCall {
+	t.Helper()
+	calls, err := s.callHierarchyIncomingCalls(nil, &lsp.CallHierarchyIncomingCallsParams{Item: item})
+	if err != nil {
+		t.Fatalf("incomingCalls: %v", err)
+	}
+	return calls
+}
+
+// fileLevelCaller is the one caller among calls that is a file, and how many
+// such callers there were.
+func fileLevelCaller(calls []lsp.CallHierarchyIncomingCall) (lsp.CallHierarchyIncomingCall, int) {
+	var file lsp.CallHierarchyIncomingCall
+	count := 0
+	for _, call := range calls {
+		if call.From.Kind == lsp.SymbolKindFile {
+			file = call
+			count++
+		}
+	}
+	return file, count
+}
+
+func TestACallAtTheTopLevelOfTheSameFileIsAttributedToTheFile(t *testing.T) {
+	root := writeModules(t, map[string]string{
+		"main.mut": "let helper = fn() { return 1; };\n" +
+			"let main = fn() { return helper(); };\n" +
+			"helper();\n" +
+			"helper();\n",
+	})
+	s, uri := serverOver(t, root, "main.mut")
+
+	item := prepareAt(t, s, uri, 0, 4)
+	if item.Name != "helper" {
+		t.Fatalf("prepare resolved to %q, want helper", item.Name)
+	}
+	calls := incomingCallsOf(t, s, item)
+
+	total := 0
+	for _, call := range calls {
+		total += len(call.FromRanges)
+	}
+	if total != 3 {
+		t.Errorf("call sites = %d, want 3: helper is called once inside main and twice at the top level", total)
+	}
+	file, files := fileLevelCaller(calls)
+	if files != 1 {
+		t.Fatalf("file-level callers = %d, want 1: the two top-level calls are made by main.mut", files)
+	}
+	if file.From.Name != "main.mut" || file.From.URI != uri || len(file.FromRanges) != 2 {
+		t.Errorf("file caller = %q at %s with %d sites, want main.mut at %s with 2",
+			file.From.Name, file.From.URI, len(file.FromRanges), uri)
+	}
+	// The sites are the two `helper` names on lines 2 and 3.
+	for i, line := range []lsp.UInteger{2, 3} {
+		if i < len(file.FromRanges) && (file.FromRanges[i].Start.Line != line || file.FromRanges[i].Start.Character != 0) {
+			t.Errorf("site %d = %+v, want line %d character 0", i, file.FromRanges[i], line)
+		}
+	}
+}
+
+// TestACallInsideATopLevelClosureIsAttributedToTheFile: an anonymous function
+// declares nothing, so a call inside one written at the top level belongs to
+// the file, as one inside a declaration belongs to the declaration.
+func TestACallInsideATopLevelClosureIsAttributedToTheFile(t *testing.T) {
+	root := writeModules(t, map[string]string{
+		"main.mut": "let helper = fn(x) { return x; };\n" +
+			"map([1], fn(x) { return helper(x); });\n",
+	})
+	s, uri := serverOver(t, root, "main.mut")
+
+	calls := incomingCallsOf(t, s, prepareAt(t, s, uri, 0, 4))
+	if _, files := fileLevelCaller(calls); len(calls) != 1 || files != 1 {
+		t.Errorf("callers = %d (%d file-level), want exactly one, the file", len(calls), files)
+	}
+}
+
+// TestTopLevelCallsOnTwoLinesOfAnotherFileAreOneCaller: the cross-file half
+// grouped a file caller by the line of each call, so one file calling from two
+// lines was listed as two callers of the same name.
+func TestTopLevelCallsOnTwoLinesOfAnotherFileAreOneCaller(t *testing.T) {
+	root := writeModules(t, map[string]string{
+		"lib.mut": "let mean = fn(xs) { return 0; };\n",
+		"main.mut": "import stats \"lib.mut\";\n" +
+			"stats.mean([1]);\n" +
+			"stats.mean([2]);\n",
+	})
+	s, _ := serverOver(t, root, "main.mut")
+
+	calls := incomingCallsOf(t, s, prepareAt(t, s, pathToURI(root+"/lib.mut"), 0, 4))
+	if len(calls) != 1 || len(calls[0].FromRanges) != 2 {
+		t.Errorf("callers = %d, want 1 (main.mut) with 2 sites", len(calls))
+	}
+}
+
+// TestAFileCallerIsCalledByNothingAndCallsWhatItsTopLevelCalls: the editor
+// hands a caller item back to expand it. A file item's range is a call site, so
+// resolving it by position answered for the function called there: its callers
+// came back as the file's callers, and its callees as the file's callees.
+func TestAFileCallerIsCalledByNothingAndCallsWhatItsTopLevelCalls(t *testing.T) {
+	root := writeModules(t, map[string]string{
+		"lib.mut": "let mean = fn(xs) { return 0; };\n",
+		"main.mut": "import stats \"lib.mut\";\n" +
+			"let other = fn() { return 1; };\n" +
+			"let helper = fn() { return other(); };\n" +
+			"stats.mean([1]);\n" +
+			"helper();\n",
+	})
+	s, _ := serverOver(t, root, "main.mut")
+
+	calls := incomingCallsOf(t, s, prepareAt(t, s, pathToURI(root+"/lib.mut"), 0, 4))
+	file, files := fileLevelCaller(calls)
+	if files != 1 {
+		t.Fatalf("file-level callers of mean = %d, want 1", files)
+	}
+
+	if in := incomingCallsOf(t, s, file.From); len(in) != 0 {
+		t.Errorf("the file item has %d incoming callers, want none: nothing calls a file", len(in))
+	}
+
+	out, err := s.callHierarchyOutgoingCalls(nil, &lsp.CallHierarchyOutgoingCallsParams{Item: file.From})
+	if err != nil {
+		t.Fatalf("outgoingCalls: %v", err)
+	}
+	names := make([]string, 0, len(out))
+	for _, call := range out {
+		names = append(names, call.To.Name)
+	}
+	// The top level calls helper, a declaration of this file; other is called
+	// by helper, not by the file. stats.mean is a cross-module callee, which
+	// outgoing calls do not list for any item yet.
+	if len(names) != 1 || names[0] != "helper" {
+		t.Errorf("the file item's callees = %v, want [helper]", names)
 	}
 }

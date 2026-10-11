@@ -63,19 +63,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     )
   );
 
-  applyMutantFormattingPreferences();
-
   context.subscriptions.push(
     vscode.commands.registerCommand("mutant.restartLsp", async () => {
       await restartLsp();
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("mutant.format.onType.enabled")) {
-        applyMutantFormattingPreferences();
-      }
     })
   );
 
@@ -214,11 +204,12 @@ async function formatActiveDocument(): Promise<void> {
   await vscode.commands.executeCommand("editor.action.formatDocument");
 }
 
-function applyMutantFormattingPreferences(): void {
-  const mutantConfig = vscode.workspace.getConfiguration("mutant");
-  const enabled = mutantConfig.get<boolean>("format.onType.enabled", false);
-  const editorConfig = vscode.workspace.getConfiguration("editor", { languageId: "mutant" } as vscode.ConfigurationScope);
-  void editorConfig.update("formatOnType", enabled, vscode.ConfigurationTarget.Workspace);
+// onTypeFormattingEnabled reads mutant.format.onType.enabled for one document at
+// the moment of the keystroke. It is the whole switch: the manifest turns
+// editor.formatOnType on for Mutant so that VS Code asks at all, and this
+// decides whether the server is asked. Nothing is written to any settings file.
+function onTypeFormattingEnabled(scope: vscode.Uri): boolean {
+  return vscode.workspace.getConfiguration("mutant", scope).get<boolean>("format.onType.enabled", false);
 }
 
 export async function deactivate(): Promise<void> {
@@ -689,6 +680,10 @@ async function startLspClient(context: vscode.ExtensionContext | undefined, show
     ],
     synchronize: {
       configurationSection: "mutant",
+    },
+    middleware: {
+      provideOnTypeFormattingEdits: (document, position, ch, options, token, next) =>
+        onTypeFormattingEnabled(document.uri) ? next(document, position, ch, options, token) : [],
     },
     errorHandler: {
       error: (error) => {

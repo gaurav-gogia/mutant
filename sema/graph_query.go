@@ -22,7 +22,15 @@ func (g *Graph) NodeFor(id DeclID) (*Node, bool) {
 	return node, found
 }
 
-// Declarations returns every declaration in the file, in source order.
+// Declarations returns every declaration in the file, in the order the walk
+// made them, which is not source order. A for-in's iterable, and the value of
+// every let that binds after its value (see the top of graph_walk.go), are
+// walked before the names they declare, so a declaration written inside one
+// -- the a and b of `let sorted = sort_by(xs, fn(a, b) { ... });` -- comes
+// before the let's or the loop's own names.
+//
+// A caller that needs source order sorts by position, as the cli's graph query
+// does (sortDeclarations, sortByPosition).
 func (g *Graph) Declarations() []*Node {
 	if g == nil {
 		return nil
@@ -30,9 +38,9 @@ func (g *Graph) Declarations() []*Node {
 	return g.decls
 }
 
-// TopLevel returns the declarations in the file's top-level scope, in source
-// order. Type names are included: they are declared at the top level even
-// though they live in their own table.
+// TopLevel returns the declarations in the file's top-level scope, in the
+// walk's order (see Scope.order), and then the type names: they are declared
+// at the top level even though they live in their own table.
 func (g *Graph) TopLevel() []*Node {
 	if g == nil {
 		return nil
@@ -184,7 +192,7 @@ func (g *Graph) VisibleAt(line, column int) []*Node {
 	for scope := g.scopeAt(line, column); scope != nil; scope = scope.Parent {
 		for i := len(scope.order) - 1; i >= 0; i-- {
 			node := scope.order[i]
-			if !startsAtOrBefore(node.Anchor(), line, column) {
+			if !node.visibleAt(line, column) {
 				continue
 			}
 			if _, already := taken[node.Name]; already {
@@ -292,7 +300,7 @@ func valueBoundIn(scope *Scope, name string, line, column int) bool {
 	}
 	for ; scope != nil; scope = scope.Parent {
 		if declared, exists := scope.first[name]; exists &&
-			startsAtOrBefore(declared.Anchor(), line, column) {
+			declared.visibleAt(line, column) {
 			return true
 		}
 	}
@@ -500,6 +508,12 @@ func rangeContains(r ast.Range, line, column int) bool {
 
 func startsAtOrBefore(r ast.Range, line, column int) bool {
 	return !before(line, column, r.Start.Line, r.Start.Column)
+}
+
+// endsBefore reports whether the position is strictly past r's End. It is
+// false at the End itself, which rangeContains still counts as on r.
+func endsBefore(r ast.Range, line, column int) bool {
+	return before(r.End.Line, r.End.Column, line, column)
 }
 
 func startsBefore(a, b ast.Range) bool {

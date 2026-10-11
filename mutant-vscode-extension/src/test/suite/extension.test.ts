@@ -8,7 +8,7 @@ import { __test } from "../../extension";
 
 suite("Mutant extension integration", () => {
   test("activates and contributes expected commands", async () => {
-    const extension = vscode.extensions.getExtension("mutant.mutant-language-tools");
+    const extension = vscode.extensions.getExtension("aoiflux.mutant-language-tools");
     assert.ok(extension, "extension should be installed in test host");
 
     await extension.activate();
@@ -30,7 +30,7 @@ suite("Mutant extension integration", () => {
   });
 
   test("declares mutant language with .mut extension", async () => {
-    const extension = vscode.extensions.getExtension("mutant.mutant-language-tools");
+    const extension = vscode.extensions.getExtension("aoiflux.mutant-language-tools");
     assert.ok(extension, "extension should be installed in test host");
 
     await extension.activate();
@@ -49,7 +49,7 @@ suite("Mutant extension integration", () => {
   });
 
   test("declares format-on-save defaults and nesting lint configuration", async () => {
-    const extension = vscode.extensions.getExtension("mutant.mutant-language-tools");
+    const extension = vscode.extensions.getExtension("aoiflux.mutant-language-tools");
     assert.ok(extension, "extension should be installed in test host");
 
     await extension.activate();
@@ -79,10 +79,13 @@ suite("Mutant extension integration", () => {
       "on-type formatting setting should be contributed"
     );
 
+    // On for Mutant files so that VS Code asks at all; whether the server is
+    // asked is mutant.format.onType.enabled's call, made by the client
+    // middleware, and nothing is written into the user's settings.
     assert.strictEqual(
       configDefaults["[mutant]"]?.["editor.formatOnType"],
-      false,
-      "mutant files should default to format on type disabled"
+      true,
+      "mutant files should let VS Code ask the on-type provider, which the setting then gates"
     );
   });
 

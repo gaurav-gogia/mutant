@@ -207,6 +207,48 @@ type Node struct {
 	// came from one statement -- and because it is a fact about the
 	// declaration, of the same kind as Kind.
 	Grouped bool
+
+	// visibleFrom and visibleAfter are where a position query starts to see
+	// this declaration, when that is later than its name. Both exist because
+	// the compiler defines some names only after compiling something written
+	// after the name, and at most one of them is set.
+	//
+	// visibleFrom is a for-in binding's loop body, and only its Start is read:
+	// the binding is seen from the body's opening brace on. The iterable is
+	// compiled first, so inside `for (keys in keys(h))` the iterable's keys is
+	// still the builtin. The brace itself may see the binding, because the
+	// header's `)` always stands between it and the iterable.
+	//
+	// visibleAfter is a let's value, and only its End is read: the let's names
+	// are seen strictly after that End and never at it. The value is compiled
+	// first (M26-CMP-001), so `let x = x + 1;` reads the x from before the
+	// statement. Strictly, because an End is exclusive -- the position right
+	// after the value's last character -- and that is exactly where an
+	// editor's cursor sits while the character is being typed. The keys that
+	// completion finishes at `let keys = ke|` is the builtin to the compiler,
+	// and so is the one hover asks about at `let keys = keys|;`, so neither
+	// may see the let there. The next column already sees it, which is where
+	// the x of `let x = 1;x` begins. A let sets it unless it binds before its
+	// value is walked -- the single-name let of a function literal named after
+	// it, or of a macro; see letStatement. A value the parser dropped, as in
+	// `let keys = (ke` mid-typing, has no range, and the statement's own range
+	// stands in for it.
+	//
+	// The zero value of both means "from the name on", which is every other
+	// declaration.
+	visibleFrom  ast.Range
+	visibleAfter ast.Range
+}
+
+// visibleAt reports whether a position query at line:column sees n.
+func (n *Node) visibleAt(line, column int) bool {
+	switch {
+	case n.visibleAfter.IsValid():
+		return endsBefore(n.visibleAfter, line, column)
+	case n.visibleFrom.IsValid():
+		return startsAtOrBefore(n.visibleFrom, line, column)
+	}
+	return startsAtOrBefore(n.Anchor(), line, column)
 }
 
 // Ref is one use of a declaration.
@@ -405,12 +447,14 @@ type ImportEdge struct {
 
 // Scope is a region of the file over which a set of declarations is in effect.
 //
-// Mutant has fewer scopes than its syntax suggests, and the graph must not
-// invent the missing ones. A block does not open a scope: `{ let x = 1; }`
-// leaves `x` bound afterwards. A `for (v in xs)` binding is defined in the
-// enclosing scope, not the body, which is what the VM does with either loop
-// form. Only a function literal and a macro literal open a scope, because only
-// they have parameters.
+// The scopes are the compiler's, which are Go's, and the graph must neither
+// invent one the compiler does not open nor merge two that it does. Every
+// brace-delimited region opens one -- a bare block, an `if` or `else` body, a
+// loop body, a `match` arm -- so `{ let x = 1; }` leaves `x` unbound
+// afterwards. A loop header is a scope of its own with the body nested inside
+// it, which is where a `for (v in xs)` binding lives, so the body may shadow
+// it. A function's parameters and its body share one scope, so a `let` at the
+// top of a body cannot take a parameter's name.
 type Scope struct {
 	Path     ScopePath
 	Parent   *Scope
@@ -432,10 +476,14 @@ type Scope struct {
 	// which covers the file.
 	Range ast.Range
 
-	// order is every declaration made in this scope, in source order. It is a
-	// slice rather than a map because two declarations of one name are two
-	// declarations -- `let x = 1; let x = 2;` -- and which one a position sees
-	// depends on where the position is.
+	// order is every declaration made in this scope, in the order the walk
+	// made them. That is source order but for one case: an import declares at
+	// the root even from inside a function, so one inside a let's value or a
+	// for-in's iterable comes before the names that statement declares, which
+	// the walk reaches after the value. It is a slice rather than a map
+	// because two declarations of one name are two declarations -- `let x = 1;
+	// let x = 2;` -- and which one a position sees depends on where the
+	// position is.
 	order []*Node
 
 	// enclosing is Owner where there is one and the parent's enclosing
@@ -459,10 +507,16 @@ type Scope struct {
 	// "is this name bound at a position" a map lookup.
 	//
 	// The earliest is the one worth keeping, because the question is whether
-	// ANY declaration of the name stands at or before the position and order is
-	// source order: if one does, the earliest does. latest cannot answer it --
+	// ANY declaration of the name stands at or before the position: if one
+	// does, the earliest in order does. The one declaration order places out
+	// of source order, an import inside a let's value or a for-in's iterable,
+	// is seen from inside that value, before the statement's own names are, so
+	// the earliest is still the first seen. latest cannot answer it --
 	// `let x = 1; f(); let x = 2;` binds x at the call, and latest names the
-	// declaration below it.
+	// declaration below it. A Node's visibleFrom or visibleAfter does not break
+	// this: neither passes the end of the declaring statement, and the names
+	// one statement declares share theirs, so the earliest declaration is
+	// still the first visible.
 	//
 	// It is the same bargain latest struck, for the same reason. Without it a
 	// Bound query at a file's top level scans every top-level declaration in

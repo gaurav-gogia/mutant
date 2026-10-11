@@ -204,20 +204,21 @@ func (s *Snapshot) enumVariantNames(typeName string) ([]string, bool) {
 }
 
 func (s *Snapshot) structFieldNames(typeName string) ([]string, bool) {
-	for _, stmt := range s.Program.Statements {
-		st, ok := stmt.(*mast.StructStatement)
-		if !ok || st.Name == nil || st.Name.Value != typeName {
-			continue
-		}
-		names := make([]string, 0, len(st.Fields))
-		for _, f := range st.Fields {
-			if f != nil {
-				names = append(names, f.Value)
-			}
-		}
-		return names, true
+	if s == nil || s.Program == nil {
+		return nil, false
 	}
-	return nil, false
+	s.buildStructIndex()
+	st, ok := s.structDecls[typeName]
+	if !ok {
+		return nil, false
+	}
+	names := make([]string, 0, len(st.Fields))
+	for _, f := range st.Fields {
+		if f != nil {
+			names = append(names, f.Value)
+		}
+	}
+	return names, true
 }
 
 // structFieldCompletionItems builds the field completions for a struct-typed

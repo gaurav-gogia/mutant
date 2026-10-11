@@ -36,10 +36,6 @@ type typeInferer struct {
 	nodeTypes   map[mast.Node]Type
 	structNames map[string]bool
 	enumNames   map[string]bool
-	// solved holds each function literal's parameter kinds, worked out by
-	// fn_solver.go before this walk. Seeding them turns a body that could only
-	// be typed as Any into one whose return type follows from its parameters.
-	solved map[*mast.FunctionLiteral]*solvedFunction
 	// structFields holds each struct's field types as seen in its initializers,
 	// keyed structName -> fieldName -> Type. See observeStructField.
 	structFields map[string]map[string]Type
@@ -61,7 +57,6 @@ func inferTypes(s *Snapshot) (map[mast.Node]Type, map[string]map[string]Type) {
 		structNames:  make(map[string]bool),
 		enumNames:    make(map[string]bool),
 		structFields: make(map[string]map[string]Type),
-		solved:       s.solvedFunctions(),
 		imports:      importNamespaces(s.Program.Statements),
 	}
 	// Struct/enum type names are file-global; collect them first so a reference
@@ -427,20 +422,29 @@ func (inf *typeInferer) exprKind(e mast.Expression, env *typeEnv) Type {
 		return inf.matchType(n, env)
 	case *mast.FunctionLiteral:
 		child := newTypeEnv(env)
-		solvedParams := inf.solved[n]
-		for i, p := range n.Parameters {
+		// `let walk = fn(...) { ... walk ... }` names the literal walk, and in
+		// its own body walk is the literal -- the compiler's
+		// DefineFunctionName -- whatever an outer walk holds (M26-SEM-020).
+		// Declared before the parameters, which may shadow it, as the compiler
+		// declares them.
+		if n.Name != "" {
+			child.set(n.Name, Type{Kind: TypeFunction})
+		}
+		for _, p := range n.Parameters {
 			if p == nil {
 				continue
 			}
-			// A solved parameter narrowed to exactly one kind is worth seeding;
-			// a union collapses to Any, because the lattice has no union to
-			// carry it and a guess would be worse than the gradual unknown.
-			paramType := AnyType
-			if solvedParams != nil && i < len(solvedParams.kinds) {
-				paramType = solvedParams.kinds[i].asType()
-			}
-			child.set(p.Value, paramType)
-			inf.record(p, paramType)
+			// A parameter is Any, whatever fn_solver.go deduced for it. That
+			// deduction is how the body USES the name, not what a caller
+			// passes: `str_upper(a)` given 5 returns an error value and the
+			// function carries on holding 5, and a use behind
+			// `if (type_of(v) == "STRING") { return v; }` says nothing about
+			// the other path. Seeding it here made every alias of the
+			// parameter, the function's return type and every call's result
+			// carry the guess -- into hover, inlay hints and the
+			// argument-type diagnostic (M26-SEM-003).
+			child.set(p.Value, AnyType)
+			inf.record(p, AnyType)
 		}
 		if n.Body != nil {
 			inf.stmt(n.Body, child)

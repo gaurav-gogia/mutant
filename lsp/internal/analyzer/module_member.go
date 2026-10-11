@@ -248,3 +248,34 @@ func (s *Snapshot) ModuleMemberHover(pos lsp.Position) (string, mast.Range, bool
 		kind + " `" + export.Name + "`, declared in `" + declaredIn + "`"
 	return text, field.rng, true
 }
+
+// ImportDiagnostics reports what module.Load will refuse about this file's
+// imports, in the loader's own words: a second import binding an alias the
+// first already bound, and an import through which the loader reaches an
+// import cycle.
+//
+// Like ModuleMemberDiagnostics these are the build's refusals and not lints, so
+// they take no LintConfig, and without a workspace they say nothing. An import
+// the workspace has not indexed is not reported at all: not indexed is not
+// missing -- the scan is bounded and the server sets no --module-path -- and
+// "no such file" about a file that exists is a refusal the build never makes.
+func (s *Snapshot) ImportDiagnostics() []lsp.Diagnostic {
+	if s == nil || s.workspace == nil || s.ModuleKey == "" {
+		return nil
+	}
+	var diagnostics []lsp.Diagnostic
+	for _, refused := range s.workspace.Diagnostics(s.ModuleKey) {
+		if refused.Code == sema.DiagUnresolvedImport || refused.Module != s.ModuleKey {
+			continue
+		}
+		severity := lsp.DiagnosticSeverityError
+		source := moduleMemberSource
+		diagnostics = append(diagnostics, lsp.Diagnostic{
+			Range:    s.Range(refused.Range),
+			Severity: &severity,
+			Source:   &source,
+			Message:  refused.Message,
+		})
+	}
+	return diagnostics
+}

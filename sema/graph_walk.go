@@ -4,14 +4,32 @@ import "mutant/ast"
 
 // The walk. One switch per AST level, and the only one in the package.
 //
-// Its traversal order is the order the language server's five walks used,
-// preserved deliberately rather than tidied: a name is bound at the point the
-// walk reaches its declaration, so a use before a declaration resolves to
-// nothing and a use after it resolves to that declaration. `let f = fn() {
-// f(); };` recurses because a single-name `let` binds before its value is
-// walked, and `let a, b = split();` does not, because a multi-name `let` binds
-// after. Both are the compiler's rules, and changing either here would change
-// what the editor says about a program without changing the program.
+// A name is bound at the point the walk reaches its declaration, so a use
+// before a declaration resolves to nothing and a use after it resolves to that
+// declaration. Where that point is, is the compiler's rule and not the walk's
+// choice, because moving it here would change what the editor says about a
+// program without changing the program:
+//
+//   - A single-name `let` binds after its value is walked, because the
+//     compiler compiles the value before it declares the name (M26-CMP-001):
+//     `let x = x + 1;` reads the x from before the statement. Two values bind
+//     first instead, because they can refer to the name they are bound to
+//     (see seesItsOwnName): a macro, and a function literal named after the
+//     let, which the compiler gives that name through DefineFunctionName. So
+//     `let f = fn() { f(); };` recurses.
+//   - A multi-name `let` binds after its value, because the compiler declares
+//     its names after compiling the value: `let a, b = split();`. A function
+//     literal there is named after the first name, and DefineFunctionName lets
+//     it call itself by that name too. The walk does not model that yet, so
+//     such a call resolves to whatever the name meant before the let --
+//     usually nothing, which the undefined-name rule then reports.
+//   - A `for (k, v in xs)` binds after its iterable is walked, because
+//     compileForInStatement compiles the iterable before it defines the
+//     bindings.
+//
+// A position query keeps the same order through Node.visibleAfter and
+// Node.visibleFrom: a let that binds after its value is visible strictly
+// after the value's end, and a for-in binding from its loop body on.
 
 func (b *builder) statement(stmt ast.Statement) {
 	switch node := stmt.(type) {
@@ -50,13 +68,24 @@ func (b *builder) statement(stmt ast.Statement) {
 		// it rather than colliding with it. The compiler arranges the two the
 		// same way, and so does Go, whose for statement is a block with the
 		// body as a block inside it.
+		//
+		// The iterable is walked before the bindings are declared, because
+		// that is the order the compiler works in: compileForInStatement
+		// compiles node.Iterable and only then defines the value and key. So
+		// `for (xs in xs)` iterates the xs from before the loop, and
+		// `for (y in y)` is `undefined variable: y`. The bindings are visible
+		// to a position query from the body on, for the same reason.
 		b.loopScope(node, func() {
+			b.expression(node.Iterable, nil)
+			body, haveBody := b.rangeOf(node.Body)
 			for _, name := range []*ast.Identifier{node.Key, node.Value} {
 				if rng, ok := b.rangeOf(name); ok {
-					b.declare(name.Value, name, rng, KindLoopBind)
+					declared := b.declare(name.Value, name, rng, KindLoopBind)
+					if declared != nil && haveBody {
+						declared.visibleFrom = body
+					}
 				}
 			}
-			b.expression(node.Iterable, nil)
 			b.block(node.Body)
 		})
 
@@ -89,9 +118,9 @@ func (b *builder) letStatement(node *ast.LetStatement) {
 	// is the whole function. A call hierarchy item's Range means exactly this
 	// and had the bare name instead, so every item's Range and SelectionRange
 	// were the same few characters.
-	stmtRange, _ := b.rangeOf(node)
+	stmtRange, haveStatement := b.rangeOf(node)
 
-	if len(names) == 1 {
+	if len(names) == 1 && seesItsOwnName(node.Value, names[0]) {
 		name := names[0]
 		var bound *Node
 		if rng, ok := b.rangeOf(name); ok {
@@ -104,19 +133,63 @@ func (b *builder) letStatement(node *ast.LetStatement) {
 		return
 	}
 
+	// Any other value is compiled before its names are declared (M26-CMP-001),
+	// so `let x = x + 1;` reads the x from before the statement. The walk used
+	// to declare a single-name let first whatever its value (M26-SEM-021).
 	b.expression(node.Value, nil)
+	valueRange, haveValue := b.rangeOf(node.Value)
+	if !haveValue {
+		// A value the parser dropped -- `let keys = (ke` while it is being
+		// typed -- leaves nothing to be seen after, so the statement stands
+		// in for it. Its End is where the cursor is typing, so the let is
+		// still not seen there, and the keys being typed stays the builtin.
+		valueRange, haveValue = stmtRange, haveStatement
+	}
+
+	// Only a single name takes its value's kind. The names of a multi-name let
+	// share the value as destructureValues splits it at run time: an array or
+	// a multi-value element by element, any other value whole into the first
+	// name, and null into every name left over. So `let a, b = fn(x) { ... };`
+	// leaves the closure in a and null in b, and handing every name the
+	// value's kind gave b a's function card. The walk does not model the
+	// split, so every name is a value, which is true of each of them -- of a
+	// too, because a function is a value. Both engines are checked against
+	// this in TestADestructuredNameIsAFunctionOnlyIfItHoldsOne.
+	kind := KindValue
+	if len(names) == 1 {
+		kind = kindForValue(node.Value)
+	}
 	for _, name := range names {
 		if rng, ok := b.rangeOf(name); ok {
 			// Grouped: this let bound more than one name, which in Mutant means
 			// the (value, err) idiom rather than a convenience. Both names reach
 			// over the one statement they were declared by.
 			declared := b.declareIn(b.scope, name.Value, name, rng,
-				spanning(rng, stmtRange), KindValue)
+				spanning(rng, stmtRange), kind)
 			if declared != nil {
-				declared.Grouped = true
+				declared.Grouped = len(names) > 1
+				if haveValue {
+					// Seen strictly after the value's end and not at it, which
+					// is where the cursor sits while the value is typed: see
+					// Node.visibleAfter.
+					declared.visibleAfter = valueRange
+				}
 			}
 		}
 	}
+}
+
+// seesItsOwnName reports whether a let's value can refer to the name the let
+// declares: a function literal the parser named after it, which the compiler
+// gives its own name through DefineFunctionName, and a macro.
+func seesItsOwnName(value ast.Expression, name *ast.Identifier) bool {
+	switch v := value.(type) {
+	case *ast.FunctionLiteral:
+		return name != nil && v.Name == name.Value
+	case *ast.MacroLiteral:
+		return true
+	}
+	return false
 }
 
 // importStatement binds the namespace an import names.

@@ -31,6 +31,24 @@ func newError(format string, a ...interface{}) *fault {
 	return &fault{err: &object.Error{Message: fmt.Sprintf(format, a...), Context: "evaluator"}}
 }
 
+// raised turns an error handed back by the operator code the two engines share
+// into a fault. object.NumericInfix, BitwiseOperandError and BitwiseNot answer a
+// failure with a plain *object.Error, which the VM raises through its own error
+// channel; here a plain error is a value the program holds, so passing one on
+// unwrapped let `let q = 10 / 0;` bind an error and carry on where the VM stops
+// the run -- and let a macro body expand from a computation the same code
+// written inline is refused for (M26-EVL-007).
+func raised(result object.Object) object.Object {
+	failure, isError := result.(*object.Error)
+	if !isError {
+		return result
+	}
+	if failure.Context == "" {
+		failure.Context = "evaluator"
+	}
+	return &fault{err: failure}
+}
+
 // errorValue builds an error the program is meant to hold rather than one that
 // stops it: the error half of a (value, err) pair. The two spellings exist so
 // the difference is made at the point the error is built, by the code that

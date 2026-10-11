@@ -164,11 +164,89 @@ func (s *Snapshot) HoverText(pos lsp.Position) (string, mast.Range, bool) {
 				}
 			}
 		}
-		if text, ok := builtinHoverText(n.Value); ok {
-			return text, rng, true
+		identifierLabel := func() string {
+			label := fmt.Sprintf("identifier `%s`", n.Value)
+			if ty, ok := s.TypeOf(n); ok {
+				label += fmt.Sprintf(" : %s", ty)
+			}
+			return label
+		}
+		// typeDeclarationText is the hover on the name a struct or enum
+		// declaration writes. The type cards find a type by its name alone: the
+		// fields come from the first top-level struct of that name, the variants
+		// from the first top-level enum, a field's inferred type from every
+		// literal of that name, and the use count from the last type declared
+		// under it. So a card describes this declaration only when this is the
+		// one declaration of its kind under its name and the lookup reads this
+		// very statement. Anywhere else the card would be another declaration's,
+		// or there would be none and the hover would fall through to whatever
+		// else shares the spelling: a `struct quote` declared inside a function
+		// hovered as the quote macro special form, and the enum of
+		// `struct Color { a }` and `enum Color { b }` as the struct, with its
+		// field. There the hover says only what is certain, the kind and the
+		// name.
+		typeDeclarationText := func(declared *sema.Node) string {
+			label := fmt.Sprintf("struct `%s`", n.Value)
+			if declared.Kind == sema.KindEnum {
+				label = fmt.Sprintf("enum `%s`", n.Value)
+			}
+			for _, other := range s.Graph().Declarations() {
+				if other != declared && other.Kind == declared.Kind && other.Name == declared.Name {
+					return label
+				}
+			}
+			if declared.Kind == sema.KindStruct {
+				s.buildStructIndex()
+				if st := s.structDecls[n.Value]; st != nil && st.Name == n {
+					if card, ok := structCard(s, n.Value); ok {
+						return card.render()
+					}
+				}
+				return label
+			}
+			for _, stmt := range s.Program.Statements {
+				enum, ok := stmt.(*mast.EnumStatement)
+				if !ok || enum.Name == nil || enum.Name.Value != n.Value {
+					continue
+				}
+				if enum.Name == n {
+					if card, ok := enumCard(s, n.Value); ok {
+						return card.render()
+					}
+				}
+				break
+			}
+			return label
+		}
+		// The identifier a declaration writes is that declaration, and is
+		// described as one: never as a builtin or a macro special form that
+		// happens to share its spelling, and never as another declaration of
+		// the same name. The graph is asked rather than isBoundAt, because the
+		// scope cannot answer at the name itself: a value let, a let of several
+		// names and a for-in binding become visible only after their value or
+		// iterable, which the compiler compiles first (M26-SEM-021,
+		// M26-SEM-007). Gated on the scope alone, `let sum = 0;` hovered at its
+		// sum showed the builtin sum's card while go-to-definition from the same
+		// position landed on the let (M26-SEM-011). A use inside a let's own
+		// value declares nothing, so the second sum of `let sum = sum([1]);`
+		// still reaches the builtin, which is what the compiler reads there.
+		if declared, ok := s.Graph().DeclarationAt(s.TokenPosition(pos)); ok && declared.Ident == n {
+			if declared.Kind == sema.KindStruct || declared.Kind == sema.KindEnum {
+				return typeDeclarationText(declared), rng, true
+			}
+			return identifierLabel(), rng, true
+		}
+		// Only an unbound name is the builtin. `let first = 1;` makes `first`
+		// the author's value, which is what the VM reads (M26-SEM-011).
+		if !s.isBoundAt(n.Value, pos) {
+			if text, ok := builtinHoverText(n.Value); ok {
+				return text, rng, true
+			}
 		}
 		// A struct or enum name used anywhere — a literal's type, an annotation
-		// in prose, a bare mention — reaches the same card as its declaration.
+		// in prose, a bare mention — and not answered above reaches the card its
+		// name finds. That is the card its declaration shows when the name is
+		// declared once in the file, by one top-level struct or enum.
 		if text, ok := declaredTypeCard(s, n.Value); ok {
 			return text, rng, true
 		}
@@ -190,11 +268,7 @@ func (s *Snapshot) HoverText(pos lsp.Position) (string, mast.Range, bool) {
 				return text, rng, true
 			}
 		}
-		label := fmt.Sprintf("identifier `%s`", n.Value)
-		if ty, ok := s.TypeOf(n); ok {
-			label += fmt.Sprintf(" : %s", ty)
-		}
-		return label, rng, true
+		return identifierLabel(), rng, true
 	case *mast.IntegerLiteral:
 		return fmt.Sprintf("integer `%d`", n.Value), rng, true
 	case *mast.FloatLiteral:
@@ -331,7 +405,18 @@ func (s *Snapshot) CompletionItemsAt(pos lsp.Position) []lsp.CompletionItem {
 		items = append(items, completion)
 		seen[keyword] = struct{}{}
 	}
+	// A visible binding of a builtin's name is what the VM calls, so the
+	// builtin's item gives way to it and the binding's own item is added below
+	// (M26-SEM-011). Bound is the compiler's predicate: a struct or enum of the
+	// same name does not shadow the builtin, and does not here either.
+	var boundHere func(string) bool
+	if s != nil && s.Program != nil {
+		boundHere = s.localScopeAt(pos).Bound
+	}
 	for _, b := range builtin.Builtins {
+		if boundHere != nil && boundHere(b.Name) {
+			continue
+		}
 		kind := lsp.CompletionItemKindFunction
 		completion := lsp.CompletionItem{Label: b.Name, Kind: &kind, Detail: builtinCompletionDetail(b.Name)}
 		if doc, ok := builtinHoverText(b.Name); ok {
@@ -807,13 +892,15 @@ func semanticTokenTypeForNode(node mast.Node, overrides map[mast.Node]semanticTo
 		default:
 			return semanticTokenTypeIndex["variable"], 0, true
 		}
-	case *mast.FunctionLiteral:
-		return semanticTokenTypeIndex["function"], 0, true
-	case *mast.StructStatement:
-		return semanticTokenTypeIndex["type"], 0, true
-	case *mast.EnumStatement:
-		return semanticTokenTypeIndex["enum"], 0, true
 	default:
+		// A function literal, struct or enum statement gets no token of its
+		// own. One over the whole node overlaps every token inside it, which
+		// LSP 3.16 allows only to a client that advertised
+		// overlappingTokenSupport -- VS Code does not -- and it was emitted only
+		// when the node fitted on one line, so the same declaration coloured
+		// differently depending on its line breaks (M26-SEM-015). The parts
+		// that mean something are painted on their own: the declared name in
+		// collectStatementTokenOverrides, the rest lexically.
 		return 0, 0, false
 	}
 }
@@ -916,12 +1003,19 @@ func collectStatementTokenOverrides(stmt mast.Statement, overrides map[mast.Node
 		collectExpressionTokenOverrides(s.Iterable, overrides)
 		collectStatementTokenOverrides(s.Body, overrides)
 	case *mast.StructStatement:
+		// The declared name is the type, as `Point` of `Point{x: 1}` is.
+		if s.Name != nil {
+			overrides[s.Name] = semanticTokenOverride{typeID: semanticTokenTypeIndex["type"], modifier: 0}
+		}
 		for _, field := range s.Fields {
 			if field != nil {
 				overrides[field] = semanticTokenOverride{typeID: semanticTokenTypeIndex["property"], modifier: 0}
 			}
 		}
 	case *mast.EnumStatement:
+		if s.Name != nil {
+			overrides[s.Name] = semanticTokenOverride{typeID: semanticTokenTypeIndex["enum"], modifier: 0}
+		}
 		for _, variant := range s.Variants {
 			if variant != nil {
 				overrides[variant] = semanticTokenOverride{typeID: semanticTokenTypeIndex["enumMember"], modifier: 0}

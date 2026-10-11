@@ -61,20 +61,29 @@ func (s *Snapshot) CallHierarchyRootAt(pos lsp.Position) (CallNode, bool) {
 }
 
 // IncomingCalls returns the declarations in this file that call the one at the
-// position, each with the call sites that make it so.
-func (s *Snapshot) IncomingCalls(pos lsp.Position) []CallNode {
+// position, each with the call sites that make it so, and apart from them the
+// calls written at the file's top level.
+//
+// A file's top level can call things and is not a declaration -- a call inside
+// an anonymous function written there has no declaration around it either --
+// so those calls have no CallNode to belong to. They are returned as their own
+// list, and the server names their caller after the file, which is the only
+// thing that can. They used to be skipped, although this comment said they were
+// reported, and in a script they are most of the calls (M26-SEM-012).
+func (s *Snapshot) IncomingCalls(pos lsp.Position) (calls []CallNode, topLevel []mast.Range) {
 	graph, node, ok := s.callHierarchyContext(pos)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
-	// A file's top level can call things and is not a declaration, so its calls
-	// are collected under a zero caller and reported separately. The server
-	// names it after the file, which is the only thing that can.
 	byCaller := make(map[*sema.Node][]mast.Range, 4)
 	order := make([]*sema.Node, 0, 4)
 	for _, ref := range graph.References() {
-		if !ref.InCallPosition || ref.Target != node.ID || ref.From == nil {
+		if !ref.InCallPosition || ref.Target != node.ID {
+			continue
+		}
+		if ref.From == nil {
+			topLevel = append(topLevel, ref.UseRange)
 			continue
 		}
 		if _, seen := byCaller[ref.From]; !seen {
@@ -83,11 +92,11 @@ func (s *Snapshot) IncomingCalls(pos lsp.Position) []CallNode {
 		byCaller[ref.From] = append(byCaller[ref.From], ref.UseRange)
 	}
 
-	calls := make([]CallNode, 0, len(order))
+	calls = make([]CallNode, 0, len(order))
 	for _, caller := range order {
 		calls = append(calls, callNodeFor(caller, byCaller[caller]))
 	}
-	return calls
+	return calls, topLevel
 }
 
 // OutgoingCalls returns the declarations in this file that the one at the
@@ -101,11 +110,29 @@ func (s *Snapshot) OutgoingCalls(pos lsp.Position) []CallNode {
 	if !ok {
 		return nil
 	}
+	return callsFrom(graph, node)
+}
 
+// TopLevelOutgoingCalls returns the declarations in this file that its top
+// level calls: the outgoing calls of the file-level caller IncomingCalls
+// reports apart. That caller is an item with no declaration behind it, so it
+// cannot be asked about by position the way OutgoingCalls is -- its range is a
+// call site, and resolving that would answer for the function called there.
+func (s *Snapshot) TopLevelOutgoingCalls() []CallNode {
+	graph := s.Graph()
+	if graph == nil {
+		return nil
+	}
+	return callsFrom(graph, nil)
+}
+
+// callsFrom groups the calls written inside from by the declaration they call;
+// a nil from is the file's top level, which is what Ref.From holds there.
+func callsFrom(graph *sema.Graph, from *sema.Node) []CallNode {
 	byCallee := make(map[*sema.Node][]mast.Range, 4)
 	order := make([]*sema.Node, 0, 4)
 	for _, ref := range graph.References() {
-		if !ref.InCallPosition || ref.From != node {
+		if !ref.InCallPosition || ref.From != from {
 			continue
 		}
 		callee, found := graph.NodeFor(ref.Target)

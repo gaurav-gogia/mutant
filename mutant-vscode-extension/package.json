@@ -251,7 +251,7 @@
                 "mutant.format.onType.enabled": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable on-type formatting for Mutant files. Off by default: on-type formatting reformats the whole document on every ';', '}' and newline, which is disruptive while typing. Format-on-save is enabled by default instead."
+                    "description": "Enable on-type formatting for Mutant files. Off by default: on-type formatting reformats the whole document on every ';' and '}', which is disruptive while typing. Format-on-save is enabled by default instead."
                 },
                 "mutant.lint.rules.duplicateTopLevelDeclaration.severity": {
                     "type": "string",
@@ -642,7 +642,7 @@
         "configurationDefaults": {
             "[mutant]": {
                 "editor.formatOnSave": true,
-                "editor.formatOnType": false
+                "editor.formatOnType": true
             }
         },
         "menus": {

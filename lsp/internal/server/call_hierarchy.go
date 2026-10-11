@@ -62,17 +62,31 @@ func (s *Server) prepareCallHierarchy(_ *glsp.Context, params *lsp.CallHierarchy
 
 func (s *Server) callHierarchyIncomingCalls(_ *glsp.Context, params *lsp.CallHierarchyIncomingCallsParams) ([]lsp.CallHierarchyIncomingCall, error) {
 	item := params.Item
+	if item.Kind == lsp.SymbolKindFile {
+		// A file-level caller handed back to be expanded. Nothing calls a file,
+		// and its range is a call site: resolving that by position would answer
+		// for the function called there.
+		return nil, nil
+	}
 	snapshot, ok := s.snapshotFor(item.URI)
 	if !ok || snapshot == nil {
 		return nil, nil
 	}
 
 	position := item.SelectionRange.Start
-	calls := make([]lsp.CallHierarchyIncomingCall, 0, 4)
-	for _, caller := range snapshot.IncomingCalls(position) {
+	callers, topLevel := snapshot.IncomingCalls(position)
+	calls := make([]lsp.CallHierarchyIncomingCall, 0, len(callers)+1)
+	for _, caller := range callers {
 		calls = append(calls, lsp.CallHierarchyIncomingCall{
 			From:       callItem(snapshot.Mapper(), caller, item.URI),
 			FromRanges: lspRanges(snapshot.Mapper(), caller.CallRanges),
+		})
+	}
+	if len(topLevel) > 0 {
+		sites := lspRanges(snapshot.Mapper(), topLevel)
+		calls = append(calls, lsp.CallHierarchyIncomingCall{
+			From:       fileCallItem(item.URI, sites[0]),
+			FromRanges: sites,
 		})
 	}
 
@@ -90,8 +104,17 @@ func (s *Server) callHierarchyOutgoingCalls(_ *glsp.Context, params *lsp.CallHie
 		return nil, nil
 	}
 
+	var callees []analyzer.CallNode
+	if item.Kind == lsp.SymbolKindFile {
+		// A file-level caller calls what the file's top level calls. Its range
+		// is one of those calls, so asking by position would answer for the
+		// function called there instead.
+		callees = snapshot.TopLevelOutgoingCalls()
+	} else {
+		callees = snapshot.OutgoingCalls(item.SelectionRange.Start)
+	}
 	calls := make([]lsp.CallHierarchyOutgoingCall, 0, 4)
-	for _, callee := range snapshot.OutgoingCalls(item.SelectionRange.Start) {
+	for _, callee := range callees {
 		calls = append(calls, lsp.CallHierarchyOutgoingCall{
 			To:         callItem(snapshot.Mapper(), callee, item.URI),
 			FromRanges: lspRanges(snapshot.Mapper(), callee.CallRanges),
@@ -131,6 +154,7 @@ func (s *Server) crossFileIncomingCalls(snapshot *analyzer.Snapshot, item lsp.Ca
 		uri  lsp.DocumentUri
 		name string
 		line lsp.UInteger
+		file bool
 	}
 	byCaller := make(map[callerKey]*lsp.CallHierarchyIncomingCall, 4)
 	order := make([]callerKey, 0, 4)
@@ -141,6 +165,11 @@ func (s *Server) crossFileIncomingCalls(snapshot *analyzer.Snapshot, item lsp.Ca
 			continue
 		}
 		key := callerKey{uri: site.URI, name: caller.Name, line: caller.SelectionRange.Start.Line}
+		if caller.Kind == lsp.SymbolKindFile {
+			// A file caller's range is its call site, so keying it by line made
+			// one file calling from two lines into two callers of one name.
+			key = callerKey{uri: site.URI, file: true}
+		}
 		existing, seen := byCaller[key]
 		if !seen {
 			order = append(order, key)
@@ -179,18 +208,25 @@ func (s *Server) callerAt(site lsp.Location) (lsp.CallHierarchyItem, bool) {
 	if caller, found := snapshot.EnclosingCallNodeAt(line, column); found {
 		return callItem(snapshot.Mapper(), caller, site.URI), true
 	}
+	return fileCallItem(site.URI, site.Range), true
+}
 
+// fileCallItem is the caller of calls written at a file's top level, where no
+// declaration makes them: the file itself, named after its base name. Its range
+// is the first such call, which is something to show; the handlers recognise
+// the item by its kind when it comes back, never by that range.
+func fileCallItem(uri lsp.DocumentUri, at lsp.Range) lsp.CallHierarchyItem {
 	name := "<file>"
-	if path, converted := uriToPath(site.URI); converted {
+	if path, converted := uriToPath(uri); converted {
 		name = filepath.Base(path)
 	}
 	return lsp.CallHierarchyItem{
 		Name:           name,
 		Kind:           lsp.SymbolKindFile,
-		URI:            site.URI,
-		Range:          site.Range,
-		SelectionRange: site.Range,
-	}, true
+		URI:            uri,
+		Range:          at,
+		SelectionRange: at,
+	}
 }
 
 // callItemInModule makes an item for a declaration in another file, which is

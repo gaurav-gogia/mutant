@@ -41,23 +41,87 @@ func TestTheRegistryIsReadNotRebuilt(t *testing.T) {
 		}},
 		{"uncheckedError", func() { lintUncheckedErrors(snapshot, DefaultLintConfig()) }},
 	} {
-		if got := bytesPerRun(tc.run); got >= bound {
+		if got := leastBytesOfOneRun(tc.run); got >= bound {
 			t.Errorf("%s allocates %d bytes a run over one statement, at least %d: it builds a set of every "+
 				"builtin's name again instead of reading builtinNameSet", tc.name, got, bound)
 		}
 	}
 }
 
-// bytesPerRun is what one run of f allocates on the heap, averaged over a few,
-// after one run that builds whatever is built on first use.
-func bytesPerRun(f func()) uint64 {
+// leastBytesOfOneRun is the least one run of f allocated on the heap, over a
+// few runs measured one at a time, after one run that builds whatever is built
+// on first use.
+//
+// runtime.MemStats.TotalAlloc is process-wide: everything any goroutine
+// allocates between the two readings lands in the difference. The average of
+// twenty runs this replaced charged all of it to f, so a correct walk read 41 KB
+// a run -- seven times the bound -- the moment another goroutine allocated
+// 200 KiB inside the window once in five runs (M26-LSP-032, the same defect as
+// M26-TEST-021). Contamination can only ever add, so the least reading carries
+// the least of it; a set rebuilt per walk or per call is in every reading, so
+// the least still contains it.
+//
+// It is the floor and not a difference of two fixtures, which is what
+// builtin/allocation_gap_test.go measures, because the regression this test
+// exists for is a set built once per WALK: a one-call fixture and a many-call
+// fixture would both pay for it, and their difference would cancel it.
+func leastBytesOfOneRun(f func()) uint64 {
 	f()
-	const runs = 20
+	const attempts = 10
+	least := ^uint64(0)
 	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for range runs {
+	for range attempts {
+		runtime.ReadMemStats(&before)
 		f()
+		runtime.ReadMemStats(&after)
+		if got := after.TotalAlloc - before.TotalAlloc; got < least {
+			least = got
+		}
 	}
-	runtime.ReadMemStats(&after)
-	return (after.TotalAlloc - before.TotalAlloc) / runs
+	return least
+}
+
+var contaminationSink []byte
+
+// TestTheFloorChargesOnlyTheRunItMeasures pins the measurement itself: another
+// goroutine allocating inside the window, once in five runs, must not be
+// charged to a walk that allocates almost nothing, and a walk that does build a
+// set of every builtin's name must still read above the bound.
+func TestTheFloorChargesOnlyTheRunItMeasures(t *testing.T) {
+	snapshot := New().Analyze("let x = len(\"evidence\");\n")
+	walk := func() {
+		forEachBuiltinCall(snapshot.Program.Statements, nil,
+			func(string, mast.Node, *mast.CallExpression, map[string]mast.Expression) {})
+	}
+	bound := uint64(len(builtin.Builtins)) * 8
+
+	runs := 0
+	contaminated := func() {
+		walk()
+		runs++
+		if runs%5 == 0 {
+			done := make(chan struct{})
+			go func() {
+				contaminationSink = make([]byte, 200<<10)
+				close(done)
+			}()
+			<-done
+		}
+	}
+	if got := leastBytesOfOneRun(contaminated); got >= bound {
+		t.Errorf("another goroutine's allocation was charged to the walk: %d bytes a run, bound %d", got, bound)
+	}
+
+	rebuilding := func() {
+		set := make(map[string]struct{}, len(builtin.Builtins))
+		for _, b := range builtin.Builtins {
+			set[b.Name] = struct{}{}
+		}
+		_ = set
+		walk()
+	}
+	if got := leastBytesOfOneRun(rebuilding); got < bound {
+		t.Errorf("a walk that rebuilds the set read %d bytes a run, under the bound %d: the measurement "+
+			"no longer sees the regression it exists for", got, bound)
+	}
 }

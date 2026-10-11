@@ -39,7 +39,7 @@ func evalPrefixExpression(operator string, right object.Object) object.Object {
 	case "~":
 		// object.BitwiseNot rather than a local switch: the VM calls the same
 		// function, so the complement and its error message cannot drift.
-		return object.BitwiseNot(right)
+		return raised(object.BitwiseNot(right))
 	default:
 		return newError("unknown operator: %s%s", operator, right.Type())
 	}
@@ -83,14 +83,14 @@ func evalInfixExpression(operator string, left, right object.Object) object.Obje
 	// evalStringInfixExpression with a different sentence than the VM uses.
 	if object.IsBitwiseOperator(operator) &&
 		(left.Type() != object.INTEGER_OBJ || right.Type() != object.INTEGER_OBJ) {
-		return object.BitwiseOperandError(operator, left, right)
+		return raised(object.BitwiseOperandError(operator, left, right))
 	}
 
 	switch {
 	case object.IsNumeric(left) && object.IsNumeric(right):
 		// Numeric arithmetic/comparison is shared with the WASM REPL via
 		// object.NumericInfix so the two tree-walking interpreters can't drift.
-		return object.NumericInfix(operator, left, right)
+		return raised(object.NumericInfix(operator, left, right))
 	// Bytes are compared before the Inspect fallback below, which would
 	// otherwise make a buffer equal to the string spelling its own hex.
 	case left.Type() == object.BYTES_OBJ || right.Type() == object.BYTES_OBJ:

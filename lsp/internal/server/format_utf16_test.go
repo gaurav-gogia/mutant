@@ -21,6 +21,9 @@ import (
 // The three sites the row names -- fullDocumentRange, lineDeleteRange and
 // linePosition -- all count units now, since 63eb1c4. Nothing tested any of
 // them, which is why this row is closed with tests rather than on the evidence.
+// lineDeleteRange has since gone: it deleted whatever shared a line with a
+// declaration (M26-LSP-009), and its last-line case is now asked of the fix
+// that replaced it, in remove_declaration_fix_test.go.
 //
 // The assertion throughout is the row's own: apply the edit the way a
 // spec-conforming client does, using glsp's UTF-16-aware IndexesIn, and require
@@ -178,34 +181,6 @@ func TestTheEndOfTheDocumentIsCountedInUnitsAndNotRunes(t *testing.T) {
 				t.Errorf("linePosition end = %d:%d, want %d:%d", end.Line, end.Character, tc.wantLine, tc.wantChar)
 			}
 		})
-	}
-}
-
-func TestDeletingTheLastLineCoversAllOfIt(t *testing.T) {
-	// lineDeleteRange is the third site. It is the last line that matters: every
-	// other line is deleted by a range running to the start of the next one,
-	// which needs no column arithmetic at all.
-	const text = "let a = 1;\nputln(\"\U0001f600\");"
-	rng, ok := lineDeleteRange(text, 1)
-	if !ok {
-		t.Fatal("lineDeleteRange refused the last line")
-	}
-	if int(rng.End.Character) != 12 {
-		t.Errorf("end character = %d, want 12 (a rune count gave 11, leaving the final `;` behind)", rng.End.Character)
-	}
-
-	start, end := rng.IndexesIn(text)
-	if left := text[:start] + text[end:]; left != "let a = 1;\n" {
-		t.Errorf("deleting the last line left %q, want %q", left, "let a = 1;\n")
-	}
-
-	// A middle line still needs no arithmetic, and must not acquire any.
-	middle, ok := lineDeleteRange("one\ntwo\nthree", 1)
-	if !ok {
-		t.Fatal("lineDeleteRange refused a middle line")
-	}
-	if middle.End.Line != 2 || middle.End.Character != 0 {
-		t.Errorf("a middle line's delete range ends at %d:%d, want 2:0", middle.End.Line, middle.End.Character)
 	}
 }
 

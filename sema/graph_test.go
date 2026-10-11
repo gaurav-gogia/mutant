@@ -239,8 +239,6 @@ func TestAFunctionCanCallItselfButAMultiNameLetCannot(t *testing.T) {
 	}
 }
 
-// Mutant has fewer scopes than its syntax suggests, and the graph must not
-// invent the missing ones.
 // TestABlockOpensAScopeAndSoDoesAFunction is the editor's half of block
 // scoping, and the whole of it: every rule that cares -- duplicate
 // declarations, unused declarations, go-to-definition, rename -- reads the

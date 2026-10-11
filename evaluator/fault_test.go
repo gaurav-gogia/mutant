@@ -67,6 +67,13 @@ func TestGenuineFaultsStillStopEvaluation(t *testing.T) {
 		{"unknown identifier", `nowhere`, "identifier not found: nowhere"},
 		{"type mismatch mid-program", `5 + true; 99`, "type mismatch: INTEGER+BOOLEAN"},
 		{"field access on a fault", `nowhere.message`, "identifier not found: nowhere"},
+		// The operator failures object answers with a plain error, which this
+		// engine held as a value while the VM stopped (M26-EVL-007).
+		{"division by zero", `let q = 1 / 0; 99`, "integer division by zero"},
+		{"modulo by zero", `1 % 0; 99`, "integer modulo by zero"},
+		{"negative shift", `1 << -1; 99`, "negative shift count: -1"},
+		{"bitwise operand", `1.5 & 1; 99`, "bitwise operator & requires INTEGER operands, got FLOAT and INTEGER"},
+		{"complement of a string", `~"a"; 99`, "bitwise complement requires an INTEGER, got STRING"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

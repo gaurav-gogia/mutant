@@ -16,8 +16,13 @@ import (
 // from by looking at the statement that declares it. Snapshot.TypeOf reaches
 // strictly more -- a struct arriving through a function's return, or through
 // another binding -- and type_definition.go already prefers it. This stays
-// because two callers still read it directly, and because it answers without
-// running the inference pass.
+// because it answers without running the inference pass, and the graph build
+// asks it, through structHeldBy, inside Graph's sync.Once.
+//
+// Both of its questions are answered from one walk per snapshot. They used to
+// be a walk of the whole program per question, and the graph build and
+// StructFieldDiagnostics each ask once per field read, so a file twice as long
+// cost four times as much on every keystroke (M26-SEM-004).
 
 // structTypeNameForDeclaration takes the identifier that DECLARES a binding,
 // never a use of it. Handing it a use would mean first asking what the use
@@ -26,226 +31,189 @@ func (s *Snapshot) structTypeNameForDeclaration(target *mast.Identifier) (string
 	if s == nil || s.Program == nil || target == nil {
 		return "", false
 	}
-	for _, stmt := range s.Program.Statements {
-		if typeName, ok := s.structTypeNameInStatement(stmt, target); ok {
-			return typeName, true
-		}
-	}
-	return "", false
+	s.buildStructIndex()
+	name, ok := s.structLiterals[target]
+	return name, ok
 }
 
-func (s *Snapshot) structTypeNameInStatement(stmt mast.Statement, target *mast.Identifier) (string, bool) {
+// buildStructIndex is the one walk both lookups are answered from. It runs
+// inside Graph's sync.Once when the graph build asks structHeldBy, so it must
+// never ask for the graph.
+func (s *Snapshot) buildStructIndex() {
+	s.structIndexOnce.Do(func() {
+		s.structLiterals = make(map[*mast.Identifier]string)
+		s.structDecls = make(map[string]*mast.StructStatement)
+		for _, stmt := range s.Program.Statements {
+			if decl, ok := stmt.(*mast.StructStatement); ok && decl != nil && decl.Name != nil {
+				if _, seen := s.structDecls[decl.Name.Value]; !seen {
+					s.structDecls[decl.Name.Value] = decl
+				}
+			}
+			s.indexStructLiteralsInStatement(stmt)
+		}
+	})
+}
+
+// indexStructLiteral records every name a let binds from a named struct
+// literal. The first record wins, which is what the per-target search did: it
+// stopped at the first statement, in this walk's order, that declared target.
+func (s *Snapshot) indexStructLiteral(names []*mast.Identifier, value mast.Expression) {
+	literal, ok := value.(*mast.StructLiteral)
+	if !ok || literal == nil || literal.Name == nil {
+		return
+	}
+	for _, name := range names {
+		if name == nil {
+			continue
+		}
+		if _, seen := s.structLiterals[name]; !seen {
+			s.structLiterals[name] = literal.Name.Value
+		}
+	}
+}
+
+func (s *Snapshot) indexStructLiteralsInStatement(stmt mast.Statement) {
 	switch node := stmt.(type) {
 	case *mast.LetStatement:
 		names := node.Names
 		if len(names) == 0 && node.Name != nil {
 			names = []*mast.Identifier{node.Name}
 		}
-		for _, name := range names {
-			if name != target {
-				continue
-			}
-			literal, ok := node.Value.(*mast.StructLiteral)
-			if !ok || literal == nil || literal.Name == nil {
-				return "", false
-			}
-			return literal.Name.Value, true
-		}
+		s.indexStructLiteral(names, node.Value)
 		if node.Value != nil {
-			return s.structTypeNameInExpression(node.Value, target)
+			s.indexStructLiteralsInExpression(node.Value)
 		}
 	case *mast.ReturnStatement:
 		for _, expr := range node.ReturnValues {
-			if typeName, ok := s.structTypeNameInExpression(expr, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(expr)
 		}
 		if len(node.ReturnValues) == 0 && node.ReturnValue != nil {
-			return s.structTypeNameInExpression(node.ReturnValue, target)
+			s.indexStructLiteralsInExpression(node.ReturnValue)
 		}
 	case *mast.ExpressionStatement:
 		if node.Expression != nil {
-			return s.structTypeNameInExpression(node.Expression, target)
+			s.indexStructLiteralsInExpression(node.Expression)
 		}
 	case *mast.BlockStatement:
 		for _, inner := range node.Statements {
-			if typeName, ok := s.structTypeNameInStatement(inner, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(inner)
 		}
 	case *mast.ForInStatement:
 		if node.Iterable != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Iterable, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Iterable)
 		}
 		if node.Body != nil {
-			if typeName, ok := s.structTypeNameInStatement(node.Body, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(node.Body)
 		}
 	case *mast.WhileStatement:
 		if node.Condition != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Condition, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Condition)
 		}
 		if node.Body != nil {
-			if typeName, ok := s.structTypeNameInStatement(node.Body, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(node.Body)
 		}
 	case *mast.ForStatement:
 		if node.Init != nil {
-			if typeName, ok := s.structTypeNameInStatement(node.Init, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(node.Init)
 		}
 		if node.Condition != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Condition, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Condition)
 		}
 		if node.Post != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Post, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Post)
 		}
 		if node.Body != nil {
-			return s.structTypeNameInStatement(node.Body, target)
+			s.indexStructLiteralsInStatement(node.Body)
 		}
 	}
-	return "", false
 }
 
-func (s *Snapshot) structTypeNameInExpression(expr mast.Expression, target *mast.Identifier) (string, bool) {
+func (s *Snapshot) indexStructLiteralsInExpression(expr mast.Expression) {
 	switch node := expr.(type) {
 	case *mast.FunctionLiteral:
 		if node.Body != nil {
-			return s.structTypeNameInStatement(node.Body, target)
+			s.indexStructLiteralsInStatement(node.Body)
 		}
 	case *mast.IfExpression:
 		if node.Condition != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Condition, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Condition)
 		}
 		if node.Consequence != nil {
-			if typeName, ok := s.structTypeNameInStatement(node.Consequence, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(node.Consequence)
 		}
 		if node.Alternative != nil {
-			if typeName, ok := s.structTypeNameInStatement(node.Alternative, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(node.Alternative)
 		}
 	case *mast.MatchExpression:
 		if node.Subject != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Subject, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Subject)
 		}
 		for _, arm := range node.Arms {
 			if arm == nil || arm.Body == nil {
 				continue
 			}
-			if typeName, ok := s.structTypeNameInStatement(arm.Body, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInStatement(arm.Body)
 		}
 	case *mast.CallExpression:
 		if node.Function != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Function, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Function)
 		}
 		for _, arg := range node.Arguments {
-			if typeName, ok := s.structTypeNameInExpression(arg, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(arg)
 		}
 	case *mast.PrefixExpression:
 		if node.Right != nil {
-			return s.structTypeNameInExpression(node.Right, target)
+			s.indexStructLiteralsInExpression(node.Right)
 		}
 	case *mast.InfixExpression:
 		if node.Left != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Left, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Left)
 		}
 		if node.Right != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Right, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Right)
 		}
 	case *mast.IndexExpression:
 		if node.Left != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Left, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Left)
 		}
 		if node.Index != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Index, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Index)
 		}
 	case *mast.AssignExpression:
 		if node.Left != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Left, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Left)
 		}
 		if node.Value != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Value, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(node.Value)
 		}
 	case *mast.FieldExpression:
 		if node.Left != nil {
-			return s.structTypeNameInExpression(node.Left, target)
+			s.indexStructLiteralsInExpression(node.Left)
 		}
 	case *mast.StructLiteral:
-		if node.Name != nil {
-			if typeName, ok := s.structTypeNameInExpression(node.Name, target); ok {
-				return typeName, true
-			}
-		}
 		for _, field := range node.Fields {
 			if field != nil && field.Value != nil {
-				if typeName, ok := s.structTypeNameInExpression(field.Value, target); ok {
-					return typeName, true
-				}
+				s.indexStructLiteralsInExpression(field.Value)
 			}
 		}
 	case *mast.ArrayLiteral:
 		for _, element := range node.Elements {
-			if typeName, ok := s.structTypeNameInExpression(element, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(element)
 		}
 	case *mast.TemplateLiteral:
 		for _, element := range node.Parts {
-			if typeName, ok := s.structTypeNameInExpression(element, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(element)
 		}
 	case *mast.HashLiteral:
 		for _, pair := range node.Pairs {
-			if typeName, ok := s.structTypeNameInExpression(pair.Key, target); ok {
-				return typeName, true
-			}
-			if typeName, ok := s.structTypeNameInExpression(pair.Value, target); ok {
-				return typeName, true
-			}
+			s.indexStructLiteralsInExpression(pair.Key)
+			s.indexStructLiteralsInExpression(pair.Value)
 		}
 	case *mast.MacroLiteral:
 		if node.Body != nil {
-			return s.structTypeNameInStatement(node.Body, target)
+			s.indexStructLiteralsInStatement(node.Body)
 		}
 	}
-	return "", false
 }
 
 func (s *Snapshot) structFieldBinding(structName, fieldName string) (binding, bool) {

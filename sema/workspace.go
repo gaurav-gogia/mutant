@@ -438,9 +438,15 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 		// boundBy maps an alias to the spelling that first bound it, which is
 		// what the duplicate message has to name alongside the second.
 		boundBy = make(map[string]string, len(facts.Imports))
+		// explored is shared by every import's walk: a module whose whole
+		// closure was walked without meeting a cycle cannot lead to one from
+		// here either, so it is walked once rather than once per import.
+		explored = make(map[string]bool, 8)
 	)
 	for _, imported := range facts.Imports {
+		duplicate := false
 		if first, taken := boundBy[imported.Alias]; taken {
+			duplicate = true
 			diags = append(diags, Diagnostic{
 				Module: key,
 				Range:  imported.Range,
@@ -453,16 +459,103 @@ func (w *Workspace) Diagnostics(key string) []Diagnostic {
 			boundBy[imported.Alias] = imported.Spelling
 		}
 
-		if _, ok := w.resolveImport(key, imported.Spelling); !ok {
+		target, ok := w.resolveImport(key, imported.Spelling)
+		if !ok {
 			diags = append(diags, Diagnostic{
 				Module:  key,
 				Range:   imported.Range,
 				Code:    DiagUnresolvedImport,
 				Message: unresolvedImportMessage(imported.Spelling),
 			})
+			continue
+		}
+		// The loader refuses a duplicate before it resolves it, so it never
+		// walks through one; neither does this.
+		if duplicate {
+			continue
+		}
+		if code, message, refused := w.firstRefusalLocked(key, target, explored); refused {
+			diags = append(diags, Diagnostic{
+				Module:  key,
+				Range:   imported.Range,
+				Code:    code,
+				Message: message,
+			})
 		}
 	}
 	return diags
+}
+
+// firstRefusalLocked is module.Load's walk for a build whose entry is entry,
+// descending through the one import that resolved to target: the first refusal
+// it raises below entry, in the loader's own sentence -- an import cycle, as the
+// chain module.CycleError prints (every file from the entry down, ending with
+// the one that repeats), or two imports in one module binding one name. Neither
+// need be in entry: a build of entry is refused by either anywhere below it.
+//
+// An import the workspace has not indexed is passed over rather than treated as
+// an end: not indexed is not missing, and the loader would walk on through it.
+//
+// done is shared across one module's imports: a module whose whole closure was
+// walked without meeting a refusal cannot lead to one from a sibling import
+// either. A walk that met one returns before marking anything done, so the
+// next import walks that ground again and reports it too.
+//
+// The caller must hold at least a read lock.
+func (w *Workspace) firstRefusalLocked(entry, target string, done map[string]bool) (DiagCode, string, bool) {
+	stack := []string{entry}
+	onPath := map[string]bool{entry: true}
+
+	var walk func(string) (DiagCode, string, bool)
+	walk = func(current string) (DiagCode, string, bool) {
+		if onPath[current] {
+			chain := append(append([]string(nil), stack...), current)
+			return DiagImportCycle, importCycleMessage(w.displayChain(chain)), true
+		}
+		if done[current] {
+			return 0, "", false
+		}
+		facts, known := w.facts[current]
+		if !known {
+			done[current] = true
+			return 0, "", false
+		}
+		onPath[current] = true
+		stack = append(stack, current)
+		boundBy := make(map[string]string, len(facts.Imports))
+		for _, imported := range facts.Imports {
+			// The loader's order: a repeated name is refused before its
+			// import is resolved, so nothing below it is reached.
+			if first, taken := boundBy[imported.Alias]; taken {
+				return DiagDuplicateNamespace, duplicateNamespaceMessage(
+					w.displayName(current), imported.Alias, first, imported.Spelling), true
+			}
+			boundBy[imported.Alias] = imported.Spelling
+			next, ok := w.resolveImport(current, imported.Spelling)
+			if !ok {
+				continue
+			}
+			if code, message, refused := walk(next); refused {
+				return code, message, true
+			}
+		}
+		stack = stack[:len(stack)-1]
+		delete(onPath, current)
+		done[current] = true
+		return 0, "", false
+	}
+	return walk(target)
+}
+
+// displayChain renders module keys the way a human spelled them.
+//
+// The caller must hold the lock.
+func (w *Workspace) displayChain(keys []string) []string {
+	shown := make([]string, len(keys))
+	for i, key := range keys {
+		shown[i] = w.displayName(key)
+	}
+	return shown
 }
 
 // displayName renders a module for a human: the path as it was spelled, never

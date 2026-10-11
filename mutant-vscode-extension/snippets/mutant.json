@@ -48,7 +48,7 @@
   "guard return": {
     "prefix": "guard",
     "body": [
-      "if (${1:err} != ${2:\"\"}) {",
+      "if (${1:err}) {",
       "\treturn ${1:err};",
       "}"
     ],

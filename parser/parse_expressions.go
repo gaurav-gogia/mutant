@@ -194,7 +194,13 @@ func (p *Parser) parseExpressionList(end token.TokenType) []ast.Expression {
 			return list
 		}
 
-		if p.curTokenIs(end) {
+		// The element's own last token can be the closing token too: in
+		// `f(1, g(2)` the `)` that ends g(2) is not f's. Only an element that
+		// reported an error may have stopped on the list's end while
+		// recovering. Treating every such token as the list's end closed
+		// `putln(1,` with the next line's `putln(3)`, which then ran as an
+		// argument, in silence (M26-LEX-022).
+		if reported && p.curTokenIs(end) {
 			return list
 		}
 

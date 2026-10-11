@@ -3,6 +3,8 @@ package server
 import (
 	"strings"
 
+	mast "mutant/ast"
+	"mutant/lsp/internal/analyzer"
 	localprotocol "mutant/lsp/internal/protocol"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
@@ -29,6 +31,15 @@ type lineHunk struct {
 // "format everything, then keep the changes the user asked for". A hunk that
 // straddles the selection boundary is dropped rather than partially applied,
 // so range formatting never edits a line outside the selection.
+//
+// The hunks come from a line diff, which knows nothing about statements: when
+// the formatter joins `max(\n 1,\n 2)` onto one line, the diff pairs the first
+// line with the joined one and deletes the other two, and applying either half
+// alone used to leave a program that did not parse, or worse, a different one
+// that did (M26-LSP-007). So a set of edits is returned only if applying it
+// leaves the same program with the same comments. The line-by-line hunks are
+// tried first, because they are what lets one respaced line be formatted by
+// itself; then each run of changed lines as a whole; then nothing.
 func rangeFormattingEdits(original, formatted string, selection lsp.Range) []lsp.TextEdit {
 	if original == formatted {
 		return nil
@@ -36,22 +47,111 @@ func rangeFormattingEdits(original, formatted string, selection lsp.Range) []lsp
 
 	originalLines := splitLines(original)
 	formattedLines := splitLines(formatted)
+	hunks := diffLines(originalLines, formattedLines)
 
-	edits := make([]lsp.TextEdit, 0, 4)
-	for _, hunk := range diffLines(originalLines, formattedLines) {
-		if !hunkWithinSelection(hunk, selection) {
+	for _, candidate := range [][]lineHunk{hunks, changedRegions(hunks)} {
+		kept := make([]lineHunk, 0, len(candidate))
+		for _, hunk := range candidate {
+			if hunkWithinSelection(hunk, selection) {
+				kept = append(kept, hunk)
+			}
+		}
+		if len(kept) == 0 {
+			// A whole region inside the selection has every one of its line
+			// hunks inside it too, so the second candidate has none either.
+			return nil
+		}
+		if !preservesProgram(original, applyHunks(original, kept)) {
 			continue
 		}
-		edits = append(edits, lsp.TextEdit{
-			Range:   hunkRange(hunk, originalLines),
-			NewText: strings.Join(hunk.newLines, ""),
-		})
+		edits := make([]lsp.TextEdit, 0, len(kept))
+		for _, hunk := range kept {
+			edits = append(edits, lsp.TextEdit{
+				Range:   hunkRange(hunk, originalLines),
+				NewText: strings.Join(hunk.newLines, ""),
+			})
+		}
+		return edits
+	}
+	return nil
+}
+
+// changedRegions joins hunks that touch, undoing lcsHunks' line-by-line split
+// and leaving one hunk per run of changed lines. Two runs are always separated
+// by at least one unchanged line, so touching hunks belong to one run.
+func changedRegions(hunks []lineHunk) []lineHunk {
+	regions := make([]lineHunk, 0, len(hunks))
+	for _, hunk := range hunks {
+		if n := len(regions); n > 0 && regions[n-1].endLine == hunk.startLine {
+			last := &regions[n-1]
+			last.endLine = hunk.endLine
+			last.newLines = append(append([]string(nil), last.newLines...), hunk.newLines...)
+			continue
+		}
+		regions = append(regions, hunk)
+	}
+	return regions
+}
+
+// applyHunks applies hunks, in order and non-overlapping, to the text the
+// client holds, splitting lines exactly where splitLines does. It works on the
+// original text rather than on splitLines' normalised copy so that what is
+// checked is what the client will have: a CRLF inside a triple-quoted string
+// is part of that string's value.
+func applyHunks(text string, hunks []lineHunk) string {
+	starts := []int{0}
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\r':
+			if i+1 < len(text) && text[i+1] == '\n' {
+				i++
+			}
+			starts = append(starts, i+1)
+		case '\n':
+			starts = append(starts, i+1)
+		}
+	}
+	offset := func(line int) int {
+		if line < len(starts) {
+			return starts[line]
+		}
+		return len(text)
 	}
 
-	if len(edits) == 0 {
-		return nil
+	var out strings.Builder
+	cursor := 0
+	for _, hunk := range hunks {
+		out.WriteString(text[cursor:offset(hunk.startLine)])
+		out.WriteString(strings.Join(hunk.newLines, ""))
+		cursor = offset(hunk.endLine)
 	}
-	return edits
+	out.WriteString(text[cursor:])
+	return out.String()
+}
+
+// preservesProgram reports whether candidate is the program original is, with
+// the same comments in the same order. Formatting may change layout and
+// nothing else, and ast.Equal is the same test the formatter's corpus check
+// holds every example to. A clean parse alone is not enough: the parser
+// accepts `f(1,\ng(2);` as `f(1, g(2))`.
+func preservesProgram(original, candidate string) bool {
+	before := analyzer.New().Analyze(original)
+	after := analyzer.New().Analyze(candidate)
+	if before.Program == nil || after.Program == nil || len(before.ParseErrors) > 0 || len(after.ParseErrors) > 0 {
+		return false
+	}
+	if !mast.Equal(before.Program, after.Program) {
+		return false
+	}
+	if len(before.Program.Comments) != len(after.Program.Comments) {
+		return false
+	}
+	for i, comment := range before.Program.Comments {
+		if strings.TrimRight(comment.Text, " \t\r") != strings.TrimRight(after.Program.Comments[i].Text, " \t\r") {
+			return false
+		}
+	}
+	return true
 }
 
 // hunkWithinSelection reports whether every line the hunk rewrites lies in
@@ -60,6 +160,13 @@ func rangeFormattingEdits(original, formatted string, selection lsp.Range) []lsp
 func hunkWithinSelection(hunk lineHunk, selection lsp.Range) bool {
 	start := int(selection.Start.Line)
 	end := int(selection.End.Line)
+	// An LSP range's end is exclusive, so a selection that ends at the start
+	// of a line -- the way a whole-line selection arrives -- does not include
+	// that line. Counting it formatted a line the user had not selected
+	// (M26-LSP-039).
+	if selection.End.Character == 0 && end > start {
+		end--
+	}
 
 	if hunk.startLine == hunk.endLine {
 		return hunk.startLine >= start && hunk.startLine <= end+1

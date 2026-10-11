@@ -182,6 +182,33 @@ var shadowForms = []shadowForm{
 		want:  sema.FieldEnumValue,
 		value: enumValue,
 	},
+	{
+		// A for-in binding does not exist inside its own iterable: the compiler
+		// compiles the iterable first and defines the binding after, so here
+		// the family name is unbound and the dotted spelling folds. The editor
+		// used to declare the binding first and call it a field read on the
+		// loop variable -- M26-SEM-007.
+		name: "a for-in binding carries the family name, used in its own iterable",
+		source: func(f foldFamily, use string) string {
+			return "let got = 0;\n" +
+				"for (" + f.prefix + " in [" + use + "]) { got = " + f.prefix + "; }\n" +
+				"got;\n"
+		},
+		want:  sema.FieldBuiltinFold,
+		value: builtinValue,
+	},
+	{
+		// A let's value is compiled before its name is declared (M26-CMP-001),
+		// so the family name is still unbound inside the value that initialises
+		// it. The editor used to declare first, for every let, and call the
+		// fold a field read on the variable being declared -- M26-SEM-021.
+		name: "a let carries the family name and is initialised from the family",
+		source: func(f foldFamily, use string) string {
+			return "let " + f.prefix + " = " + use + ";\n" + f.prefix + ";\n"
+		},
+		want:  sema.FieldBuiltinFold,
+		value: builtinValue,
+	},
 }
 
 // TestTheCollidingFamiliesAreStillTheCollidingOnes keeps the table's own claim

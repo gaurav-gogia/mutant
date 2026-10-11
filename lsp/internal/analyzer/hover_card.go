@@ -37,11 +37,14 @@ type callableCard struct {
 
 type cardParam struct {
 	name string
-	// types is the accepted kinds as text — "STRING", "INTEGER|FLOAT",
-	// "ARRAY of STRING" — or "" when the parameter is unconstrained.
+	// types is what is shown beside the name, as text — a builtin's accepted
+	// kinds ("STRING", "INTEGER|FLOAT", "ARRAY of STRING"), a field's inferred
+	// type, an enum variant's ordinal, or the kinds a user function's callers
+	// were seen to pass — and "" when there is nothing to show.
 	types string
 	doc   string
-	// note is the parenthetical marker: "optional", "variadic", "inferred".
+	// note is the parenthetical marker: "optional", "variadic", "inferred",
+	// "not inferred", "used as STRING", "observed at call sites".
 	note string
 }
 
@@ -420,12 +423,20 @@ func builtinCard(name string) (callableCard, bool) {
 
 // userFunctionCard fills the same card for a user-defined function.
 //
-// Nothing here is declared: Mutant has no type annotations, so every type on the
-// card was deduced — parameter kinds by the constraint solver, the return by
-// inference running over a body whose parameters the solver had already narrowed.
-// Each one is marked _(inferred)_ for that reason. A builtin's types are
-// contracts checked against their implementations; these are conclusions, and a
-// reader deciding how much to trust them needs to see which they are looking at.
+// Nothing here is declared: Mutant has no type annotations. The return is
+// inferred over a body whose parameters are unknown, and marked _(inferred)_ for
+// that reason. A parameter has no type at all; what the card can say is how the
+// function's own body uses it, from the constraint solver -- the uses that
+// resolve to that parameter, in this body rather than in a function nested in
+// it, of a parameter nothing assigns -- and it says exactly that: "used as
+// INTEGER". It used to put the solver's kinds on the signature line and in the
+// type column, `low_byte(v: INTEGER)`, which read as a type the parameter is
+// held to, and the probes found working programs where that is false: a use
+// behind `if (type_of(v) == "STRING")`, and a builtin given the wrong kind,
+// which returns an error value and lets the function carry on (M26-SEM-019).
+// A builtin's types are contracts checked against their implementations; these
+// are descriptions, and a reader deciding how much to trust them needs to see
+// which they are looking at.
 func userFunctionCard(s *Snapshot, name string, literal *mast.FunctionLiteral, docBlock string) callableCard {
 	doc := parseFunctionDoc(docBlock)
 	solved := s.solvedFunctions()[literal]
@@ -437,23 +448,19 @@ func userFunctionCard(s *Snapshot, name string, literal *mast.FunctionLiteral, d
 		if p == nil || p.Value == "" {
 			continue
 		}
-		types, note, solvedText := "", "", ""
+		types, note := "", ""
 		if solved != nil && i < len(solved.kinds) {
-			if solvedText = solved.kinds[i].text(); solvedText != "" {
-				types, note = solvedText, "inferred"
+			if used := solved.kinds[i].text(); used != "" {
+				note = "used as " + used
 			} else if observed := observedText(solved, i); observed != "" {
 				types, note = observed, "observed at call sites"
 			}
 		}
 
-		// Only a solved kind reaches the signature line. Call-site evidence is
-		// worth showing, but a signature reads as a claim about every call, and
-		// "every caller so far passed a string" is not that claim.
-		label := p.Value
-		if solvedText != "" {
-			label += ": " + solvedText
-		}
-		rendered = append(rendered, label)
+		// Nothing the solver says reaches the signature line, which reads as a
+		// claim about every call: neither how the body uses a parameter nor
+		// what the callers so far happened to pass.
+		rendered = append(rendered, p.Value)
 
 		card.params = append(card.params, cardParam{
 			name:  p.Value,

@@ -246,6 +246,9 @@ only `mutant release` leaves the layout of your source tree behind.
   exactly as it treats `fs_read`.
 - A file whose top level only declares things is treated as a module, so its
   exported names are not reported as unused declarations.
+- An import cycle, and two imports binding one namespace, are errors in the
+  editor in the module loader's own words, on every import through which a
+  build entered at this file would meet them.
 
 ## What modules are not
 
