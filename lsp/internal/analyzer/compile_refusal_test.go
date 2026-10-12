@@ -147,13 +147,11 @@ var compilerRefusalCases = []struct {
 	{name: "an assignment to an element of a literal", refused: true, src: "[1, 2][0] = 9;\n"},
 	{name: "an assignment through an index that is a call", refused: true,
 		src: "let a = [[1]];\nlet k = fn() { return 0; };\na[k()][0] = 2;\n"},
-	// The compiler accepts this -- a bare assignment to a name nothing declares
-	// defines a global -- while the editor's undefined-name rule reports it at
-	// Error. That disagreement runs the other way from this table's and is filed
-	// separately, waiting on a decision about which side is right, so nothing is
-	// asserted about the lint here: only that the compiler's name is not put on
-	// a refusal the compiler does not make.
-	{name: "an assignment to a name nothing declares", src: "y = 1;\n"},
+	// A bare assignment to a name nothing declares used to compile -- it made
+	// the name an implicit let -- while the editor's undefined-name rule
+	// reported it at Error. Only a let declares, so the build now refuses it
+	// too (M26-LSP-035).
+	{name: "an assignment to a name nothing declares", refused: true, src: "y = 1;\n"},
 	{name: "a field write on a name nothing declares", refused: true, src: "nope.y = 1;\n"},
 	{name: "an index write on a name nothing declares", refused: true, src: "nope[0] = 1;\n"},
 

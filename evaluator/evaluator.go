@@ -887,7 +887,10 @@ func evalAssignExpression(node *ast.AssignExpression, env *object.Environment) o
 			return value
 		}
 		if _, updated := env.Update(ident.Value, value); !updated {
-			env.Set(ident.Value, value)
+			// Only a let declares a name. Setting it here made `y = 1` an
+			// implicit let in the current scope; the compiler refuses the
+			// line with this same sentence.
+			return newError("cannot assign to %s: %s is not declared -- declare it with `let %s = ...`", ident.Value, ident.Value, ident.Value)
 		}
 		return value
 	}

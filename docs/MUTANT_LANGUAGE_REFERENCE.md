@@ -317,6 +317,11 @@ begins *after* its declaration -- `let step = wrap(fn(n) { return step(n - 1); }
 is `undefined variable: step`. And threading one handle through a pipeline needs
 a name per stage, since rebinding it would declare nothing new.
 
+**Only a `let` declares.** An assignment stores into a name that is already in
+scope; `y = 1` with no `y` declared is refused at compile time, as `cannot assign
+to y: y is not declared -- declare it with let y = ...`, and the editor marks the
+same line.
+
 ### Loops
 
 Three spellings, each its own construct. `break` and `continue` work in all of

@@ -49,7 +49,9 @@ func FormatSource(src string) (formatted string, parseErrors []lsp.Diagnostic, o
 // never reach the refusal — repairing those is the formatter's job, and it
 // happens naturally: terminators are emitted from Statement.RequiresSemicolon
 // rather than copied from the source, and stray semicolons never reach the
-// tree in the first place.
+// tree in the first place. The one terminator written where RequiresSemicolon
+// says none is due follows an if or match statement whose next statement would
+// otherwise continue it (see continuesExpression).
 func formatSnapshotText(snapshot *analyzer.Snapshot) (string, []lsp.Diagnostic, bool) {
 	if snapshot == nil {
 		return "", nil, false
@@ -118,8 +120,22 @@ func indent(level int) string {
 // including interleaved comments and preserved blank lines. endOffset bounds
 // the region so comments trailing the final statement are flushed at the
 // right indent instead of leaking to an outer scope.
+//
+// Every statement is rendered before any is written, because whether an `if`
+// or `match` statement keeps its `;` depends on the text of the statement after
+// it (see continuesExpression). Rendering stays strictly in source order, which
+// the comment cursor relies on; only the assembly waits for the whole list.
 func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) string {
-	var b strings.Builder
+	type rendered struct {
+		lead      string // comments and the blank line before the statement
+		text      string
+		terminate bool // the statement's canonical form ends with `;`
+		open      bool // an expression statement that ends without one
+		tail      string
+	}
+
+	var out []rendered
+	var lead strings.Builder
 
 	for _, stmt := range stmts {
 		if stmt == nil {
@@ -128,8 +144,8 @@ func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) s
 
 		rng, hasRange := p.program.RangeOf(stmt)
 		if hasRange {
-			b.WriteString(p.flushCommentsBefore(rng.Start.Offset, level))
-			b.WriteString(p.blankLineBefore(rng.Start.Line))
+			lead.WriteString(p.flushCommentsBefore(rng.Start.Offset, level))
+			lead.WriteString(p.blankLineBefore(rng.Start.Line))
 		}
 
 		text := p.statement(stmt, level)
@@ -137,22 +153,66 @@ func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) s
 			continue
 		}
 
-		b.WriteString(text)
-		if stmt.RequiresSemicolon() {
-			b.WriteString(";")
+		_, isExpression := stmt.(*mast.ExpressionStatement)
+		r := rendered{
+			lead:      lead.String(),
+			text:      text,
+			terminate: stmt.RequiresSemicolon(),
+			open:      isExpression && !stmt.RequiresSemicolon(),
 		}
+		lead.Reset()
 
 		if hasRange {
 			p.lastLine = rng.End.Line
-			b.WriteString(p.trailingCommentOn(rng.End.Line))
+			r.tail = p.trailingCommentOn(rng.End.Line)
 		}
+		out = append(out, r)
+	}
+
+	var b strings.Builder
+	for i, r := range out {
+		b.WriteString(r.lead)
+		b.WriteString(r.text)
+		// An if or match statement is written bare, except where the next
+		// statement would continue it: there the `;` is what keeps them two
+		// statements (M26-LSP-049).
+		if r.terminate || (r.open && i+1 < len(out) && continuesExpression(out[i+1].text)) {
+			b.WriteString(";")
+		}
+		b.WriteString(r.tail)
 		b.WriteString("\n")
 	}
+	b.WriteString(lead.String())
 
 	// Comments sitting after the last statement but still inside this scope.
 	b.WriteString(p.flushCommentsBefore(endOffset, level))
 
 	return b.String()
+}
+
+// continuesExpression reports whether a statement whose canonical text is text
+// would be read as the continuation of an expression statement written before
+// it with no `;` between them.
+//
+// Mutant has no automatic semicolon insertion. An `if` or `match` statement is
+// an expression, and its canonical form ends with a `}` and no `;`, so the
+// parser goes on looking for an infix operator after that brace. Four tokens
+// can both begin a statement and continue an expression: `(` (a call on the
+// if's value), `[` (an index into it), `-` (a subtraction from it) and `{` (a
+// struct literal, which leaves the hash literal behind it unparseable). Text
+// rather than the tree's first token is checked, because the text is what the
+// parser will read: a bracket the printer adds is a bracket all the same.
+// Comments are not tokens, so one between the two statements changes nothing.
+func continuesExpression(text string) bool {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	switch trimmed[0] {
+	case '(', '[', '-', '{':
+		return true
+	}
+	return false
 }
 
 // flushCommentsBefore emits every pending comment that starts before offset

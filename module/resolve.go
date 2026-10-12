@@ -70,7 +70,8 @@ func (r *Resolver) Resolve(spelling, importerDir string) (string, error) {
 		return "", err
 	}
 
-	local := filepath.FromSlash(spelling)
+	// Both separators, on every host: sema.ImportPath says why.
+	local := sema.ImportPath(spelling)
 
 	// An absolute import bypasses the search entirely: there is exactly one
 	// file it could mean, and joining it onto a search directory would produce
@@ -104,19 +105,26 @@ func (r *Resolver) Resolve(spelling, importerDir string) (string, error) {
 	return "", &NotFoundError{Spelling: spelling, ImporterDir: importerDir, Searched: searched}
 }
 
-// validateSpelling rejects import paths that cannot name a Mutant source file.
+// validateSpelling rejects import paths that cannot name a Mutant source file,
+// and those that cannot be resolved the same way on every host.
+//
+// The portability check runs before the extension is looked at, so every
+// later check reads the spelling as written: there is no trimmed copy for a
+// check to pass while Resolve joins the untrimmed one.
 func validateSpelling(spelling string) error {
-	trimmed := strings.TrimSpace(spelling)
-	if trimmed == "" {
+	if strings.TrimSpace(spelling) == "" {
 		return &InvalidPathError{Spelling: spelling, Reason: "the path is empty"}
 	}
-	if !strings.HasSuffix(trimmed, Extension) {
+	if problem := sema.ImportSpellingProblem(spelling); problem != "" {
+		return &InvalidPathError{Spelling: spelling, Reason: problem}
+	}
+	if !strings.HasSuffix(spelling, Extension) {
 		return &InvalidPathError{
 			Spelling: spelling,
 			Reason:   fmt.Sprintf("an import path must end in %s", Extension),
 		}
 	}
-	if len(trimmed) == len(Extension) {
+	if len(spelling) == len(Extension) {
 		return &InvalidPathError{Spelling: spelling, Reason: "the path names no file, only the extension"}
 	}
 	return nil

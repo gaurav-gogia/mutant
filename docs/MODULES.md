@@ -23,6 +23,19 @@ import numbers "lib/stats.mut";  // binds the namespace `numbers`
 The path is a string literal and must include the `.mut` extension — the
 extension is not guessed, so the line says exactly which file it opens.
 
+Either slash separates directories, on every host: `import "lib\\stats.mut";`
+(the backslash escaped, as in any string) opens the same file as
+`import "lib/stats.mut";`. A path that begins or ends with whitespace is
+refused, and so is one with a directory or file name ending in a space or a
+dot: Windows does not keep a space or a dot at the end of a name, where other
+systems do, so such a line need not open the same file on each. On Windows, a
+path that begins with a single slash of either kind and names no drive is
+refused as well: Windows reads it from the root of the current drive, not from
+the importing file's directory, while on other systems it is an absolute path.
+A path that begins with two slashes, `//server/share/x.mut`, is absolute on
+every host and is used as written: a network share on Windows, `/server/share`
+elsewhere.
+
 Without an alias the namespace is the file's base name with `.mut` removed:
 `lib/net/tls_pool.mut` binds `tls_pool`. Give an alias when that is not the
 name you want at the call site, or when two imports would otherwise bind the

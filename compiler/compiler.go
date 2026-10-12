@@ -2627,8 +2627,13 @@ func (c *Compiler) compileAssignExpression(node *ast.AssignExpression) error {
 
 		symbol, ok := c.symbolTable.Resolve(base.Value)
 		if !ok {
-			// If not found, define it as global
-			symbol = c.symbolTable.Define(base.Value)
+			// An assignment stores into a name that already exists; only a let
+			// declares one. Defining the name here instead made `y = 1` an
+			// implicit let in the current scope, which the editor and
+			// `mutant lint` (rightly, by the language reference) report as an
+			// undefined identifier -- so the build and the editor disagreed
+			// about the same line.
+			return undeclaredAssignmentError(base.Value)
 		}
 
 		return c.emitAssignStore(symbol)
@@ -2746,6 +2751,13 @@ func (c *Compiler) compileAssignExpression(node *ast.AssignExpression) error {
 	// container.
 	c.loadSymbol(spill)
 	return nil
+}
+
+// undeclaredAssignmentError is the refusal for `name = value` where nothing
+// named name is in scope. The evaluator answers with the same sentence, so the
+// two engines refuse the line alike.
+func undeclaredAssignmentError(name string) error {
+	return fmt.Errorf("cannot assign to %s: %s is not declared -- declare it with `let %s = ...`", name, name, name)
 }
 
 // internalSlot hands back the compiler's own storage for kind in the scope being

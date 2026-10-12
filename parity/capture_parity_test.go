@@ -359,32 +359,33 @@ let probe = fn() {
 // written as though they were frame slots -- and boxing captures does not make
 // either one writable.
 //
-// The two engines do not agree on either of them, and that is recorded here
-// rather than asserted away. The compiler resolves both names to scopes that are
-// not storage and refuses; the evaluator has neither concept, so `len = 5`
-// creates a binding that shadows the builtin and `f = 1` rebinds the global f,
-// and both calls return normally. Which engine is right is a language question
-// -- may a name be assigned before it is bound, and may a function rebind its
-// own name mid-call -- and not one this defect gets to settle. So both answers
-// are pinned, and a change to either engine trips this test.
+// The two engines agree on the builtin and not on the function's own name, and
+// that is recorded here rather than asserted away. The compiler resolves both
+// names to scopes that are not storage and refuses. The evaluator has neither
+// concept: `len = 5` finds no binding named len, and an assignment to a name
+// nothing declares is refused there too (M26-LSP-035), so it errors -- but
+// `f = 1` rebinds the global f and the call returns normally. Whether a
+// function may rebind its own name mid-call is a language question, and not one
+// this defect gets to settle. So every answer is pinned, and a change to either
+// engine trips this test.
 func TestAssigningToSomethingThatIsNotStorageStaysRefusedByTheCompiler(t *testing.T) {
 	cases := []struct {
 		name string
 		src  string
-		// evaluatorAnswer is what the tree-walking engine returns. It is a
-		// value in every row below, which is exactly the divergence being
-		// pinned; "ERROR" here would mean the two engines had converged.
+		// evaluatorAnswer is what the tree-walking engine returns. "ERROR"
+		// means the two engines have converged on refusing; a value is the
+		// divergence being pinned.
 		evaluatorAnswer string
 	}{
 		{
 			// Row J. The VM returned the builtin's Inspect string rather than 5,
 			// having written the registry ordinal into a frame slot. The
-			// evaluator answers 5: Update finds no binding named len, so Set
-			// creates one, and the new binding shadows the builtin for the rest
-			// of the call.
+			// evaluator used to answer 5, by creating a binding that shadowed
+			// the builtin; Update finds no binding named len, and since
+			// M26-LSP-035 an assignment to a name nothing declares is an error.
 			"a builtin",
 			`let probe = fn() { len = 5; return len; }; probe()`,
-			"INTEGER(5)",
+			"ERROR",
 		},
 		{
 			// Row I. probe(42) returned 1, because FunctionScope's index is 0 and

@@ -202,10 +202,10 @@ func (w *Workspace) URIOf(key string) (string, bool) {
 
 // resolveImport walks the same candidates module.Resolver walks, in the same
 // order -- the importing file's own directory, then each search path -- and
-// substitutes "is this file indexed?" for "does this file exist?". It walks
-// one fewer: an importer filed under a path with no directory in it ("a.mut",
-// as `mutant lint .` files it) gets no own-directory candidate, where
-// module.Resolver joins the import onto "." (M26-SEM-033).
+// substitutes "is this file indexed?" for "does this file exist?". An importer
+// filed under a path with no directory in it ("a.mut", as `mutant lint .` files
+// it) has "." for its own directory, where module.Resolver joins the import
+// too (M26-SEM-033); only a document filed with no path has no own directory.
 //
 // That substitution is the whole of the editor's honesty. It never stats, so it
 // is safe on the keystroke path, and it can only ever resolve to a file the
@@ -224,10 +224,10 @@ func (w *Workspace) resolveImport(fromKey, spelling string) (string, bool) {
 // module.Resolver.Resolve returns for the same import, built the same way -- an
 // absolute spelling on its own, and any other joined onto the importer's
 // directory or, when no indexed file is there, onto the first search path that
-// has one. The exception is the one resolveImport names: an importer whose path
-// has no directory in it is not given its own directory, so the import comes
-// back unresolved, or as a search path's copy, where the loader takes the file
-// beside the importer. The loader's name for the file it reaches is that path
+// has one. An importer whose path has no directory in it is joined onto ".", as
+// the loader joins it, and a document with no path -- "", which cleans to "." --
+// is given no directory of its own, so only a search path can answer an import
+// in it. The loader's name for the file it reaches is that path
 // rendered for a reader (module.Module.Display), so on Windows, where a key
 // folds letter case, the letters the import wrote are named in the case it
 // wrote them in, which need not be the case the workspace filed the file under
@@ -241,10 +241,13 @@ func (w *Workspace) resolveImport(fromKey, spelling string) (string, bool) {
 //
 // The caller must hold at least a read lock.
 func (w *Workspace) resolveImportFrom(from, spelling string) (key, path string, ok bool) {
-	if spelling == "" {
+	// A spelling the loader refuses because it cannot be resolved the same way
+	// on every host resolves to nothing here either, rather than to whichever
+	// file this host's reading happens to name.
+	if spelling == "" || ImportSpellingProblem(spelling) != "" {
 		return "", "", false
 	}
-	local := filepath.FromSlash(spelling)
+	local := ImportPath(spelling)
 
 	indexed := func(candidate string) (string, string, bool) {
 		candidate = filepath.Clean(candidate)
@@ -261,8 +264,12 @@ func (w *Workspace) resolveImportFrom(from, spelling string) (key, path string, 
 		return indexed(local)
 	}
 
-	if dir := filepath.Dir(from); dir != "" && dir != "." {
-		if key, path, ok := indexed(filepath.Join(dir, local)); ok {
+	// filepath.Dir of a path with no directory in it is ".", the working
+	// directory the path is relative to, which is where module.Resolver looks
+	// (M26-SEM-033). A document filed with no path has no directory: "" and
+	// the "." it cleans to are not given the working directory.
+	if from != "" && from != "." {
+		if key, path, ok := indexed(filepath.Join(filepath.Dir(from), local)); ok {
 			return key, path, true
 		}
 	}
