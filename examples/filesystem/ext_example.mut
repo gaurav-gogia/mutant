@@ -1,7 +1,6 @@
 // mutant:sweep needs-input -- opens ./disk.ext4, an ext4 image the repository does not ship
 
-let volume_path = "./disk.ext4";
-let opened, open_err = ext_open(volume_path);
+let opened, open_err = ext_open("./disk.ext4");
 if (open_err) {
     putln("ext_open failed:", open_err);
     return;
@@ -17,9 +16,7 @@ if (list_err) {
 }
 
 putln("Root entries:");
-let itemLen = len(items);
-for (let i = 0; i < itemLen; i = i + 1) {
-    let e = items[i];
+for (e in items) {
     putln("  -", e["path"], "(dir=", e["is_dir"], ", inode=", e["inode"], ")");
 }
 

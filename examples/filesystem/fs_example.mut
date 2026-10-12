@@ -1,61 +1,52 @@
 let path = "example_output.txt";
 
-let w, err = fs_write(path, "hello from mutant\n");
-if (w) {
+let wrote, _ = fs_write(path, "hello from mutant\n");
+if (wrote) {
     putln("wrote file");
 } else {
     putln("write failed");
-};
+}
 
-let a, err = fs_append(path, "second line\n");
-if (a) {
+let appended, _ = fs_append(path, "second line\n");
+if (appended) {
     putln("appended to file");
-};
+}
 
-let contents, err = fs_read(path);
+let contents, _ = fs_read(path);
 putln("file contents:");
 putln(contents);
 
-let info, err = fs_stat(path);
+let info, _ = fs_stat(path);
 putln("file name:     ", info["name"]);
 putln("file size:     ", info["size"]);
 putln("is directory:  ", info["is_dir"]);
 putln("modified:      ", info["mod_time"]);
 
-let exists, err = fs_exists(path);
+let exists, _ = fs_exists(path);
 putln("file exists: ", exists);
 
-let dir, err = fs_mkdir("example_dir");
-if (dir) {
+let made, _ = fs_mkdir("example_dir");
+if (made) {
     putln("created directory");
-};
+}
 
-let cp, err = fs_copy(path, "example_dir/copy.txt");
-if (cp) {
+let copied, _ = fs_copy(path, "example_dir/copy.txt");
+if (copied) {
     putln("copied file");
-};
+}
 
-let listing, err = fs_list("example_dir");
+let listing, _ = fs_list("example_dir");
 putln("directory listing:");
-let i = 0;
-let printEntry = fn(entries, idx) {
-    let entry_count = len(entries);
-    let reached_end, err = idx == entry_count;
-    if (reached_end) {
-        return 0;
-    }
-    let entry = entries[idx];
+for (entry in listing) {
     putln("  ", entry["name"], "  size=", entry["size"], "  dir=", entry["is_dir"]);
-    return printEntry(entries, idx + 1);
-};
-printEntry(listing, 0);
+}
 
-let mv, err = fs_move("example_dir/copy.txt", "example_dir/moved.txt");
-if (mv) {
+let moved, _ = fs_move("example_dir/copy.txt", "example_dir/moved.txt");
+if (moved) {
     putln("moved file");
-};
+}
 
-let del, err = fs_delete(path);
-if (del) {
+let deleted, _ = fs_delete(path);
+if (deleted) {
     putln("deleted original file");
-};
+}

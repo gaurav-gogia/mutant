@@ -14,8 +14,8 @@ portscan_service/
 
 ## How it fits together
 
-Mutant does not have an `import` statement; instead, a program composes other
-`.mut` files at runtime through builtins that take a file path. `net_serve` is the
+Besides `import` (see [examples/modules](../../modules/)), a program can compose
+other `.mut` files at runtime through builtins that take a file path. `net_serve` is the
 key one here:
 
 - **`main.mut`** opens a listener with `net_listen`, then calls

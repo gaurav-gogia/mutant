@@ -1,7 +1,5 @@
 putln("=== Fuzzy Matching Builtins ===");
 
-// None of these can fail, so each returns one value, not a (value, err) pair.
-
 let dist = text_levenshtein("kitten", "sitting");
 putln("text_levenshtein:", dist);
 

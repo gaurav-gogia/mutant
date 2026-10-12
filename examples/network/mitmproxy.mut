@@ -1,236 +1,127 @@
-// mitmproxy.mut
-// A man-in-the-middle HTTP/HTTPS interception proxy written in Mutant, in the
-// spirit of mitmproxy. It terminates TLS using per-host certificates minted on
-// the fly from a local CA, inspects/logs each request and response, and relays
-// them to the real upstream server.
-//
-// HOW IT WORKS
-//   1. Generate a CA at startup and print its certificate. Trust that CA in
-//      your browser / client for HTTPS interception to validate.
-//   2. Listen for proxy connections.
-//   3. Plain HTTP  (absolute-form request):  forward to the origin, on the
-//      port the Host header names or :80 when it names none.
-//      HTTPS CONNECT:  answer 200, mint a leaf cert for the host signed by the
-//      CA, TLS-handshake as that host, then decrypt, inspect, and relay.
-//
-// Builtins used: tls_generate_ca, tls_sign_cert, net_listen, net_accept,
-//   net_conn_write, net_tls_upgrade_server, net_connect, net_tls_upgrade_client,
-//   http_conn_read_request, http_build_request, http_conn_read_response,
-//   http_build_response, text_split, text_contains, spawn.
-//
-// THE METHOD TRAVELS WITH THE RESPONSE: http_conn_read_response and
-// http_build_response take the method of the request being answered. Only a
-// HEAD response needs it -- its Content-Length describes the representation the
-// client asked about and no body follows -- but passing it on every message
-// costs nothing and is what lets this proxy relay a HEAD exchange at all.
-//
-// CONCURRENCY: the accept loop hands each connection to spawn, which runs the
-// handler on its own VM, so a slow upstream no longer stalls every other
-// client. Still one request per connection -- the handler reads a request,
-// relays it, and closes the socket -- to stay readable. Configure your client to
-// use 127.0.0.1:8080 as its HTTP and HTTPS proxy.
-//
-// Run:  mutant gen --src examples/network/mitmproxy.mut --dev
-//       mutant examples/network/mitmproxy.mu --dev
+// An HTTP/HTTPS intercepting proxy on 127.0.0.1:8080 that decrypts HTTPS with per-host certificates from a local CA.
 // mutant:sweep server -- binds 127.0.0.1:8080 and proxies until interrupted
 
-// A proxy authority may or may not carry a port: a CONNECT target always does
-// ("example.com:443"), an absolute-form request's Host header may ("example.com"
-// or "example.com:8099"). IPv6 authorities bracket the address, so the last ":"
-// is the only one that can introduce a port.
+let BAD_GATEWAY = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+
+// The last ":" introduces the port; a bare IPv6 address such as "[::1]" has none.
 let split_authority = fn(authority) {
     let parts = text_split(authority, ":");
-    let count = len(parts);
-    if (count < 2) {
+    if (len(parts) < 2) {
         return {"host": authority, "port": ""};
-    };
-    let port = parts[count - 1];
-    let host = "";
-    for (let i = 0; i < count - 1; i++) {
-        if (i == 0) {
-            host = parts[i];
-        } else {
-            host = host + ":" + parts[i];
-        };
     }
-    // "[::1]" is a bare IPv6 address, not a host with a port named "]".
+    let port = parts[len(parts) - 1];
     if (text_contains(port, "]")) {
         return {"host": authority, "port": ""};
-    };
-    return {"host": host, "port": port};
+    }
+    return {"host": str_trim_suffix(authority, ":" + port), "port": port};
 };
 
-let host_only = fn(host_port) {
-    // "example.com:443" -> "example.com"
-    return split_authority(host_port)["host"];
-};
-
-// Where to reach the origin for an absolute-form request. The Host header
-// already carries the port whenever the client asked for a non-default one, and
-// appending :80 to that produced "127.0.0.1:8099:80", which never connects.
-let origin_addr = fn(host) {
-    let split = split_authority(host);
-    if (split["port"] == "") {
-        return host + ":80";
-    };
-    return host;
-};
-
-// A response this proxy writes itself, when it could not reach the origin. It
-// obeys the rule the origin's own response obeys: the answer to a HEAD request
-// carries no body, so the reason goes in a header where a HEAD client can still
-// read it.
-let proxy_error = fn(method, status, reason) {
+// The answer to a HEAD request carries no body, so the reason goes in a header.
+let proxy_error = fn(method, reason) {
     if (method == "HEAD") {
-        return {"status": status, "body": "", "headers": {"X-Mutant-Proxy": reason}};
-    };
-    return {"status": status, "body": "mutant-proxy: " + reason, "headers": {}};
+        return {"status": 502, "body": "", "headers": {"X-Mutant-Proxy": reason}};
+    }
+    return {"status": 502, "body": "mutant-proxy: " + reason, "headers": {}};
 };
 
-// Relay a decrypted request to its real upstream over TLS and return the
-// upstream response hash (or a synthetic 502 on failure).
-let relay_https = fn(host_port, host, request) {
+// relay forwards request to addr, over TLS when server_name is set, and returns the response.
+let relay = fn(addr, server_name, request) {
     let method = request["method"];
-    let upstream, err = net_connect(host_port, 8000);
+    let upstream, err = net_connect(addr, 8000);
     if (err) {
-        return proxy_error(method, 502, "upstream connect failed");
-    };
-    let up_opts = {"server_name": host};
-    let _, err = net_tls_upgrade_client(upstream, up_opts);
-    if (err) {
-        net_conn_close(upstream);
-        return proxy_error(method, 502, "upstream TLS failed");
-    };
-
+        return proxy_error(method, "upstream connect failed");
+    }
+    if (server_name != "") {
+        let _, err = net_tls_upgrade_client(upstream, {"server_name": server_name});
+        if (err) {
+            net_conn_close(upstream);
+            return proxy_error(method, "upstream TLS failed");
+        }
+    }
     let wire, err = http_build_request(request);
     if (err) {
         net_conn_close(upstream);
-        return proxy_error(method, 502, "request rebuild failed");
-    };
+        return proxy_error(method, "request rebuild failed");
+    }
     let _, err = net_conn_write(upstream, wire);
     if (err) {
         net_conn_close(upstream);
-        return proxy_error(method, 502, "upstream write failed");
-    };
+        return proxy_error(method, "upstream write failed");
+    }
     let resp, err = http_conn_read_response(upstream, 15000, method);
     net_conn_close(upstream);
     if (err) {
-        return proxy_error(method, 502, "upstream read failed");
-    };
+        return proxy_error(method, "upstream read failed");
+    }
     return resp;
 };
 
-// Handle a CONNECT tunnel: intercept and decrypt TLS with a minted leaf cert.
+let respond = fn(client, resp, method) {
+    let wire, err = http_build_response(resp, method);
+    if (err) {
+        putln("  [!] response rebuild failed: ", err);
+        wire = BAD_GATEWAY;
+    }
+    net_conn_write(client, wire);
+    net_conn_close(client);
+};
+
 let handle_connect = fn(client, ca, host_port) {
-    let host = host_only(host_port);
+    let host = split_authority(host_port)["host"];
     net_conn_write(client, "HTTP/1.1 200 Connection Established\r\n\r\n");
 
-    // Mint a per-host leaf certificate signed by our CA.
-    let names = [host];
-    let leaf_opts = {"common_name": host, "dns_names": names};
-    let ca_cert = ca["cert_pem"];
-    let ca_key = ca["key_pem"];
-    let leaf, err = tls_sign_cert(ca_cert, ca_key, leaf_opts);
+    let leaf, err = tls_sign_cert(ca["cert_pem"], ca["key_pem"], {"common_name": host, "dns_names": [host]});
     if (err) {
         putln("  [!] leaf issuance failed: ", err);
         net_conn_close(client);
-        return false;
-    };
-
-    // Present that cert to the client and complete the handshake as the host.
-    let leaf_cert = leaf["cert_pem"];
-    let leaf_key = leaf["key_pem"];
-    let _, err = net_tls_upgrade_server(client, leaf_cert, leaf_key);
+        return;
+    }
+    let _, err = net_tls_upgrade_server(client, leaf["cert_pem"], leaf["key_pem"]);
     if (err) {
         putln("  [!] client TLS handshake failed: ", err);
         net_conn_close(client);
-        return false;
-    };
-
-    // Now read the real (decrypted) request the client intended to send.
+        return;
+    }
     let request, err = http_conn_read_request(client, 15000);
     if (err) {
         net_conn_close(client);
-        return false;
-    };
+        return;
+    }
     putln("  [intercept] ", request["method"], " https://", host, request["path"]);
 
-    let resp = relay_https(host_port, host, request);
+    let resp = relay(host_port, host, request);
     putln("  [response ] ", resp["status"], " (", len(resp["body"]), " bytes)");
-
-    let back, err = http_build_response(resp, request["method"]);
-    if (err) {
-        putln("  [!] response rebuild failed: ", err);
-        net_conn_close(client);
-        return false;
-    };
-    net_conn_write(client, back);
-    net_conn_close(client);
-    return true;
-};
-
-// Handle a plain-HTTP proxy request (absolute-form URL, forward to :80).
-let handle_plain = fn(client, request) {
-    let host = request["host"];
-    let addr = origin_addr(host);
-    putln("  [plain    ] ", request["method"], " ", request["url"]);
-
-    let upstream, err = net_connect(addr, 8000);
-    if (err) {
-        net_conn_write(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-        net_conn_close(client);
-        return false;
-    };
-    let wire, err = http_build_request(request);
-    if (err) {
-        net_conn_close(upstream);
-        net_conn_write(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-        net_conn_close(client);
-        return false;
-    };
-    let _, err = net_conn_write(upstream, wire);
-    if (err) {
-        net_conn_close(upstream);
-        net_conn_write(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-        net_conn_close(client);
-        return false;
-    };
-    let resp, err = http_conn_read_response(upstream, 15000, request["method"]);
-    net_conn_close(upstream);
-    if (err) {
-        net_conn_write(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-    } else {
-        putln("  [response ] ", resp["status"]);
-        let back, build_err = http_build_response(resp, request["method"]);
-        if (build_err) {
-            net_conn_write(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-        } else {
-            net_conn_write(client, back);
-        };
-    };
-    net_conn_close(client);
-    return true;
+    respond(client, resp, request["method"]);
 };
 
 let handle_client = fn(client, ca) {
     let request, err = http_conn_read_request(client, 15000);
     if (err) {
         net_conn_close(client);
-        return false;
-    };
+        return;
+    }
     if (request["method"] == "CONNECT") {
-        return handle_connect(client, ca, request["host"]);
-    };
-    return handle_plain(client, request);
+        handle_connect(client, ca, request["host"]);
+        return;
+    }
+
+    let addr = request["host"];
+    if (split_authority(addr)["port"] == "") {
+        addr = addr + ":80";
+    }
+    putln("  [plain    ] ", request["method"], " ", request["url"]);
+
+    let resp = relay(addr, "", request);
+    putln("  [response ] ", resp["status"]);
+    respond(client, resp, request["method"]);
 };
 
 let run_proxy = fn(bind_addr) {
-    let ca_opts = {"common_name": "Mutant Intercept CA", "organization": "Mutant"};
-    let ca, err = tls_generate_ca(ca_opts);
+    let ca, err = tls_generate_ca({"common_name": "Mutant Intercept CA", "organization": "Mutant"});
     if (err) {
         putln("CA generation failed: ", err);
         return false;
-    };
+    }
     putln("=== Mutant intercepting proxy ===");
     putln("Trust this CA certificate in your client to intercept HTTPS:");
     putln(ca["cert_pem"]);
@@ -239,32 +130,23 @@ let run_proxy = fn(bind_addr) {
     if (err) {
         putln("listen failed: ", err);
         return false;
-    };
+    }
     putln("proxy listening on ", bind_addr, " (set as your HTTP+HTTPS proxy)");
 
-    // spawn passes exactly one argument, so the CA rides along as a captured
-    // free variable. A spawned task gets its own copy of what it captures, which
-    // is what lets many connections read the CA at once without coordinating.
+    // spawn passes one argument, so each task gets the CA as a captured copy.
     let serve_one = fn(client) {
         handle_client(client, ca);
     };
-
-    for (;;) {
+    while (true) {
         let acc, _ = net_accept(ln, 0);
         if (!acc["ok"]) {
             continue;
-        };
-
-        // Hand the connection off and go straight back to accepting. The task
-        // handle is discarded on purpose: nothing collects it, and each handler
-        // closes its own connection when it is done.
-        let _, spawn_err = spawn(serve_one, acc["handle"]);
-        if (spawn_err) {
-            // Every task slot is busy. Refusing the connection is better than
-            // queueing it behind work that is already backed up.
-            putln("  [!] at capacity, dropping a connection: ", spawn_err);
+        }
+        let _, err = spawn(serve_one, acc["handle"]);
+        if (err) {
+            putln("  [!] at capacity, dropping a connection: ", err);
             net_conn_close(acc["handle"]);
-        };
+        }
     }
     return true;
 };

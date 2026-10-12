@@ -18,6 +18,9 @@ main.mut
 report.mut
 LATENCIES: sum=190 mean=38 max=92
 largest alone: 92
+latencies holds 5 values
+grade: Grade.Fast(0)
+doubled first: 24
 ```
 
 The first two lines are the point: `main.mut` and `lib/report.mut` each declare
@@ -51,8 +54,8 @@ ok    lib/stats_test.mut  (9 tests, 2ms)
 
 2 files | 12 tests  (2ms)
 
-coverage: 100.0% of 21 lines
-      100.0%      4/4  lib/report.mut
+coverage: 100.0% of 20 lines
+      100.0%      3/3  lib/report.mut
       100.0%    17/17  lib/stats.mut
 ```
 

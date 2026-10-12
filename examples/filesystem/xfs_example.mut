@@ -1,7 +1,6 @@
 // mutant:sweep needs-input -- opens ./disk.xfs, an XFS image the repository does not ship
 
-let volume_path = "./disk.xfs";
-let opened, open_err = xfs_open(volume_path);
+let opened, open_err = xfs_open("./disk.xfs");
 if (open_err) {
     putln("xfs_open failed:", open_err);
     return;
@@ -17,8 +16,7 @@ if (list_err) {
 }
 
 putf("Root entries:\n");
-for (let i = 0; i < len(items); i = i + 1) {
-    let e = items[i];
+for (e in items) {
     putf("- %s (dir=%t, inode=%d)\n", e["path"], e["is_dir"], e["inode"]);
 }
 

@@ -1,7 +1,6 @@
 // mutant:sweep needs-input -- opens ./disk.hfs, an HFS+ image the repository does not ship
 
-let volume_path = "./disk.hfs";
-let opened, open_err = hfs_open(volume_path);
+let opened, open_err = hfs_open("./disk.hfs");
 if (open_err) {
     putln("hfs_open failed:", open_err);
     return;
@@ -17,8 +16,7 @@ if (list_err) {
 }
 
 putf("Root entries:\n");
-for (let i = 0; i < len(items); i = i + 1) {
-    let e = items[i];
+for (e in items) {
     putf("- %s (dir=%t, cnid=%d)\n", e["path"], e["is_dir"], e["cnid"]);
 }
 

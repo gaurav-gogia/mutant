@@ -1,7 +1,11 @@
+// Fetches a page with http_get, then with http_request and custom headers.
 // mutant:sweep needs-input -- fetches https://example.com over the internet
 
 putln("=== HTTP GET ===");
 let resp, err = http_get("https://example.com");
+if (err) {
+    putln("http_get failed: ", err);
+}
 putln("status: ", resp["status"]);
 putln("body (first 200 chars):");
 putln(resp["body"]);
@@ -10,6 +14,9 @@ putln("");
 putln("=== HTTP REQUEST with custom headers ===");
 let headers = {"Authorization": "Bearer my-token", "X-Custom": "mutant"};
 let req, err = http_request("GET", "https://example.com", "", headers);
+if (err) {
+    putln("http_request failed: ", err);
+}
 putln("status: ", req["status"]);
 putln("body:");
 putln(req["body"]);

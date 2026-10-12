@@ -1,55 +1,39 @@
-// A module: an ordinary .mut file that another file imports.
-//
-// Nothing here is exported by a keyword. Every top-level name is reachable
-// from an importing file as `stats.<name>`, except those beginning with `_`,
-// which are private to this file.
+// A module: every top-level name is exported except those starting with _.
 
-// _total is private. An importing file that writes `stats._total` is a compile
-// error naming this file -- the underscore is the whole export rule, so the
-// mark travels with every mention of the name instead of living in a list
-// somewhere else.
 let _total = fn(values) {
-	let sum = 0;
-	for (let i = 0; i < len(values); i = i + 1) {
-		sum = sum + values[i];
-	}
-	return sum;
+    let sum = 0;
+    for (let i = 0; i < len(values); i = i + 1) {
+        sum = sum + values[i];
+    }
+    return sum;
 };
 
 let sum = fn(values) {
-	return _total(values);
+    return _total(values);
 };
 
 let mean = fn(values) {
-	if (len(values) == 0) {
-		return 0;
-	}
-	return _total(values) / len(values);
+    if (len(values) == 0) {
+        return 0;
+    }
+    return _total(values) / len(values);
 };
 
 let largest = fn(values) {
-	let best = values[0];
-	for (let i = 1; i < len(values); i = i + 1) {
-		if (values[i] > best) {
-			best = values[i];
-		}
-	}
-	return best;
+    let best = values[0];
+    for (let i = 1; i < len(values); i = i + 1) {
+        if (values[i] > best) {
+            best = values[i];
+        }
+    }
+    return best;
 };
 
-// Below here are the three names that do NOT come through the namespace.
-//
-// A struct name and an enum name are program-global: they never enter a
-// module's scope at all, so there is no `stats.Sample` to write. A macro is
-// removed from this file before it is compiled -- expansion happens first --
-// so there is no `stats.doubled` either. All three are written bare by any
-// file that loads this one, and the underscore rule does not apply to them,
-// because it is a rule about the module's scope.
-
-struct Sample { name, values }
+// Struct, enum and macro names are program-global: importers write them bare.
+struct Sample { name; values; }
 
 enum Grade { Fast, Slow }
 
 let doubled = macro(value) {
-	quote(unquote(value) + unquote(value));
+    quote(unquote(value) + unquote(value));
 };

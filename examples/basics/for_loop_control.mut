@@ -1,14 +1,15 @@
-let sum = 0;
+// A counting for loop with break and continue.
 
-for (let i = 0; i < 10; i = i + 1) {
+let sum = 0;
+for (let i = 0; i < 10; i++) {
     if (i == 5) {
         break;
     }
     if (i == 2) {
         continue;
     }
-    sum = sum + i;
+    sum += i;
 }
 
 putln("for-loop with break/continue result:");
-putf("sum = ", sum);
+putf("sum = %d\n", sum);
