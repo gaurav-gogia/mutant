@@ -780,10 +780,13 @@ var Builtins = []BuiltinDefinition{
 	{BuiltinNameErasureList, &BuiltIn{ErasureList}},
 }
 
-// registerHelpBuiltin appends `help` to the builtin set. It is done in init()
-// rather than in the Builtins literal to avoid an initialization cycle (Help
-// reads Builtins/builtinsByName to render topics). Appending keeps every existing
-// builtin's slice index stable, so previously compiled bytecode stays valid.
+// This init appends `help` to the builtin set. It is done here rather than in
+// the Builtins literal to avoid an initialization cycle (Help reads
+// Builtins/builtinsByName to render topics). Appending puts help after every
+// literal entry, so its index is the literal's length and has moved whenever an
+// entry was added: 398 in v2.3.x, 408 in v2.4.x. Bytecode compiled since v2.5.0
+// names the builtins it calls, and older bytecode resolves through the frozen
+// tables in legacy_ordinals.go, so neither reads that index.
 func init() {
 	def := BuiltinDefinition{Name: BuiltinNameHelp, Builtin: &BuiltIn{Help}}
 	Builtins = append(Builtins, def)

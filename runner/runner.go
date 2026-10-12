@@ -389,6 +389,20 @@ func decode(data []byte, password string) (*compiler.ByteCode, error) {
 		return nil, err
 	}
 
+	// A program old enough to call builtins by ordinal calls them by the
+	// registry of the release that compiled it, and v2.3.x and v2.4.x put
+	// different builtins at one ordinal without writing a version that says
+	// which. The type the stream declares for ByteCode does say, and only the
+	// stream has it, so it is read here, before the stream is zeroed.
+	if bytecode != nil && compiler.NormalizeVersion(bytecode.Version) == compiler.BytecodeVersionOrdinalBuiltins {
+		registry, err := compiler.LegacyRegistryOf(inflatedData)
+		if err != nil {
+			return nil, fmt.Errorf("this program was compiled before builtins were resolved by name: %w; "+
+				"recompile it from source", err)
+		}
+		bytecode.SetLegacyRegistry(registry)
+	}
+
 	return bytecode, nil
 }
 

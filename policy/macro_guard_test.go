@@ -36,6 +36,7 @@ var registryReaches = []string{
 	"ResolveName",
 	"ResolveNames",
 	"ResolveLegacyOrdinals",
+	"ResolveLegacyOrdinalsV23",
 }
 
 // TestTheEvaluatorResolvesEveryBuiltinInOnePlace keeps the tree-walking engine to

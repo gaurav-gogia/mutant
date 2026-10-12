@@ -49,9 +49,11 @@ type VM struct {
 
 	// builtins is what an OpGetBuiltin operand indexes, resolved once at
 	// construction: from the program's own name table, or -- for bytecode
-	// predating names -- from the frozen ordinal snapshot. builtinsErr holds a
-	// resolution failure until Run can return it, because the constructors
-	// cannot.
+	// predating names -- from a frozen ordinal table: v2.4.x's, or v2.3.x's when
+	// the container has no OpcodeMap (see compiler.LegacyRegistryOf, and
+	// builtin/legacy_ordinals.go for what each table does and does not
+	// describe). builtinsErr holds a resolution failure until Run can return it,
+	// because the constructors cannot.
 	builtins        []*builtin.BuiltIn
 	builtinsErr     error
 	builtinsVersion int
@@ -257,6 +259,8 @@ func resolveBuiltins(bc *compiler.ByteCode) ([]*builtin.BuiltIn, error) {
 			version, compiler.BytecodeVersion)
 	case version >= compiler.BytecodeVersionNamedBuiltins:
 		return builtin.ResolveNames(bc.BuiltinNames)
+	case bc.LegacyRegistry() == compiler.LegacyRegistryV23:
+		return builtin.ResolveLegacyOrdinalsV23()
 	default:
 		return builtin.ResolveLegacyOrdinals()
 	}

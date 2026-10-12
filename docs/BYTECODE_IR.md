@@ -312,7 +312,7 @@ core compiler. See `builtin/lua.go` for context.
 
 | Version | Emitted by | `OpGetBuiltin` operand |
 | --- | --- | --- |
-| absent (decodes to 0, normalised to 1) | up to v2.4.0 | an ordinal into the global `builtin.Builtins` registry |
+| absent (decodes to 0, normalised to 1) | up to v2.4.0 | an ordinal into the global `builtin.Builtins` registry of the release that compiled it |
 | 2 | v2.5.0 onward | `0x8000 \| i`, where `i` indexes this program's own `BuiltinNames` |
 
 Version 1 made the registry append-only forever. An ordinal baked into an
@@ -327,12 +327,39 @@ single instruction runs, and reports a name this runtime does not have rather
 than failing at whichever call site happens to be reached. Only referenced
 builtins are listed, so retiring an unrelated one cannot stop a program loading.
 
-Version 1 artifacts still run. Their operands resolve through
+Version 1 artifacts from v2.3.0 to v2.4.x still run. Their operands resolve through
 `builtin/legacy_ordinals.go`, a frozen snapshot of the registry as it stood at
 v2.4.0 — frozen because those indices are baked into files that cannot be
 recompiled. A builtin that is renamed adds an entry to `builtin.Aliases`, which
 keeps the old name resolvable for old bytecode without keeping it callable from
 new source.
+
+One ordinal meant two builtins before v2.5.0. `help` was appended to the
+registry at init, after every other entry, so it sat at whatever the end was:
+398 in v2.3.x, and 408 in v2.4.x, whose ten new builtins put `pmap` at 398.
+`legacy_ordinals.go` therefore also records v2.3.x's registry, as the v2.4.x
+snapshot with `help` at 398: v2.3.x's 399 entries are its first 399, and
+v2.2.x's 211 entries are the first 211 of both tables. Neither v2.3.x nor v2.4.x
+wrote `Version`, so the runner reads which table a version 1 artifact needs
+from the container itself: gob writes `ByteCode`'s type, naming every exported
+field, ahead of the value, and only v2.4.0 and later declare `OpcodeMap` there
+(`compiler.LegacyRegistryOf`). A stream whose type cannot be read that way is
+refused rather than guessed at.
+
+Registries before v2.2.0 ordered their entries differently, and neither table
+describes them. A v2.2.x artifact that calls a builtin does not run correctly
+either, although its registry matches: v2.3.0 widened `OpGetBuiltin`'s operand
+from one byte to two, so this runtime reads a v2.2.x builtin call's operand
+with the next instruction's first byte in it, binds whichever builtin the two
+bytes number (or stops when they number none), and reads every instruction
+after it out of step. v2.2.x wrote the same `ByteCode` type as v2.3.x, so
+nothing in the container tells such an artifact apart, and it is not refused.
+
+Two development commits between the v2.3.0 and v2.4.0 tags, `821bece` and
+`31182f3`, had v2.4.0's registry but no `OpcodeMap`. Their artifacts read as
+v2.3.x, so a `pmap` call in one reaches `help`; the builtins v2.4.0 added after
+`pmap` still resolve, because the v2.3.x table keeps the snapshot's entries
+past 398.
 
 Both stay for the whole 2.x line: retiring version 1, or the `net_syn_scan`
 alias of `net_connect_scan`, stops artifacts that already exist from running,

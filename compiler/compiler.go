@@ -139,7 +139,8 @@ type ByteCode struct {
 	// four hundredth was retired.
 	//
 	// Empty for BytecodeVersionOrdinalBuiltins, where the operand is a registry
-	// ordinal resolved through builtin.ResolveLegacyOrdinals instead.
+	// ordinal resolved through builtin.ResolveLegacyOrdinals instead, or through
+	// builtin.ResolveLegacyOrdinalsV23 when LegacyRegistry says v2.3.x.
 	BuiltinNames []string
 
 	// OpcodeMap undoes the polymorphic engine's opcode permutation: it is
@@ -223,6 +224,12 @@ type ByteCode struct {
 	// Debug info, stripped with the rest: a release artifact would otherwise
 	// name every top-level binding in the program.
 	GlobalNames []string
+
+	// legacyRegistry is which release's builtin registry the ordinals of a
+	// versionless program index: see LegacyRegistry. It describes the stream
+	// the program was decoded from, not the program, so it is unexported and
+	// gob neither writes nor reads it; the runner sets it from that stream.
+	legacyRegistry LegacyRegistry
 }
 
 // ModuleSpan marks where one module's source begins inside the linked blob.

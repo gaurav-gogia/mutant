@@ -30,13 +30,13 @@ func ResolveName(name string) (*BuiltIn, bool) {
 	return nil, false
 }
 
-// LegacyOrdinalCount is the number of builtins the frozen pre-name ordinal table
+// LegacyOrdinalCount is the number of builtins v2.4.x's frozen ordinal table
 // covers. An OpGetBuiltin operand at or above it, in bytecode old enough to be
 // resolved by ordinal, was never valid.
 func LegacyOrdinalCount() int { return len(legacyBuiltinOrdinals) }
 
 // LegacyOrdinalName returns the builtin name that ordinal referred to in
-// bytecode compiled before OpGetBuiltin carried names.
+// bytecode v2.4.x compiled, before OpGetBuiltin carried names.
 func LegacyOrdinalName(ordinal int) (string, bool) {
 	if ordinal < 0 || ordinal >= len(legacyBuiltinOrdinals) {
 		return "", false
@@ -65,16 +65,34 @@ func ResolveNames(names []string) ([]*BuiltIn, error) {
 	return resolved, nil
 }
 
-// ResolveLegacyOrdinals turns the ordinals of pre-name bytecode into functions,
-// by way of the frozen snapshot of the registry those ordinals indexed.
+// ResolveLegacyOrdinals turns the ordinals of pre-name bytecode that v2.4.x
+// compiled into functions, by way of the frozen snapshot of v2.4.x's registry.
+// ResolveLegacyOrdinalsV23 does the same for the containers v2.3.x wrote, whose
+// registry held help where v2.4.x holds pmap; compiler.LegacyRegistryOf says
+// which one a program needs.
 //
-// count is how many entries the caller needs; bytecode carries no table of its
-// own, so the whole frozen snapshot is resolved and the operand indexes it
-// directly. A name in the snapshot that no longer resolves is reported by name
-// rather than by number, which is the only useful form of that message.
+// Bytecode of that age carries no table of its own, so the whole frozen table
+// is resolved and the operand indexes it directly. A name in the table that no
+// longer resolves is reported by name rather than by number, which is the only
+// useful form of that message.
 func ResolveLegacyOrdinals() ([]*BuiltIn, error) {
-	resolved := make([]*BuiltIn, len(legacyBuiltinOrdinals))
-	for i, name := range legacyBuiltinOrdinals {
+	return resolveLegacyTable(legacyBuiltinOrdinals)
+}
+
+// ResolveLegacyOrdinalsV23 turns the ordinals of pre-name bytecode whose
+// container has no OpcodeMap into functions. v2.3.x wrote such containers, and
+// the table gives it its own registry in its first 399 entries. v2.2.x and
+// earlier wrote them too, but their one-byte operands are misread before this
+// table is consulted (compiler/bytecode_version.go says how). It is
+// ResolveLegacyOrdinals' table with help, not pmap, at 398; legacy_ordinals.go
+// says why it keeps the entries after 398, and which other artifacts it reaches.
+func ResolveLegacyOrdinalsV23() ([]*BuiltIn, error) {
+	return resolveLegacyTable(legacyOrdinalNamesV23())
+}
+
+func resolveLegacyTable(names []string) ([]*BuiltIn, error) {
+	resolved := make([]*BuiltIn, len(names))
+	for i, name := range names {
 		fn, ok := ResolveName(name)
 		if !ok {
 			return nil, fmt.Errorf(

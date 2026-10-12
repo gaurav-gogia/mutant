@@ -187,6 +187,9 @@ var (
 	bytecodeSemanticFields = []string{
 		"Instructions", "Constants", "StructDefs", "EnumDefs", "LuaPatches",
 		"Version", "BuiltinNames", "OpcodeMap",
+		// Which builtin each ordinal of a versionless program names: set at
+		// decode, never written, and never debug info.
+		"legacyRegistry",
 	}
 	functionDebugFields = []string{
 		"Name", "Params", "LocalNames", "LineTable", "MacroTable", "EndTable",

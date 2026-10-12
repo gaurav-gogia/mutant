@@ -263,8 +263,11 @@ cd lsp && go test ./...
 ## Compatibility and stability
 
 **Artifacts.** The bytecode container is versioned (`ByteCode.Version`). A newer
-runtime runs older artifacts: the v2.4.0 builtin registry is frozen in
-`builtin/legacy_ordinals.go` precisely so pre-v2.5 artifacts keep resolving.
+runtime runs older artifacts: the v2.4.0 builtin registry, and the one slot where
+v2.3.x's differed from it, are frozen in `builtin/legacy_ordinals.go` precisely
+so artifacts from v2.3.0 to v2.4.x keep resolving. Artifacts from v2.2.x and
+earlier are not refused, but one that calls a builtin does not run correctly:
+their instruction set differs (`compiler/bytecode_version.go` says how).
 The reverse is not supported and fails loudly by design — an old runtime handed
 a new artifact trips a bounds check rather than silently calling the wrong
 builtin. Any change to the container needs a version bump and a round-trip test
