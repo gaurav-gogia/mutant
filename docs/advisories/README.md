@@ -32,23 +32,24 @@ advisory appears when its fix is ready to publish, not when the defect is found.
 ## Published
 
 Severity is Mutant's own S1–S5 scale, not CVSS; `SECURITY.md` defines it.
-"Fixed in" names every release that carries the fix: four of these are
-backported to the 2.5.1 patch release as well as fixed on the 2.6.0 line.
+"Fixed in" names every release that carries the fix. There is no 2.5.x patch
+release: fixes land on the latest minor only (SECURITY.md, Supported versions),
+so a 2.5.0 user is fixed by upgrading to 2.6.0.
 "Affected" is the range checked by source at each tag — where a row says a
 family was not released, the builtins it concerns did not exist in any
 published version.
 
 | Identifier                        | Sev | Affected                | Fixed in              | What it was                                                                   |
 | --------------------------------- | --- | ----------------------- | --------------------- | ----------------------------------------------------------------------------- |
-| [MVF-2026-0001](MVF-2026-0001.md) | S1  | 2.2.0 – 2.5.0           | 2.5.1 and 2.6.0       | Compiling a program ran whatever builtins its macros called                   |
+| [MVF-2026-0001](MVF-2026-0001.md) | S1  | 2.2.0 – 2.5.0           | 2.6.0                 | Compiling a program ran whatever builtins its macros called                   |
 | [MVF-2026-0002](MVF-2026-0002.md) | S2  | none released           | 2.6.0                 | The disclosure ledger's own records could be redacted, undoing a withdrawal   |
 | [MVF-2026-0003](MVF-2026-0003.md) | S2  | none released           | 2.6.0                 | An audit log with its first entries deleted verified as intact                |
 | [MVF-2026-0004](MVF-2026-0004.md) | S2  | none released           | 2.6.0                 | An audit entry with no sequence number ended the walk as though intact        |
-| [MVF-2026-0005](MVF-2026-0005.md) | S2  | all through 2.5.0       | 2.5.1 and 2.6.0       | Two strings sharing one 64-bit digest were one hash entry                     |
+| [MVF-2026-0005](MVF-2026-0005.md) | S2  | all through 2.5.0       | 2.6.0                 | Two strings sharing one 64-bit digest were one hash entry                     |
 | [MVF-2026-0006](MVF-2026-0006.md) | S2  | none released           | 2.6.0                 | A relabelled disclosure package verified against the genuine root             |
-| [MVF-2026-0007](MVF-2026-0007.md) | S1  | 2.3.0 – 2.5.0           | 2.5.1 and 2.6.0       | A SQL query the documentation called read-only could modify evidence          |
+| [MVF-2026-0007](MVF-2026-0007.md) | S1  | 2.3.0 – 2.5.0           | 2.6.0                 | A SQL query the documentation called read-only could modify evidence          |
 | [MVF-2026-0008](MVF-2026-0008.md) | S2  | none released           | 2.6.0                 | A classified buffer put in a report table was rendered to hex and written out |
-| [MVF-2026-0009](MVF-2026-0009.md) | S3  | 2.1.0 – 2.5.0           | 2.5.1 and 2.6.0       | An inherited environment variable chose the signing key and the trust anchor  |
+| [MVF-2026-0009](MVF-2026-0009.md) | S3  | 2.1.0 – 2.5.0           | 2.6.0                 | An inherited environment variable chose the signing key and the trust anchor  |
 | [MVF-2026-0010](MVF-2026-0010.md) | S3  | extension 0.1.0 - 0.2.0 | extension: unreleased | The editor extension's release task passed the password in the argument list  |
 | [MVF-2026-0011](MVF-2026-0011.md) | S3  | none released           | 2.6.0                 | A ledger redacted by an older build could have lost a withdrawal silently     |
 | [MVF-2026-0012](MVF-2026-0012.md) | S2  | 2.3.0 – 2.5.0           | 2.6.0                 | A header count sized an allocation before the bytes it promised were there    |

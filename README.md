@@ -7,6 +7,9 @@
 mutant is an open source programming language whose aim is to provide an
 accessible, secure system for programming & security research.
 
+Current release: **2.6.0** -- see [CHANGELOG.md](CHANGELOG.md) for what changed
+and [docs/advisories](docs/advisories/README.md) for the security advisories.
+
 # Key features of mutant
 
 1. KISS: The language is simple enough to be learnt in under an hour
@@ -16,7 +19,7 @@ accessible, secure system for programming & security research.
    works on **YOUR** machine
 4. Cross Compilation: mutant supports compiling standalone, independent binary
    executables for multiple platforms.
-5. Batteries included: a **409-builtin** standard library (pure-Go, no cgo)
+5. Batteries included: a **694-builtin** standard library (pure-Go, no cgo)
    spanning strings/math/hashing/time, structured data, higher-order collection
    functions, networking (sockets/TLS/HTTP), graph modeling, cryptography,
    detection, sandboxed Lua, and a deep forensic suite — see the
@@ -40,6 +43,10 @@ git clone https://github.com/aoiflux/mutant
 cd mutant
 go install
 ```
+
+A binary built this way compiles and runs programs, but `mutant release` needs
+the runtime assets that the build scripts below embed; without them it says so
+and names the script to use.
 
 ### Build scripts
 
@@ -162,10 +169,14 @@ mutant release hello.mut --os windows --arch amd64
 mutant release hello.mut --password-file ~/.mutant/release.key --mutation 5
 ```
 
-Supported release targets:
+Supported release targets, as `--os`/`--arch` pairs (`x86` is accepted as
+`386`):
 
-- OS: `darwin`, `linux`, `windows`
-- ARCH: `amd64`, `arm64`, `arm`, `386`, `x86`
+- `darwin/amd64`
+- `linux/amd64`, `linux/386`, `linux/arm64`, `linux/arm`
+- `windows/amd64`, `windows/386`
+
+Any other pair is refused: there is no runtime asset for it.
 
 ### Runtime security options
 
@@ -376,13 +387,13 @@ these are not per-run decisions. See
 - [DEFCON AppSec Village 1st Place Winning Entry](https://eval.blog/research/breaking-the-mutant-languages-encryption/)
 - [Hackaday - This Week in Security](https://hackaday.com/2023/08/18/this-week-in-security-tunnelcrack-mutant-and-not-discord/)
 
-## Documentaiton
+## Documentation
 
 For all things mutant, please visit the
 [official website](https://mudocs.aoiflux.xyz) ^.^
 
-For VS Code language tooling specifics (teaching hovers, signature help, and
-snippet completions), see:
+Guides in this repository (the VS Code extension has its own
+[README](mutant-vscode-extension/README.md)):
 
 - [docs/TUTORIAL_30_MIN.md](docs/TUTORIAL_30_MIN.md) — Mutant in 30 minutes,
   the guided path from install to a standalone binary
@@ -406,6 +417,10 @@ snippet completions), see:
   from an editor, and what the debugger deliberately will not do
 - [docs/LSP_EXTENSION_LLD.md](docs/LSP_EXTENSION_LLD.md)
 - [docs/LSP_EXTENSION_ONBOARDING_60_MIN.md](docs/LSP_EXTENSION_ONBOARDING_60_MIN.md)
+- [examples/workshop/README.md](examples/workshop/README.md) -- QUILLDROP, a
+  two-hour guided investigation built for the DFRWS APAC 2026 workshop
+- [docs/advisories/README.md](docs/advisories/README.md) -- the security
+  advisories, what each affected and where it is fixed
 
 ## Contributing
 

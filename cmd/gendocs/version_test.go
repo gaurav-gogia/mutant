@@ -22,6 +22,7 @@ import (
 
 const (
 	tutorialPath  = "../../docs/TUTORIAL_30_MIN.md"
+	readmePath    = "../../README.md"
 	securityPath  = "../../SECURITY.md"
 	changelogPath = "../../CHANGELOG.md"
 	extensionPath = "../../mutant-vscode-extension/package.json"
@@ -70,6 +71,19 @@ func TestTutorialShowsThisVersion(t *testing.T) {
 		if m[1] != global.Version {
 			t.Errorf("%s shows Version: %s, but global.Version is %s", tutorialPath, m[1], global.Version)
 		}
+	}
+}
+
+// TestReadmeNamesThisRelease: the README's "Current release" line is the
+// first version a visitor reads, and the one nobody re-reads at a release.
+func TestReadmeNamesThisRelease(t *testing.T) {
+	doc := readRepoFile(t, readmePath)
+	stated := regexp.MustCompile(`(?m)^Current release: \*\*([^*]+)\*\*`).FindAllStringSubmatch(doc, -1)
+	if len(stated) != 1 {
+		t.Fatalf("%s states a `Current release: **x.y.z**` line %d times; want exactly once", readmePath, len(stated))
+	}
+	if stated[0][1] != global.Version {
+		t.Errorf("%s names %s as the current release, but global.Version is %s", readmePath, stated[0][1], global.Version)
 	}
 }
 

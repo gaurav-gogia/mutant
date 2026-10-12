@@ -13,7 +13,9 @@ exhaustive lists.
 
 ## [Unreleased]
 
-## [2.6.0] — 2026-10-12
+## [2.6.0] — 2026-10-12 — "Sage"
+
+Every answer checked, or refused out loud.
 
 ### Added
 
