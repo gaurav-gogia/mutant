@@ -239,7 +239,9 @@ has not loaded that extension.
 
 `activity_id` comes from the timestamp for file events — a creation time is
 `Create`, a content modification is `Update`, an access is `Read`, a metadata
-change is `Set Attributes`. Anything else is 99 Other with the envelope's action
+change is `Set Attributes`, a deletion time is `Delete`. Only when the
+timestamp names none of these does the action decide: a file event whose action
+is `delete` is then `Delete`. Anything else is 99 Other with the envelope's action
 as `activity_name`, or 0 Unknown when the artifact did not say what happened.
 Both keep the reading somewhere a consumer can still read it.
 

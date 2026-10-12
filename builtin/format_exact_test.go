@@ -283,6 +283,95 @@ func TestJsonParseKeepsItsDepthBound(t *testing.T) {
 	}
 }
 
+// M26-DAT-041. Under the jsonv2 engine Token() refused the 10,001st level
+// itself, saying "exceeded max depth", so the refusal's wording depended on
+// the Go that built the binary. Every shape of the bound -- arrays, objects,
+// the two mixed, separators wrapped in whitespace, a scalar at the deepest
+// level -- has to answer the same under either engine; run this file with
+// GOEXPERIMENT=jsonv2 to see the newer one.
+func TestJsonParseDepthRefusalIsTheSameUnderBothEngines(t *testing.T) {
+	nest := func(levels int, open, close, inner string) string {
+		return strings.Repeat(open, levels) + inner + strings.Repeat(close, levels)
+	}
+	mixed := func(levels int) string {
+		var b strings.Builder
+		for i := 0; i < levels; i++ {
+			if i%2 == 0 {
+				b.WriteString("[ 1 ,\n ")
+			} else {
+				b.WriteString(`{"k" :` + "\t")
+			}
+		}
+		b.WriteString("0")
+		for i := levels - 1; i >= 0; i-- {
+			if i%2 == 0 {
+				b.WriteString("]")
+			} else {
+				b.WriteString("}")
+			}
+		}
+		return b.String()
+	}
+	accept := map[string]string{
+		"arrays at the bound":           nest(maxJSONDepth, "[", "]", ""),
+		"objects at the bound":          nest(maxJSONDepth-1, `{"k":`, "}", "{}"),
+		"a scalar at the deepest level": nest(maxJSONDepth, "[", "]", "7"),
+		"mixed at the bound":            mixed(maxJSONDepth),
+	}
+	for name, text := range accept {
+		if _, err := decodeJSONDocument(text); err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
+	}
+	refuse := map[string]string{
+		"arrays past the bound":       nest(maxJSONDepth+1, "[", "]", ""),
+		"objects past the bound":      nest(maxJSONDepth, `{"k":`, "}", "{}"),
+		"an array in an object":       nest(maxJSONDepth, `{"k":`, "}", "[]"),
+		"a second element past it":    nest(maxJSONDepth, "[", "]", "1, []"),
+		"mixed past the bound":        mixed(maxJSONDepth + 1),
+		"a key's value after a space": nest(maxJSONDepth, `{"k" : `, "}", "{}"),
+		"an element after a newline":  nest(maxJSONDepth, "[\n", "]", "\n[]"),
+	}
+	for name, text := range refuse {
+		_, err := decodeJSONDocument(text)
+		if err == nil || err.Error() != "arrays and objects nest deeper than 10000 levels" {
+			t.Errorf("%s: got %v, want this tree's depth refusal", name, err)
+		}
+	}
+}
+
+// M26-DAT-041. Looking ahead for a container at the bound skips only the one
+// separator the grammar puts there. A document already malformed at the
+// deepest level -- a stray or doubled separator, a colon between array
+// elements, a missing comma or colon -- keeps the syntax error the decoder
+// reports, under either engine, and is not called too deep.
+func TestJsonParseDepthPeekKeepsSyntaxErrorsAtTheBound(t *testing.T) {
+	arrays := func(inner string) string {
+		return strings.Repeat("[", maxJSONDepth) + inner + strings.Repeat("]", maxJSONDepth)
+	}
+	objects := func(inner string) string {
+		return strings.Repeat(`{"k":`, maxJSONDepth-1) + inner + strings.Repeat("}", maxJSONDepth-1)
+	}
+	malformed := map[string]string{
+		"a comma before the first element": arrays(",[]"),
+		"a colon between array elements":   arrays("1:[]"),
+		"a missing comma":                  arrays("1 []"),
+		"a doubled comma":                  arrays("1,,[]"),
+		"a comma then a colon":             arrays("1,:[]"),
+		"a missing colon after a key":      objects(`{"k" {}}`),
+		"a doubled colon after a key":      objects(`{"k"::{}}`),
+		"a comma after a key":              objects(`{"k",{}}`),
+	}
+	for name, text := range malformed {
+		_, err := decodeJSONDocument(text)
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		} else if err.Error() == "arrays and objects nest deeper than 10000 levels" {
+			t.Errorf("%s: got the depth refusal, want the syntax error", name)
+		}
+	}
+}
+
 // --- XML ---
 
 func xmlIDs(t *testing.T, nodes object.Object) []string {

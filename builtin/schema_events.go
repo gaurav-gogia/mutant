@@ -239,7 +239,10 @@ var eventSources = map[string]*eventSource{
 
 // evtxLevelSeverity maps a Windows event Level onto the envelope's severity
 // vocabulary. Level 0 (LogAlways) asserts nothing about severity, so it maps to
-// nothing rather than to "informational".
+// nothing rather than to "informational". Level 5 (Verbose) is the least severe
+// Level, below 4 (Information), and the vocabulary has no word under
+// "informational", so both map there -- as syslog's info and debug do -- rather
+// than ranking Verbose records above informational ones.
 func evtxLevelSeverity(level int64) string {
 	switch level {
 	case 1:
@@ -248,10 +251,8 @@ func evtxLevelSeverity(level int64) string {
 		return "high"
 	case 3:
 		return "medium"
-	case 4:
+	case 4, 5:
 		return "informational"
-	case 5:
-		return "low"
 	default:
 		return ""
 	}
@@ -556,29 +557,80 @@ func entryTimestamps(entry *object.Hash, spec eventTime) []eventStamp {
 		}
 		stamps := make([]eventStamp, 0, len(values.Elements))
 		for _, element := range values.Elements {
-			if unix, _, _, err := normalizeTimestamp(element, format); err == nil {
-				stamps = append(stamps, eventStamp{unix: unix})
+			if stamp, ok := normalizeEventStamp(element, format); ok {
+				stamps = append(stamps, stamp)
 			}
 		}
 		return stamps
 	}
 
-	unix, _, _, err := normalizeTimestamp(value, format)
-	if err != nil {
+	stamp, ok := normalizeEventStamp(value, format)
+	if !ok {
 		return nil
 	}
-	return []eventStamp{{unix: unix, ns: entryNanos(entry, spec.nsField)}}
+	// A companion field, where the spec names one and the entry carries it,
+	// is the artifact's own statement of the fraction and wins over whatever
+	// the value itself held.
+	if ns, ok := entryNanos(entry, spec.nsField); ok {
+		stamp.ns = ns
+	}
+	return []eventStamp{stamp}
 }
 
-func entryNanos(entry *object.Hash, field string) int64 {
+// normalizeEventStamp reads one timestamp value as format, keeping the
+// sub-second fraction the value carries. normalizeTimestamp answers in whole
+// seconds plus milliseconds, and an event built from the seconds alone would
+// truncate an ISO string's nanoseconds, a FILETIME's 100 ns ticks or a unix_ms
+// value's milliseconds to the second.
+func normalizeEventStamp(value object.Object, format string) (eventStamp, bool) {
+	unix, _, used, err := normalizeTimestamp(value, format)
+	if err != nil {
+		return eventStamp{}, false
+	}
+	return eventStamp{unix: unix, ns: timestampFraction(value, used)}, true
+}
+
+// timestampFraction is the part of value, in nanoseconds, below the whole
+// second normalizeTimestamp returned for it; used is the format
+// normalizeTimestamp reports having read value as. For an integer it is the
+// remainder of the same truncating division normalizeTimestamp makes, so
+// seconds plus fraction is exactly the instant the value names; a negative
+// integer gives a fraction at or below zero, but its seconds are at or below
+// zero too, and buildEvent emits no event for those.
+func timestampFraction(value object.Object, used string) int64 {
+	switch typed := value.(type) {
+	case *object.String:
+		if t, err := parseISOTime(typed.Value); err == nil {
+			return int64(t.Nanosecond())
+		}
+	case *object.Integer:
+		n := typed.Value
+		switch used {
+		case "unix_ms":
+			return n % 1000 * int64(time.Millisecond)
+		case "unix_us", "webkit":
+			return n % 1_000_000 * int64(time.Microsecond)
+		case "unix_ns":
+			return n % 1_000_000_000
+		case "filetime":
+			return n % 10_000_000 * 100
+		}
+	}
+	// unix seconds and DOS times carry no fraction.
+	return 0
+}
+
+// entryNanos reads the companion sub-second field. ok is false when the spec
+// names none, or the entry holds no integer within one second there.
+func entryNanos(entry *object.Hash, field string) (int64, bool) {
 	if field == "" {
-		return 0
+		return 0, false
 	}
 	ns, ok := hashValueByKey(entry, field).(*object.Integer)
 	if !ok || ns.Value < 0 || ns.Value >= int64(time.Second) {
-		return 0
+		return 0, false
 	}
-	return ns.Value
+	return ns.Value, true
 }
 
 func buildEvent(source *eventSource, entry *object.Hash, spec eventTime, unix, ns int64) object.Object {

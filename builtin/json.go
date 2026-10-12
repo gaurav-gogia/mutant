@@ -17,6 +17,9 @@ import (
 // used it, kept the same now that they read a document token by token, so
 // nothing that parsed before is refused for its depth.
 //
+// The bound and its refusal are this tree's under either of Go's two
+// encoding/json engines; decodeJSONValue explains how.
+//
 //mutant:limit depth
 const maxJSONDepth = 10000
 
@@ -79,7 +82,7 @@ func decodeJSONDocument(text string) (any, error) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.UseNumber()
-	value, err := decodeJSONValue(decoder, 0)
+	value, err := decodeJSONValue(decoder, text, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +104,27 @@ func decodeJSONDocument(text string) (any, error) {
 }
 
 // decodeJSONValue reads one value token by token, so that an object's keys are
-// seen as they arrive and a repeated one can be refused.
-func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
+// seen as they arrive and a repeated one can be refused. text is the document
+// the decoder reads, so the next value can be looked at before Token() takes
+// it, and separator is the one byte the grammar puts before that value: 0 for
+// a document's value or an array's first element, ',' for a later element,
+// ':' for an object member's value.
+//
+// Go carries two encoding/json engines, chosen by the goexperiment.jsonv2
+// build tag. The original one's Decoder.Token() puts no limit on how deeply
+// delimiters nest; the newer one's refuses past the same 10,000 levels in its
+// own words ("exceeded max depth"). So the depth is checked before Token() is
+// handed a container that would cross maxJSONDepth, and the refusal is the
+// same whichever engine built the binary (M26-DAT-041).
+func decodeJSONValue(decoder *json.Decoder, text string, depth int, separator byte) (any, error) {
+	// A value at the bound may be a scalar, never another array or object.
+	// Looking at the text first matters under the jsonv2 engine, whose
+	// Token() refuses that container itself, in its own words; the check
+	// after Token() below is the same rule, for an engine that hands the
+	// container over.
+	if depth >= maxJSONDepth && jsonValueOpensContainer(text, decoder.InputOffset(), separator) {
+		return nil, jsonDepthError()
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -112,17 +134,19 @@ func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
 		return token, nil // a string, a json.Number, a bool or nil
 	}
 	if depth >= maxJSONDepth {
-		return nil, fmt.Errorf("arrays and objects nest deeper than %d levels", maxJSONDepth)
+		return nil, jsonDepthError()
 	}
 	switch delim {
 	case '[':
 		items := make([]any, 0)
+		elementSeparator := byte(0) // nothing comes before the first element
 		for decoder.More() {
-			item, err := decodeJSONValue(decoder, depth+1)
+			item, err := decodeJSONValue(decoder, text, depth+1, elementSeparator)
 			if err != nil {
 				return nil, err
 			}
 			items = append(items, item)
+			elementSeparator = ','
 		}
 		if _, err := decoder.Token(); err != nil {
 			return nil, err
@@ -142,7 +166,7 @@ func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
 			if _, repeated := fields[key]; repeated {
 				return nil, fmt.Errorf("the key %q appears twice in one object", key)
 			}
-			value, err := decodeJSONValue(decoder, depth+1)
+			value, err := decodeJSONValue(decoder, text, depth+1, ':')
 			if err != nil {
 				return nil, err
 			}
@@ -154,6 +178,31 @@ func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
 		return fields, nil
 	}
 	return nil, fmt.Errorf("unexpected %v", delim)
+}
+
+func jsonDepthError() error {
+	return fmt.Errorf("arrays and objects nest deeper than %d levels", maxJSONDepth)
+}
+
+// jsonValueOpensContainer reports whether the next value in text, after the
+// last token the decoder returned (which ends at offset), begins an array or
+// an object. Both engines leave the separator before a value unread until
+// that value is asked for, so whitespace, then separator (unless it is 0),
+// then whitespace come first. It skips only that one separator: any other
+// text before the value is a syntax error, and false leaves Token() to report
+// it in the place it occurs rather than calling a malformed document too deep.
+func jsonValueOpensContainer(text string, offset int64, separator byte) bool {
+	if offset < 0 || offset > int64(len(text)) {
+		return false
+	}
+	rest := strings.TrimLeft(text[offset:], " \t\r\n")
+	if separator != 0 {
+		if rest == "" || rest[0] != separator {
+			return false
+		}
+		rest = strings.TrimLeft(rest[1:], " \t\r\n")
+	}
+	return strings.HasPrefix(rest, "[") || strings.HasPrefix(rest, "{")
 }
 
 // jsonTextCheck refuses JSON text that encoding/json would quietly rewrite: a

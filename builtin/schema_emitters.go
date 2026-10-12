@@ -566,8 +566,11 @@ func buildOCSFEvent(event *object.Hash, config emitConfig) (object.Object, *obje
 }
 
 // ocsfActivity picks the activity within a class. For a file event the
-// timestamp's meaning is the activity -- a creation time records a create -- so
-// the description is read before the action.
+// timestamp's meaning is the activity -- a creation time records a create, a
+// deletion time a delete -- so the description is read before the action. Only
+// when the description names no activity does the action decide: a delete
+// action is 4 Delete, because OCSF 1001 has its own activity for that and 99
+// Other would hide it from a consumer looking for deletions.
 //
 // Anything else is 99 Other with the envelope's action as the name, or 0 Unknown
 // when the artifact did not say what happened. Both are OCSF's own answers for
@@ -585,8 +588,13 @@ func ocsfActivity(class ocsfClass, action, description string) (int64, string) {
 			return 2, "Read"
 		case "Metadata Modification Time", "Written Time":
 			return 6, "Set Attributes"
+		case "Deletion Time":
+			return 4, "Delete"
 		}
-		if action == "open" {
+		switch action {
+		case "delete":
+			return 4, "Delete"
+		case "open":
 			return 2, "Read"
 		}
 	case 6001:
