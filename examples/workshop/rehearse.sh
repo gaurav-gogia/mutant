@@ -163,7 +163,7 @@ elif [ "$MODE" = guard ]; then
     echo "  mode     : NO CORPUS. The goldens record real output, so every beat will"
     echo "             print its \"missing\" line instead and nothing can be compared."
     echo "             Build the corpus and run this again:"
-    echo "               go install github.com/aoiflux/fsagen@v0.1.0"
+    echo "               go install github.com/aoiflux/fsagen@latest"
     echo "               ./examples/workshop/evidence/build_evidence.sh"
 else
     echo "  mode     : CASE. The goldens record the empty case, so they are not"
@@ -175,7 +175,7 @@ if [ "$MODE" = guard ]; then
         echo ""
         echo "             This tests the guard in lib/quilldrop.mut, not the case. To"
         echo "             rehearse the case itself, build the corpus first:"
-        echo "               go install github.com/aoiflux/fsagen@v0.1.0"
+        echo "               go install github.com/aoiflux/fsagen@latest"
         echo "               ./examples/workshop/evidence/build_evidence.sh"
     fi
 else

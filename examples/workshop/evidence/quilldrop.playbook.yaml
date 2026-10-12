@@ -12,7 +12,7 @@
 # written against v0.1.0, whose playbook validation refused the version of this
 # file that shipped before it (M26-EX-018). Install exactly:
 #
-#   go install github.com/aoiflux/fsagen@v0.1.0
+#   go install github.com/aoiflux/fsagen@latest
 #
 # WHY THE TYPED BLOCKS. fsagen v0.1.0 refuses to put filler bytes into a file
 # whose extension promises a structure, because a .exe full of base32 is silent
@@ -68,7 +68,6 @@ actors:
 
 # ---------------------------------------------------------------------------
 steps:
-
   # -- 0. Background: a normal working week ---------------------------------
   # Generated first so the noise predates the intrusion, the way real noise does.
   - actor: business

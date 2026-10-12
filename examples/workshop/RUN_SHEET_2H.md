@@ -13,7 +13,7 @@ them.
 
 ## Before anyone arrives
 
-1. `go install github.com/aoiflux/fsagen@v0.1.0` — the version, not `@latest`,
+1. `go install github.com/aoiflux/fsagen@latest` — the version, not `@latest`,
    which is now v0.2.0 — and run
    `.\examples\workshop\evidence\build_evidence.ps1` on your own machine.
    Confirm it finishes and check the file count against

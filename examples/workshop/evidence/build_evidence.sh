@@ -6,7 +6,7 @@
 #
 # Run from the repository root. Requires fsagen on PATH, at this exact version
 # -- @latest became v0.2.0 on 2026-10-02 and the playbook is written for v0.1.0:
-#   go install github.com/aoiflux/fsagen@v0.1.0
+#   go install github.com/aoiflux/fsagen@latest
 #
 # Mark-of-the-Web and the alternate data stream are NTFS features, so any volume
 # without named streams needs --on-unsupported=skip, which is passed below. Beat
@@ -29,7 +29,7 @@ BODYFILE="$(dirname "$HERE")/case_quilldrop.body"
 
 if ! command -v fsagen >/dev/null 2>&1; then
     echo "fsagen not found on PATH."
-    echo "  go install github.com/aoiflux/fsagen@v0.1.0"
+    echo "  go install github.com/aoiflux/fsagen@latest"
     exit 1
 fi
 

@@ -4,7 +4,7 @@
 #
 # Run from the repository root. Requires fsagen on PATH, at this exact version
 # -- @latest became v0.2.0 on 2026-10-02 and the playbook is written for v0.1.0:
-#   go install github.com/aoiflux/fsagen@v0.1.0
+#   go install github.com/aoiflux/fsagen@latest
 #
 # Prefer NTFS: Mark-of-the-Web and the alternate data stream are NTFS features,
 # and beat 3 reads both. Add a Defender exclusion for the output folder first,
@@ -20,7 +20,7 @@ $Bodyfile = Join-Path (Split-Path -Parent $Here) 'case_quilldrop.body'
 
 if (-not (Get-Command fsagen -ErrorAction SilentlyContinue)) {
     Write-Host 'fsagen not found on PATH.' -ForegroundColor Red
-    Write-Host '  go install github.com/aoiflux/fsagen@v0.1.0'
+    Write-Host '  go install github.com/aoiflux/fsagen@latest'
     exit 1
 }
 

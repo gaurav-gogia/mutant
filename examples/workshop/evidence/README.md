@@ -23,7 +23,7 @@ malicious, and the whole corpus comes back from a seed.
 ## Build it
 
 ```
-go install github.com/aoiflux/fsagen@v0.1.0
+go install github.com/aoiflux/fsagen@latest
 
 fsagen --seed 88412 \
        --playbook examples/workshop/evidence/quilldrop.playbook.yaml \

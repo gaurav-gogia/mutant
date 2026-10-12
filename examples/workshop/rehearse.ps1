@@ -182,7 +182,7 @@ if ($compare) {
     Write-Host "  mode     : NO CORPUS. The goldens record real output, so every beat will"
     Write-Host "             print its `"missing`" line instead and nothing can be compared."
     Write-Host "             Build the corpus and run this again:"
-    Write-Host "               go install github.com/aoiflux/fsagen@v0.1.0"
+    Write-Host "               go install github.com/aoiflux/fsagen@latest"
     Write-Host "               .\examples\workshop\evidence\build_evidence.ps1"
 } else {
     Write-Host "  mode     : CASE. The goldens record the empty case, so they are not"
@@ -194,7 +194,7 @@ if ($mode -eq "guard") {
         Write-Host ""
         Write-Host "             This tests the guard in lib/quilldrop.mut, not the case. To"
         Write-Host "             rehearse the case itself, build the corpus first:"
-        Write-Host "               go install github.com/aoiflux/fsagen@v0.1.0"
+        Write-Host "               go install github.com/aoiflux/fsagen@latest"
         Write-Host "               .\examples\workshop\evidence\build_evidence.ps1"
     }
 } else {
