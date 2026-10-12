@@ -13,6 +13,8 @@ exhaustive lists.
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-10-12
+
 ### Added
 
 - **A release gate you can run.** `scripts/release_gate.sh` and
@@ -852,6 +854,47 @@ exhaustive lists.
   agrees with the compiler because it reads scope out of the same walk: a block
   shadow is no longer reported as a duplicate declaration, and a real duplicate
   now is. Nothing about the bytecode, the opcodes or a frame's layout changes.
+  One change still compiles, and gives a different answer: a `let` inside a
+  block that reuses an outer name now declares a new variable, where before it
+  changed the outer one. `let x = 1; if (true) { let x = 2; } putln(x);`
+  printed 2 and now prints 1. `mutant lint` reports the inner `x` as an unused
+  declaration; a compile-time warning is planned (M26-CMP-022).
+
+- **Assigning to a name nobody declared is refused. BREAKING.** `y = 1` with
+  no `let y` before it defined a global in a compiled program, while the editor
+  called `y` undefined. The compiler and the evaluator, and so the REPL, now
+  refuse it: "cannot assign to y: y is not declared -- declare it with
+  `let y = ...`" (M26-LSP-035).
+
+- **An import names the same file on every system. BREAKING on Windows.** A
+  backslash in an import path is a separator everywhere. A spelling that Windows
+  and other systems read differently is refused with the reason: whitespace at
+  either end, a segment ending in a dot or a space, and on Windows a path that
+  begins with a separator but names no drive, such as `import "/lib/x.mut"`.
+  Write a path relative to the importing file, or an absolute path with a drive
+  (M26-RUN-012).
+
+- **Values of different types are not equal. BREAKING.** `==` fell back to
+  comparing printed text, so `null == ""`, `"0" == 0` and `"true" == true` were
+  all true. They are false now, in both engines; an integer and a float still
+  compare by value. Arrays, hashes and structs compare element by element rather
+  than through a float render rounded to six decimals, so `[7.9999991] ==
+  [7.9999994]` is false, and `unique`, `contains`, `index_of` and hash-key
+  order no longer merge such floats. `assert_eq`, `assert_ne` and
+  `assert_contains` give the answer `==` gives, for errors too, where they used
+  to compare the line an error was raised on (M26-VM-010, M26-EVL-006,
+  M26-VM-016).
+
+- **A function value prints its signature, and is equal to itself.** A
+  function printed as its heap address, so a program that ended on one never
+  printed the same thing twice; it now prints `fn mean(values)`. On the VM a
+  function was never equal to itself, while the evaluator said the opposite;
+  both now compare functions by identity, inside arrays, hashes and structs too
+  (M26-EVL-002, M26-EVL-005).
+
+- **`json_stringify` writes a whole float as a float.** `5.0` came out as `5`,
+  so a parse read it back as an integer; it now comes out as `5.0`
+  (M26-DOC1-004).
 
 - **`exec_string` and `cmd_builder` accept any shell the host has, by name.**
   `powershell`, `pwsh`, `cmd`, `batch`, `bash` and `sh` keep their own
@@ -871,6 +914,81 @@ exhaustive lists.
   which reached `bash` and `sh` only.
 
 ### Fixed
+
+- **`mutant.version()` in Lua reports the running version.** It answered
+  `2.1.0`, the version it was written in, on every release since.
+
+- **A program compiled by 2.3.x calls the builtin it was compiled for.** On this
+  runtime its `help()` call ran `pmap`. The runner now tells a 2.3.x artifact
+  from a 2.4.x one by the type its bytecode declares and looks builtins up in
+  that release's table; an artifact whose type cannot be read is refused
+  (M26-BLT-014).
+
+- **Builtin answers keep their types and order.** `cache_put` and `cache_get`
+  keep the types of integers, bytes, structs, enums and integer-keyed hashes,
+  where an integer came back as a float and bytes as a hex string. `keys`,
+  `values` and `entries` share one order, so `keys(h)[i]` pairs with
+  `values(h)[i]`. `task_wait(h, 0)` returns a finished task's value instead of
+  reporting it still running. `fs_hash` on a directory says a directory has no
+  digest. An error's context names the builtin that raised it, where 23 named a
+  wrong or misspelt one (`uuid_v7` as `builtin.uui_dv7`). The editor accepts
+  bytes as a hash key, as the runtime does, and the help for `text_index` and
+  `len` says they count bytes (M26-BLT-002, M26-BLT-007, M26-BLT-009,
+  M26-BLT-010, M26-BLT-012, M26-BLT-015, M26-BLT-017).
+
+- **Disclosure checks what it discloses, and to whom.** A withdrawn recipient
+  could be disclosed to again by respelling the name in another letter case or
+  with an invisible character; recipients are now compared case-folded.
+  `disclose_to_passphrase` refuses a record whose signature fails or which
+  changed since `record_open`. `record_seal` refuses a range whose label and
+  class tag do not name one declared class, and `disclose_reclassified` refuses
+  two records that would reclassify each other. A role bundle read back from the
+  ledger is checked against the role's definition and id, and a record footer
+  that says unsigned while carrying a signature is refused (M26-REC-009,
+  M26-REC-011, M26-REC-012, M26-REC-024, M26-REC-025, M26-SEC-013).
+
+- **Event and report output keeps what the evidence said.** `events_from` kept
+  only the whole seconds of ISO, Unix-millisecond, FILETIME and WebKit times;
+  ECS, OCSF and Timesketch output now keep the fraction. `ocsf_event` filed a
+  deletion under activity 99 (Other) instead of 4 (Delete). An EVTX Verbose
+  event ranked above an Information one. A line starting `~~~` turned the rest
+  of a Markdown report into a code block; such fences, indents, list markers and
+  bare carriage returns are now escaped. `json_parse` gives the same depth
+  refusal whichever Go built the binary (M26-DAT-020, M26-DAT-021, M26-DAT-022,
+  M26-DAT-026, M26-DAT-041).
+
+- **The editor, `mutant lint` and the build agree.** `mutant lint .` run from a
+  file's own directory resolved no import, and run inside a project missed
+  import cycles the build refuses; both now resolve imports as the build does.
+  `mutant fmt` deleted the `;` after an `if` or `match`, so a next statement
+  starting with `(` or `[` became a call or an index on it; the `;` is kept
+  (M26-SEM-028, M26-SEM-033, M26-LSP-049).
+
+- **Artifact parsers stop inventing and dropping evidence.** `email_urls`
+  stopped at the first body line over 64 KiB. `extract_iocs` turned " at " and
+  " dot " in prose into `@` and `.`, inventing email and domain indicators; it
+  now refangs only the bracketed and `hxxp` forms. `mft_parse` filed a deleted
+  file under whatever directory now holds its parent's MFT slot; a reused parent
+  is reported as unknown (`?`). `detect_injection` scored random bytes as an
+  injection; a PE header now needs a valid `e_lfanew` and signature.
+  `bin_yara_scan` with `caseInsensitive` reported offsets into a lower-cased
+  copy, not the file. The live registry dropped the data of value types it does
+  not decode; it returns it hex-encoded with `raw` set (M26-ART-014,
+  M26-ART-015, M26-ART-023, M26-ART-026, M26-ART-027, M26-NET-006).
+
+- **The evaluator runs macro bodies as the VM runs programs.** A loop stopped at
+  the first iteration whose body ended in an error value. A write through an
+  alias changed the original container, where the same lines at run time did
+  not; the evaluator now copies on read, as the VM does. `sort_by` ordered
+  integer keys through a rounded float copy; one exact comparison now serves
+  both engines (M26-EVL-008, M26-EVL-021, M26-VM-019).
+
+- **Four examples reported false results.** `network_service_recon_graph`
+  called every probed port open, timeouts included; `net_example` printed
+  "connected" after a dial with no port; `service_recon` never noticed a
+  missing banner; `dependency_version_auditor` reported every dependency not
+  vulnerable. Each now reads the result's `ok` field or the response body. The
+  examples are also rewritten shorter and plainer, and print what they printed.
 
 - **An editor's cursor and the language server's own columns now mean the same thing in every direction, and a document the server cannot keep up with stops handing out edits.**
 
@@ -2887,6 +3005,129 @@ exhaustive lists.
 - A signed record's footer no longer carries the key store's directory. `SignRecordFooter` wrote the key-store path into `signature_reason`, a field whose purpose is to say why a record has *no* signature, so every signed `.mrec` -- and every copy `disclose_bundle` placed in a recipient's package -- published the absolute path of the examiner's private-key directory, and with it their operating-system account name. The field is now left empty on a signed record. Records sealed before this release keep the path in the files already issued (**M26-SEC-002**).
 - `disclose_verify` now compares `SHA256SUMS` with the manifest as two lists rather than only where they already agreed. The comparison was guarded on the file being listed in the manifest, so a checksum line naming a file the manifest did not list was skipped in silence, a manifest entry with no checksum line was never missed, and a `SHA256SUMS` listing entirely different files agreed trivially -- while the summary still read "all N files hash to the digests the manifest names". The manifest's own line is now compared against the manifest on disk, which a manifest cannot do for itself, and the package directory is read: a file that neither list names is reported under a new `package_contents` check rather than passing unmentioned. Nothing signed was ever forged by this and every file the manifest listed was always hashed and compared, so a package that verified before still verifies now unless it holds something nothing vouches for (**M26-REC-029**).
 
+### Known issues
+
+These wrong answers were found during the 2.6.0 review and are not fixed in
+this release. Each is tracked and planned for the next one. Where a workaround
+exists it is given.
+
+**Language and runtime**
+
+- A program compiled by v2.2.x or earlier may call the wrong builtin and stop
+  or give wrong results; recompile it from source.
+- The evaluator reports some argument mistakes in higher-order builtins as
+  runtime faults where the VM returns an error value.
+- In the evaluator, `spawn` records an error value as a task failure and a
+  fault as a successful result.
+- `+`, `-` and `*` wrap silently on 64-bit integer overflow.
+- On the VM, an error that holds a function is not equal to itself (`a == a`
+  is false), because storing the error loses the function's identity.
+- A program whose last statement is a `for`-in loop prints `<iterator>` when
+  it finishes.
+- `putln` drops the space before a value that starts with `.` `,` `;` `:` `)`
+  `]` `}` and after one that ends in `=` `(` `[` `{`.
+- `range` near the 64-bit integer limits builds millions of elements and then
+  fails, instead of returning the few values in range.
+- A timeout longer than about 292 years fires at once (`task_wait`,
+  `chan_send`, `chan_recv`, `sleep_ms`).
+- When padding is declined for a large stream, the compiler drops that
+  stream's line, end and macro tables, so error positions in it are lost.
+
+**Files, artifacts and time**
+
+- `hive_list_values` and `reg_enum_values` name the unnamed value
+  `(default)`, but `hive_get_value` and `reg_get_value` cannot find it by that
+  name.
+- `syslog_parse` assumes UTC and the current year, so a `Feb 29` line can
+  become 1 March and the answer depends on the day it runs.
+- `timeline_sort` and `timeline_merge` can misorder nanosecond timestamps.
+- `timestamp_normalize` gives sub-second FILETIME and WebKit values before
+  1970 an `iso` one second early.
+- `fs_exists` returns true when a path cannot be checked for a reason other
+  than "does not exist" (an invalid name, a denied permission).
+- `$LogFile` parsing walks the log's tail-copy pages as ordinary pages, so
+  records can be duplicated and an unwrapped log can read as wrapped.
+- A Rego policy's named time zones take their rules from the `ZONEINFO`
+  setting, and SQLite's `localtime` follows `TZ` on every system. A policy or
+  query that must not depend on the machine should use UTC.
+- `lua_run_http` runs an HTTP error page as a script and reports success.
+- Lua results render whole numbers in exponent form.
+
+**Records, cases and custody**
+
+- `redaction_commit` records a record whose signature no longer verifies as
+  signed, without a word. Disclosure now refuses such a record; check
+  `record_open`'s `signature_valid` before a redaction.
+- A second reclassification of the same record makes later disclosures of it
+  fail with a false "ledger tampered" error.
+- The redaction-reason check can miss values stored only in a node's blob.
+- A script can stop a withdrawal or disclosure from being recorded by
+  declaring a schema key unique.
+- A redaction reason that is not valid UTF-8 is recorded differently in the
+  ledger and in the manifest.
+- `case_evidence` ignores an explicitly requested digest algorithm.
+- A witness time given in milliseconds becomes a plausible wrong date.
+- The custody, review, retention and erasure readers accept shapes no writer
+  produces and check little across chains; the manifest's `ledger_state`
+  omits open reviews, holds and erasures.
+- The record writer accepts header and footer lengths its own reader refuses.
+- The signed-code parser accepts unsigned extra segments between the data and
+  the signature.
+
+**Security detection**
+
+- The Windows sandbox detector reads only the immediate parent process, so a
+  program in between (`timeout`, `env`, `cmd /c`) hides a Git Bash parent.
+
+**Networking**
+
+- `net_serve` and `net_spawn` handlers cannot use `import` or macros.
+- `net_udp_scan` and `net_connect_scan` accept a zero or negative timeout and
+  report every port closed.
+
+**Command line and release builds**
+
+- A standalone binary's case manifest names the `.exe` but records the digest
+  of its embedded payload.
+- `mutant release` has no darwin/arm64 or windows/arm64 runtime.
+- `mutant gen assets` builds with whatever `go` is first on the PATH.
+- A password file written by Windows PowerShell (with a BOM, or UTF-16)
+  silently changes the password. Write it as UTF-8 without a BOM.
+- `--password-stdin` reads all of standard input, so it cannot be combined
+  with `gets()`.
+- `gen` accepts `--password-stdin=true` and `--dev=true` and ignores them.
+- The release target OS is lowercased for the asset lookup but not for the
+  `.exe` suffix.
+- On a filesystem that ignores letter case (macOS by default, WSL's `/mnt`
+  drives), one file imported under two spellings loads as two modules, and the
+  editor and `mutant lint` cannot resolve a respelled import.
+
+**Editor and debugger**
+
+- Hover, go-to-definition and completion can show the wrong card or target
+  where names are shared: an enum and a struct of the same name, a field
+  named like a builtin, a declaration the parser drops, a module alias, a
+  module the editor has not read yet.
+- Signature help can show a reassigned function's old parameters, and some
+  argument-type warnings fire on correct programs.
+- Outgoing calls never list a callee in another module.
+- Enum uses and string literals get the wrong semantic colouring or range.
+- The editor binds a duplicated import alias to the later import, where the
+  build binds the first, and it resolves some import spellings the build
+  refuses (a trailing `/.`, a Windows name ending in a dot or space).
+- Document links come out in a changing order, a quick fix can act on a stale
+  diagnostic, and the JSON-RPC bridge returns the wrong error codes for an
+  uninitialised server and an unknown method.
+- A file open under two spellings of its Windows path counts as two modules.
+- A debug session launched with `noDebug` still stops at breakpoints, an
+  `==N` hit condition behaves as `>=N`, and Evaluate can answer a captured
+  variable with a global of the same name.
+
+**Examples**
+
+- `binary_analysis_example` analyses a file that is not there, and
+  `registry_persistence_hunt` queries a Run key its fixture does not contain.
+
 ## [2.5.0] — 2026-09-17
 
 The v2.5 line — *trustworthy: structural correctness*. The theme is that every
@@ -3964,7 +4205,8 @@ Documentation only.
 
 Initial release: the language, the compiler, the VM, and encrypted bytecode.
 
-[Unreleased]: https://github.com/aoiflux/mutant/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/aoiflux/mutant/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/aoiflux/mutant/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/aoiflux/mutant/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/aoiflux/mutant/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/aoiflux/mutant/compare/v2.2.0...v2.3.0

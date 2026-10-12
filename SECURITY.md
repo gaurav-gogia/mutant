@@ -92,8 +92,8 @@ long-term-support branches.
 
 | Version | Supported |
 | ------- | --------- |
-| 2.5.x   | ✅ current |
-| 2.4.x and earlier | ❌ upgrade |
+| 2.6.x   | ✅ current |
+| 2.5.x and earlier | ❌ upgrade |
 
 ## In scope
 

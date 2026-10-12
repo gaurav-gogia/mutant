@@ -63,7 +63,7 @@ Check it:
 
 ```bash
 $ mutant --version
-Version: 2.5.0
+Version: 2.6.0
 ```
 
 Now write a first program. Call it `hello.mut`:

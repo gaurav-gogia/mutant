@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 
+	"mutant/global"
 	"mutant/object"
 
 	lua "github.com/yuin/gopher-lua"
@@ -61,7 +62,7 @@ func RegisterMutantAPI(vm *SandboxedVM, ctx *APIContext) error {
 
 	// Register mutant.version() - returns Mutant version for compatibility checks
 	state.SetField(mutantTable, "version", state.NewFunction(func(l *lua.LState) int {
-		l.Push(lua.LString("2.1.0"))
+		l.Push(lua.LString(global.Version))
 		return 1
 	}))
 
