@@ -19,7 +19,7 @@ Security issues do **not** go through the normal issue tracker — see
 
 ## Getting set up
 
-Go **1.26.6** or newer (`go.mod` pins the floor). Nothing else.
+Go **1.26.9** or newer (`go.mod` pins the floor). Nothing else.
 
 ```bash
 git clone https://github.com/aoiflux/mutant
@@ -71,15 +71,15 @@ verification, the changelog date against the tag, and govulncheck -- is one comm
 prints a table of what passed:
 
 ```bash
-scripts/release_gate.sh --go go1.26.6        # Linux, macOS, WSL
+scripts/release_gate.sh --go go1.26.9        # Linux, macOS, WSL
 ```
 
 ```powershell
-scripts/release_gate.ps1 -Go go1.26.6        # Windows
+scripts/release_gate.ps1 -Go go1.26.9        # Windows
 ```
 
 The gates run on the toolchain `go.mod` pins, installed beside any newer one with
-`go install golang.org/dl/go1.26.6@latest` and `go1.26.6 download`; the gate
+`go install golang.org/dl/go1.26.9@latest` and `go1.26.9 download`; the gate
 reads the version from `go.mod` and refuses any other. Add `--quick` / `-Quick`
 to skip the slow steps while iterating. A release needs the full gate: a
 vulnerability govulncheck finds reachable fails it, and moving the toolchain to

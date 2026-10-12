@@ -14,7 +14,7 @@
 
 .PARAMETER Go
   The go command to run. The pinned toolchain is installed beside newer ones
-  with golang.org/dl, e.g. -Go go1.26.6.
+  with golang.org/dl, e.g. -Go go1.26.9.
 
 .PARAMETER FuzzTime
   How long to fuzz each target (a Go duration such as 30s or 10m). Empty runs
@@ -255,7 +255,9 @@ Invoke-Step "go mod verify / tidy" {
 Invoke-Step "CHANGELOG date matches the tag" {
     Param($log)
     $tag = "v$version"
-    $tagDate = (git for-each-ref --format='%(creatordate:short)' "refs/tags/$tag").Trim()
+    # An untagged version makes git print nothing, which PowerShell hands back as
+    # $null rather than "", and $null.Trim() threw instead of skipping.
+    $tagDate = "$(git for-each-ref --format='%(creatordate:short)' "refs/tags/$tag")".Trim()
     if ($tagDate -eq "") { return "SKIP: $tag is not tagged yet" }
     $heading = (Select-String -Path CHANGELOG.md -Pattern "^## \[$([regex]::Escape($version))\](.*)$").Matches
     if ($heading.Count -eq 0) { throw "CHANGELOG.md has no [$version] heading" }

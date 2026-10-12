@@ -2826,16 +2826,19 @@ Every answer checked, or refused out loud.
   reason -- [docs/advisories/README.md](docs/advisories/README.md) says which
   test it fails. (M26-SEC-009)
 
-- **The toolchain moves to Go 1.26.6, and `golang.org/x/crypto` to v0.56.0.**
-  Under go1.26.2, govulncheck found 18 standard-library vulnerabilities the code
-  reaches, several through parsers that read evidence: XML inside an E01 image
-  and in plists, certificates, email addresses. go1.26.6 fixes all of them. A
-  release binary compiles the standard library in, so the move matters to
-  anyone who runs a released `mutant`, and anyone building from source needs
-  go1.26.6 or newer. `go test ./policy/` refuses a `go.mod` that goes back
-  below either version. These are upstream defects that already carry
-  upstream identifiers, which `govulncheck` names; this project does not
-  rename other people's vulnerabilities, so there is no MVF for them.
+- **The toolchain moves to Go 1.26.9, `golang.org/x/crypto` to v0.57.0 and
+  `golang.org/x/net` to v0.60.0.** Under go1.26.2, govulncheck found 18
+  standard-library vulnerabilities the code reaches, several through parsers
+  that read evidence: XML inside an E01 image and in plists, certificates,
+  email addresses; go1.26.6 fixed those. The release gate then found 11 more
+  in go1.26.6, in `net/http` (HTTP/2 among them, which `x/net` v0.60.0 fixes
+  on its side), `crypto/tls`, `mime/multipart` and `os`; go1.26.9 fixes all of
+  them. A release binary compiles the standard library in, so the move matters
+  to anyone who runs a released `mutant`, and anyone building from source needs
+  go1.26.9 or newer. `go test ./policy/` refuses a `go.mod` below go1.26.9,
+  `x/crypto` v0.56.0 or `x/net` v0.60.0. These are upstream defects that
+  already carry upstream identifiers, which `govulncheck` names; this project
+  does not rename other people's vulnerabilities, so there is no MVF for them.
   (M26-RUN-003)
 
 - **`sqlite_query` and `sqlite_query_bytes` could modify the evidence they

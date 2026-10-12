@@ -167,7 +167,7 @@ func TestExecuteArgvRunsTheProgramItIsGiven(t *testing.T) {
 		t.Skip("no bash or sh on PATH")
 	}
 
-	result := ExecuteArgv([]string{shell, "-c", "echo hi"}, "test:command_exec_argv")
+	result := executeArgvAnswering(t, []string{shell, "-c", "echo hi"}, "test:command_exec_argv")
 	if result.ErrorMessage != "" {
 		t.Fatalf("%s -c 'echo hi': %s", shell, result.ErrorMessage)
 	}
@@ -188,7 +188,7 @@ func TestExecuteArgvPassesAnArgumentWholeIsWhyItExists(t *testing.T) {
 	}
 
 	const nasty = "a b; echo pwned > /dev/null"
-	result := ExecuteArgv([]string{"sh", "-c", `printf '%s' "$1"`, "sh", nasty}, "test:command_exec_argv")
+	result := executeArgvAnswering(t, []string{"sh", "-c", `printf '%s' "$1"`, "sh", nasty}, "test:command_exec_argv")
 	if result.ErrorMessage != "" {
 		t.Fatalf("sh: %s", result.ErrorMessage)
 	}
@@ -223,7 +223,7 @@ func TestBashActuallyRunsTheCommand(t *testing.T) {
 			t.Logf("no %s on PATH; skipping that one", shell)
 			continue
 		}
-		result := ExecuteCommand(shell, "echo hi", "test:command_exec_shell")
+		result := executeAnswering(t, shell, "echo hi", "test:command_exec_shell")
 		if result.ErrorMessage != "" {
 			t.Errorf("%s -c 'echo hi': %s", shell, result.ErrorMessage)
 			continue

@@ -70,11 +70,13 @@ func TestExecArgvRunsTheInvocationItIsGiven(t *testing.T) {
 		t.Skip("no bash or sh on PATH")
 	}
 
-	result, errObj := unwrapPair(t, ExecArgv(&object.Array{Elements: []object.Object{
-		&object.String{Value: shell},
-		&object.String{Value: "-c"},
-		&object.String{Value: "echo hi"},
-	}}))
+	result, errObj := unwrapPair(t, untilAnswered(t, func() object.Object {
+		return ExecArgv(&object.Array{Elements: []object.Object{
+			&object.String{Value: shell},
+			&object.String{Value: "-c"},
+			&object.String{Value: "echo hi"},
+		}})
+	}))
 	if errObj != nil {
 		t.Fatalf("exec_argv: %s", errObj.Message)
 	}

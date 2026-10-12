@@ -238,8 +238,9 @@ func TestFullGateFailsWhenTheRaceDetectorCannotRun(t *testing.T) {
 // vulnerabilities govulncheck found reachable (or, for x/crypto, required) on
 // the version before it, so going back under one reintroduces them.
 var goModFloors = []struct{ directive, version string }{
-	{"go", "1.26.6"},                  // 18 reachable standard-library issues in 1.26.2
+	{"go", "1.26.9"},                  // 11 reachable standard-library issues in 1.26.6 (18 in 1.26.2)
 	{"golang.org/x/crypto", "0.56.0"}, // ssh denial of service fixed in v0.56.0
+	{"golang.org/x/net", "0.60.0"},    // the HTTP/2 half of four of those 11, fixed in v0.60.0
 }
 
 // TestGoModStaysAboveItsVulnerabilityFloors: moving the toolchain or a module

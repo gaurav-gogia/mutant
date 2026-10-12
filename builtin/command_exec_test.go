@@ -72,7 +72,7 @@ func TestCmdRunRunsEveryLineItWasGiven(t *testing.T) {
 
 	// "CMD" and not "cmd": cmd_builder stores the caller's spelling untouched,
 	// so the builtin must not be the thing that decides which shell this is.
-	result, errObj := unwrapPair(t, CmdRun(mustBuild(t, "CMD", "echo FIRST", "echo SECOND")))
+	result, errObj := unwrapPair(t, untilAnswered(t, func() object.Object { return CmdRun(mustBuild(t, "CMD", "echo FIRST", "echo SECOND")) }))
 	if errObj != nil {
 		t.Fatalf("unexpected error from cmd_run: %s", errObj.Inspect())
 	}
@@ -111,7 +111,7 @@ func TestCmdRunStillRunsEveryLineForTheShellsThatWorked(t *testing.T) {
 	}
 
 	for _, shell := range shells {
-		result, errObj := unwrapPair(t, CmdRun(mustBuild(t, shell, "echo FIRST", "echo SECOND")))
+		result, errObj := unwrapPair(t, untilAnswered(t, func() object.Object { return CmdRun(mustBuild(t, shell, "echo FIRST", "echo SECOND")) }))
 		if errObj != nil {
 			t.Errorf("%s: unexpected error from cmd_run: %s", shell, errObj.Inspect())
 			continue

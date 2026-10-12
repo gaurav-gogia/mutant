@@ -5,7 +5,7 @@ Param(
     [switch]$HostOnly,
     [switch]$WasmRepl,
     [string]$WasmOutDir = "$OutputDir/wasm-repl",
-    # How the Go toolchain is spelled on this machine. Pass -Go go1.26.6 to use
+    # How the Go toolchain is spelled on this machine. Pass -Go go1.26.9 to use
     # a golang.org/dl shim. The version is NOT checked here -- see the note
     # above $targets.
     [string]$Go = "go"

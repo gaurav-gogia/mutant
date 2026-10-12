@@ -251,7 +251,7 @@ func TestCmdGetsTheQuotesTheCallerWrote(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		result := ExecuteCommand("cmd", tc.command, "test:command_exec_bounds")
+		result := executeAnswering(t, "cmd", tc.command, "test:command_exec_bounds")
 		if result.ErrorMessage != "" {
 			t.Errorf("%s: %s", tc.command, result.ErrorMessage)
 			continue

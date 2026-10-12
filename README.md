@@ -4,436 +4,130 @@
 
 # The [mutant](https://mudocs.aoiflux.xyz) Programming Language
 
-mutant is an open source programming language whose aim is to provide an
-accessible, secure system for programming & security research.
+mutant is an open source programming language for security research and digital
+forensics. Programs compile to encrypted bytecode, run in the Mutant VM, and
+can be packed into standalone binaries for other platforms.
 
 Current release: **2.6.0** -- see [CHANGELOG.md](CHANGELOG.md) for what changed
 and [docs/advisories](docs/advisories/README.md) for the security advisories.
 
-# Key features of mutant
+## Why mutant
 
-1. KISS: The language is simple enough to be learnt in under an hour
-2. Compile time & Runtime Security: Encrypted byte code ensures security on disk
-   and in memory
-3. Cross Platform: MVM (Mutant Virtual Machine) makes sure that the language
-   works on **YOUR** machine
-4. Cross Compilation: mutant supports compiling standalone, independent binary
-   executables for multiple platforms.
-5. Batteries included: a **694-builtin** standard library (pure-Go, no cgo)
-   spanning strings/math/hashing/time, structured data, higher-order collection
-   functions, networking (sockets/TLS/HTTP), graph modeling, cryptography,
-   detection, sandboxed Lua, and a deep forensic suite — see the
-   [Capability Reference](docs/CAPABILITY_REFERENCE.md).
-6. Go-style tooling: a separate `mlsp` language-server binary with strict
-   formatting, diagnostics (including OS-aware platform warnings), hover, and
-   completion.
+- **Small language.** Simple enough to learn in under an hour.
+- **Encrypted bytecode.** A compiled program is protected on disk and in memory.
+- **Runs anywhere, ships anywhere.** One VM on every platform, and standalone
+  binaries cross-compiled for others.
+- **Batteries included.** A **694-builtin** standard library in pure Go (no
+  cgo): data handling, networking, cryptography, detection, graphs and a deep
+  forensic suite. See the [Capability Reference](docs/CAPABILITY_REFERENCE.md).
+- **Real tooling.** A formatter, a test runner, a debugger, and the `mlsp`
+  language server behind the [VS Code extension](mutant-vscode-extension/README.md).
 
-## Download & Install
+## Install
 
-### Binary Distributions
-
-Official binaries are available in this repository's release section
-
-### Installing mutant from source
-
-Pre-Installation: Download & Install [GoLang](https://golang.org/)
+Download a binary from this repository's releases, or build from source with
+[Go](https://go.dev/dl/):
 
 ```bash
 git clone https://github.com/aoiflux/mutant
 cd mutant
-go install
-```
-
-A binary built this way compiles and runs programs, but `mutant release` needs
-the runtime assets that the build scripts below embed; without them it says so
-and names the script to use.
-
-### Build scripts
-
-Mutant release packaging now uses Go-only build scripts (no external Rust/cgo
-toolchain required).
-
-Linux/macOS/WSL:
-
-```bash
-./scripts/build.sh --host-only
-```
-
-Windows PowerShell:
-
-```powershell
-./scripts/build.ps1 -HostOnly
-```
-
-Common options:
-
-- `--output-dir <dir>` / `-OutputDir <dir>`
-- `--assets-out <dir>` / `-AssetsOut <dir>`
-- `--final-name <name>` / `-FinalName <name>`
-- `--host-only` / `-HostOnly`
-- `--wasm-repl` / `-WasmRepl`
-- `--wasm-out-dir <dir>` / `-WasmOutDir <dir>`
-
-Wasm build via scripts (optional):
-
-```bash
-./scripts/build.sh --host-only --wasm-repl
+./scripts/build.sh --host-only          # Linux, macOS, WSL
 ```
 
 ```powershell
-./scripts/build.ps1 -HostOnly -WasmRepl
+./scripts/build.ps1 -HostOnly           # Windows
 ```
 
-## CLI Quick Start
+A plain `go install` also works, but its binary cannot run `mutant release`:
+that needs the runtime assets the build scripts embed.
 
-Mutant now exposes a more structured CLI with explicit subcommands for
-generation, release packaging, and help.
-
-### Core usage
+## Quick start
 
 ```bash
-mutant
-mutant hello.mut
-mutant hello.mu
-mutant test ./lib
-mutant debug hello.mut
-mutant help
-mutant help gen
-mutant help release
-mutant help test
-mutant help debug
+mutant                     # start the REPL
+mutant hello.mut           # compile to encrypted bytecode: hello.mu
+mutant hello.mu            # run the bytecode
+mutant test ./lib          # run every *_test.mut file
+mutant help                # every command, and `mutant help <command>`
 ```
 
-- `mutant` starts the REPL
-- `mutant hello.mut` compiles source into encrypted bytecode, writing `hello.mu`
-  beside it. It prompts for a password (twice, since a typo here produces an
-  artifact nobody can open).
-- `mutant hello.mu` runs compiled bytecode in the Mutant VM, prompting for the
-  password it was encrypted with.
-- `mutant test` runs every `*_test.mut` file: named tests and subtests,
-  assertions that report the line they failed on, fixtures, filtering, a
-  `--json` reporter for CI and `--cover` for line coverage. A test file is an
-  ordinary program compiled the same way, so it can `import` the module it is
-  testing; see [docs/TESTING.md](docs/TESTING.md).
-- `mutant debug` serves the Debug Adapter Protocol so an editor can set
-  breakpoints, step and inspect a running program. It is started by the editor
-  rather than by hand; see
-  [docs/DEBUGGING.md](docs/DEBUGGING.md).
+Compiling and running both ask for a password. By default it is prompted for,
+never typed on the command line:
 
-#### Supplying the password
+| Option                    | Use it for                                                           |
+| ------------------------- | -------------------------------------------------------------------- |
+| _(nothing)_               | Interactive use. Prompts with terminal echo disabled.                |
+| `--password-file <path>`  | Unattended runs. Refused if the file is readable by other users.     |
+| `--password-stdin`        | Pipelines: `mutant hello.mu --password-stdin < secret`.              |
+| `--dev`                   | Local development only. Uses a built-in key that is **not secret**.  |
+| `--password-insecure <v>` | Only if you accept that other local users can read it from `ps`.     |
 
-A password is required, and by default it is never typed on the command line.
-
-| Option                    | Use it for                                                            |
-| ------------------------- | --------------------------------------------------------------------- |
-| _(nothing)_               | Interactive use. Prompts with terminal echo disabled.                 |
-| `--password-file <path>`  | Unattended runs. Refused if the file is readable by other users.      |
-| `--password-stdin`        | CI and pipelines: `mutant hello.mu --password-stdin < secret`.        |
-| `--dev`                   | Local development only. Uses a built-in key that is **not secret**.   |
-| `--password-insecure <v>` | Only if you accept argv exposure: visible in `ps` and shell history.  |
-
-A bare `--password` (or `--pwd`) is refused since 2.6.0, as 2.5.0 announced: it
-put the credential in argv, where every local user can read it out of the
-process table. `--password-insecure` keeps that behaviour for someone who says
-so explicitly.
-
-There is deliberately no environment-variable form. See
+A bare `--password` is refused since 2.6.0. There is deliberately no
+environment-variable form; see
 [docs/CONFIGURATION_POLICY.md](docs/CONFIGURATION_POLICY.md).
 
-### Bytecode generation
+New to mutant? Start with the
+[30-minute tutorial](docs/TUTORIAL_30_MIN.md).
+
+## Standalone binaries
 
 ```bash
-mutant gen --src hello.mut
-mutant gen hello.mut --password-file ~/.mutant/case-42.key
-mutant gen hello.mut --password-stdin --mutation 5 --seed 42 < ./secret
-```
-
-### Release asset generation
-
-```bash
-mutant gen assets
-mutant gen assets --out ./releaseassets
-```
-
-Legacy form is still supported:
-
-```bash
-mutant gen --release-assets --out ./releaseassets
-```
-
-### Standalone release builds
-
-```bash
-mutant release --src hello.mut
 mutant release hello.mut --os windows --arch amd64
-mutant release hello.mut --password-file ~/.mutant/release.key --mutation 5
 ```
 
-Supported release targets, as `--os`/`--arch` pairs (`x86` is accepted as
-`386`):
+Targets: `darwin/amd64`; `linux/amd64`, `linux/386`, `linux/arm64`,
+`linux/arm`; `windows/amd64`, `windows/386` (`x86` is accepted as `386`). Any
+other pair is refused.
 
-- `darwin/amd64`
-- `linux/amd64`, `linux/386`, `linux/arm64`, `linux/arm`
-- `windows/amd64`, `windows/386`
+A program runs in secure mode by default: a hit from the runtime's security
+probes ends the run. `--compat` warns and continues instead. See
+[docs/EXECUTION_MODES.md](docs/EXECUTION_MODES.md).
 
-Any other pair is refused: there is no runtime asset for it.
+## Examples
 
-### Runtime security options
-
-When running `.mu` files or embedded standalone payloads, these flags are
-available:
-
-- `--secure` — secure mode, the default: a security probe hit ends the run
-- `--compat` — a probe hit warns and the run continues
-- `--dev` — compatibility posture, plus a fallback to a development key that is
-  a compile-time constant shared by every Mutant binary
-- `--signer-auth` to upgrade signature verification to a trusted public key
-- `--security-log-level <none|error|info|debug|trace>`
-- `--log-level <none|error|info|debug|trace>` as an alias
-
-Naming two modes at once is an error rather than last-flag-wins.
-
-> **`--compat` weakens the response. `--dev` weakens the key.** Compat still
-> requires your password and still verifies the artifact. An artifact built or
-> run under `--dev` has no confidentiality.
-
-Full table: [docs/EXECUTION_MODES.md](docs/EXECUTION_MODES.md).
-
-## Browser REPL (WASM, experimental)
-
-Mutant includes an experimental browser REPL build target.
-
-Build the wasm bundle into the default output folder:
-
-```bash
-./scripts/build.sh --host-only --wasm-repl
-```
-
-```powershell
-./scripts/build.ps1 -HostOnly -WasmRepl
-```
-
-By default that produces a browser bundle in `dist/wasm-repl/`.
-
-There is now a checked-in example page at `examples/wasm-repl/index.html`. Build
-into that folder if you want the HTML page and wasm artifacts side by side:
-
-```bash
-./scripts/build.sh --host-only --wasm-repl --wasm-out-dir examples/wasm-repl
-```
-
-```powershell
-./scripts/build.ps1 -HostOnly -WasmRepl -WasmOutDir examples/wasm-repl
-```
-
-Then serve `examples/wasm-repl/` with any static server. The page expects these
-files to exist side-by-side:
-
-- `examples/wasm-repl/index.html`
-- `examples/wasm-repl/mutant_repl.wasm`
-- `examples/wasm-repl/wasm_exec.js`
-
-There is also a dedicated local server command in this repository, so you do not
-need a separate static server:
-
-```bash
-go run ./cmd/wasmreplserve
-```
-
-```powershell
-go run ./cmd/wasmreplserve
-```
-
-Optional flags:
-
-- `-addr 127.0.0.1:8123`
-- `-dir examples/wasm-repl`
-
-The server maps `/` to `index.html` and serves `.wasm` with `application/wasm`.
-It also refreshes `examples/wasm-repl/wasm_exec.js` from your current Go
-toolchain and rebuilds `mutant_repl.wasm` automatically if the artifact is
-missing or is not a real wasm binary.
-
-The browser bridge currently exposes:
-
-- `mutantReplReady` (boolean)
-- `mutantReplEval(input)` -> `{ ok, output?, error?, supported, builtins }`
-- `mutantReplComplete(prefix, mode)` -> `{ ok, candidates }`
-- `mutantReplCompleteLine(line, mode)` -> `{ ok, candidates }`
-
-Minimal JavaScript usage:
-
-```html
-<script src="./wasm_exec.js"></script>
-<script>
-  const go = new Go();
-
-  async function start() {
-    const response = await fetch("./mutant_repl.wasm");
-    const { instance } = await WebAssembly.instantiateStreaming(
-      response,
-      go.importObject,
-    );
-    go.run(instance);
-
-    const result = window.mutantReplEval("len([1, 2, 3])");
-    console.log(result.output);
-
-    const completions = window.mutantReplCompleteLine("text_", "supported");
-    console.log(completions.candidates);
-  }
-
-  start();
-</script>
-```
-
-Current wasm REPL support intentionally focuses on a lightweight subset:
-
-- integers, booleans, strings
-- float literals and numeric expressions
-- arrays, hashes, indexing
-- `let` bindings and identifiers
-- function literals and user-defined function calls
-- struct/enum declarations, struct literals, and field access
-- browser-safe collection/print builtins: `len`, `first`, `last`, `rest`,
-  `push`, `pop`, `putf`, `putln`
-- browser-safe bytes builtins: `bytes_len`, `bytes_get`, `bytes_slice`,
-  `bytes_read_u16_le`, `bytes_read_u16_be`, `bytes_read_u32_le`,
-  `bytes_read_u32_be`, `bytes_read_u64_le`, `bytes_read_u64_be`,
-  `bytes_write_u16_le`, `bytes_write_u16_be`, `bytes_write_u32_le`,
-  `bytes_write_u32_be`, `bytes_write_u64_le`, `bytes_write_u64_be`,
-  `bytes_cstr_at`, `bytes_hex`, `bytes_char_from_int`, `bytes_int_from_char`,
-  `bytes_cursor_new`, `bytes_cursor_tell`, `bytes_cursor_seek`,
-  `bytes_cursor_eof`, `bytes_cursor_read_u8`, `bytes_cursor_read_u16_le`,
-  `bytes_cursor_read_u16_be`, `bytes_cursor_read_u32_le`,
-  `bytes_cursor_read_u32_be`, `bytes_cursor_read_u64_le`,
-  `bytes_cursor_read_u64_be`
-- browser-safe text builtins: `text_contains`, `text_index`, `text_count`,
-  `text_split`, `text_replace`, `text_levenshtein`, `text_similarity`,
-  `text_fuzzy_find`, `text_jaro_winkler`
-- browser-safe JSON builtins: `json_parse`, `json_stringify`
-- browser-safe regex builtins: `regex_match`, `regex_find`, `regex_find_all`,
-  `regex_replace`, `regex_capture_groups`
-- browser-safe policy builtins: `policy_load`, `policy_eval`, `policy_allow`,
-  `policy_rules`, `policy_trace`
-- browser-safe cache builtins: `cache_open`, `cache_put`, `cache_get`,
-  `cache_delete`, `cache_keys`, `cache_stats`, `cache_clear`, `cache_close`
-- browser-safe in-memory graph builtins: `db_open`, `db_close`, `db_add_node`,
-  `db_add_edge`, `db_add_artifact`, `db_add_relation`, `db_index_prop`,
-  `db_query_nodes`, `db_query`, `db_bfs`, `db_shortest_path`, `db_timeline`,
-  `db_stats`
-- assignment expressions (for example `i = i + 1`)
-- `for` loops with init/condition/post
-- `while` loops
-- `for (v in xs)` and `for (k, v in xs)` over arrays, hashes, strings and bytes
-- `break` and `continue` inside loops
-- `return` statements with function short-circuit behavior
-- `if/else`
-- `match` expressions with literal, enum-variant and `|` patterns
-- prefix `!` and unary `-`
-- infix `+ - * / < > == !=`
-
-For the definitive WASM REPL support matrix and usage guide, see:
-
-- [docs/WASM_REPL_REFERENCE.md](docs/WASM_REPL_REFERENCE.md)
-
-## Practical Security and Forensics Examples
-
-The `examples/` directory now includes practical scripts that can be used for
-real security and forensics workflows:
-
-- `security_environment_report.mut`: Collects debugger/sandbox diagnostics,
-  computes a risk score, and writes a JSON report.
-- `network_service_recon_graph.mut`: Performs DNS + TCP reconnaissance, persists
-  a graph model, and writes a machine-readable findings report.
-- `ioc_event_triage.mut`: Seeds/parses IOC events from JSON, scores suspicious
-  activity, and emits triage findings.
-- `persistence_triage_commands.mut`: Captures startup and scheduled task
-  snapshots using command execution builtins and writes a forensic artifact.
-
-Suggested run sequence:
-
-```bash
-# Compile, then run the bytecode each compile writes beside its source.
-mutant gen --src examples/security/security_environment_report.mut --dev
-mutant examples/security/security_environment_report.mu --dev
-
-mutant gen --src examples/network/network_service_recon_graph.mut --dev
-mutant examples/network/network_service_recon_graph.mu --dev
-
-mutant gen --src examples/binary/ioc_event_triage.mut --dev
-mutant examples/binary/ioc_event_triage.mu --dev
-
-mutant gen --src examples/registry/persistence_triage_commands.mut --dev
-mutant examples/registry/persistence_triage_commands.mu --dev
-```
-
-Artifacts are written under `example_output/`.
-
-### Command execution requirements
-
-`persistence_triage_commands.mut` uses `cmd_builder`, `cmd_add`, and `cmd_run`.
-Those are policy controlled, with fixed limits: a 3000 ms per-command timeout
-and 8192 bytes of captured output, after which the output is truncated. Neither
-is tunable -- Mutant takes no configuration from environment variables, and
-these are not per-run decisions. See
-[docs/CONFIGURATION_POLICY.md](docs/CONFIGURATION_POLICY.md).
-
-## Featured In
-
-- [Gopherlabs Conference 2021 by CloudNativeFolks](https://youtu.be/rhSwwGSt90c?t=2223)
-- [Nullcon Goa Sep 2022](https://archive.nullcon.net/website/goa-2022/speakers/pushing-security-left-by-mutating-byte-code.php)
-- [Nullcon Goa Sep 2022 YouTube Video](https://youtu.be/ivrM8rytaKY)
-- [DEFCON AppSec Village 1st Place Winning Entry](https://eval.blog/research/breaking-the-mutant-languages-encryption/)
-- [Hackaday - This Week in Security](https://hackaday.com/2023/08/18/this-week-in-security-tunnelcrack-mutant-and-not-discord/)
+- [examples/](examples/README.md) -- runnable programs by area, from text
+  matching to filesystems, network recon and registry triage
+- [examples/workshop/](examples/workshop/README.md) -- QUILLDROP, a two-hour
+  guided investigation built for the DFRWS APAC 2026 workshop
+- A browser REPL built to WebAssembly (experimental):
+  [docs/WASM_REPL_REFERENCE.md](docs/WASM_REPL_REFERENCE.md)
 
 ## Documentation
 
-For all things mutant, please visit the
-[official website](https://mudocs.aoiflux.xyz) ^.^
+The [official website](https://mudocs.aoiflux.xyz) covers all things mutant.
+Guides in this repository:
 
-Guides in this repository (the VS Code extension has its own
-[README](mutant-vscode-extension/README.md)):
+- **Learn:** [Tutorial](docs/TUTORIAL_30_MIN.md) ·
+  [Cookbook](docs/COOKBOOK.md) · [What is mutant](docs/WHAT_IS_MUTANT.md) ·
+  [Comparison with other tools](docs/COMPARISON.md)
+- **Reference:** [Language](docs/MUTANT_LANGUAGE_REFERENCE.md) ·
+  [Builtins](docs/CAPABILITY_REFERENCE.md) ·
+  [Structured data](docs/STRUCTURED_DATA.md) ·
+  [Interchange schemas](docs/INTERCHANGE_SCHEMAS.md) ·
+  [Graph database](docs/GRAPH_DATABASE.md) ·
+  [Secure networking](docs/SECURE_NETWORKING.md) ·
+  [Runtime integration](docs/RUNTIME_INTEGRATION.md)
+- **Tools:** [Testing](docs/TESTING.md) · [Debugging](docs/DEBUGGING.md) ·
+  [Language server design](docs/LSP_EXTENSION_LLD.md) ·
+  [Language server onboarding](docs/LSP_EXTENSION_ONBOARDING_60_MIN.md)
+- **Security:** [Advisories](docs/advisories/README.md) ·
+  [Reporting a vulnerability](SECURITY.md)
 
-- [docs/TUTORIAL_30_MIN.md](docs/TUTORIAL_30_MIN.md) — Mutant in 30 minutes,
-  the guided path from install to a standalone binary
-- [docs/COOKBOOK.md](docs/COOKBOOK.md) — recipes organised by investigation:
-  file triage, IOC extraction, beacon detection, timelines, reporting
-- [docs/COMPARISON.md](docs/COMPARISON.md) — Mutant next to Python+plaso,
-  Velociraptor, osquery and YARA+Sigma, including where it is the wrong tool
-- [docs/WHAT_IS_MUTANT.md](docs/WHAT_IS_MUTANT.md)
-- [docs/MUTANT_LANGUAGE_REFERENCE.md](docs/MUTANT_LANGUAGE_REFERENCE.md)
-- [docs/CAPABILITY_REFERENCE.md](docs/CAPABILITY_REFERENCE.md) — full builtin catalog
-- [docs/SECURE_NETWORKING.md](docs/SECURE_NETWORKING.md)
-- [docs/GRAPH_DATABASE.md](docs/GRAPH_DATABASE.md)
-- [docs/RUNTIME_INTEGRATION.md](docs/RUNTIME_INTEGRATION.md)
-- [docs/STRUCTURED_DATA.md](docs/STRUCTURED_DATA.md)
-- [docs/INTERCHANGE_SCHEMAS.md](docs/INTERCHANGE_SCHEMAS.md) — one event
-  vocabulary across every parser, so a timeline can be handed to Timesketch,
-  plaso or a SIEM
-- [docs/TESTING.md](docs/TESTING.md) — `mutant test`: assertions, subtests,
-  fixtures, filtering, `--json` and coverage
-- [docs/DEBUGGING.md](docs/DEBUGGING.md) — breakpoints, stepping and variables
-  from an editor, and what the debugger deliberately will not do
-- [docs/LSP_EXTENSION_LLD.md](docs/LSP_EXTENSION_LLD.md)
-- [docs/LSP_EXTENSION_ONBOARDING_60_MIN.md](docs/LSP_EXTENSION_ONBOARDING_60_MIN.md)
-- [examples/workshop/README.md](examples/workshop/README.md) -- QUILLDROP, a
-  two-hour guided investigation built for the DFRWS APAC 2026 workshop
-- [docs/advisories/README.md](docs/advisories/README.md) -- the security
-  advisories, what each affected and where it is fixed
+## Featured in
+
+- [Gopherlabs Conference 2021 by CloudNativeFolks](https://youtu.be/rhSwwGSt90c?t=2223)
+- [Nullcon Goa Sep 2022](https://archive.nullcon.net/website/goa-2022/speakers/pushing-security-left-by-mutating-byte-code.php)
+  ([video](https://youtu.be/ivrM8rytaKY))
+- [DEFCON AppSec Village 1st Place Winning Entry](https://eval.blog/research/breaking-the-mutant-languages-encryption/)
+- [Hackaday - This Week in Security](https://hackaday.com/2023/08/18/this-week-in-security-tunnelcrack-mutant-and-not-discord/)
 
 ## Contributing
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — build, the pure-Go/cross-platform
-  constraints, the no-environment-variables policy, and the compatibility rules
-- [SECURITY.md](SECURITY.md) — how to report a vulnerability, and what is in
-  scope for a security project
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- [CHANGELOG.md](CHANGELOG.md)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building, the pure-Go and
+cross-platform rules, and the release gate. Please also read the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-Mutant (including the programming language implementation and LSP in this
-repository) is licensed under GNU AGPL v3.0 only.
-
-See [LICENSE](LICENSE).
+Mutant, including the language implementation and the language server in this
+repository, is licensed under GNU AGPL v3.0 only. See [LICENSE](LICENSE).

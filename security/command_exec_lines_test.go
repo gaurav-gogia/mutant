@@ -139,7 +139,7 @@ func TestEveryLineReallyRunsUnderCmd(t *testing.T) {
 	}
 
 	for _, shell := range []string{"cmd", "batch"} {
-		result := ExecuteCommand(shell, JoinShellLines(shell, []string{"echo FIRST", "echo SECOND"}), "test:command_exec_lines")
+		result := executeAnswering(t, shell, JoinShellLines(shell, []string{"echo FIRST", "echo SECOND"}), "test:command_exec_lines")
 		if result.ErrorMessage != "" {
 			t.Errorf("%s: %s", shell, result.ErrorMessage)
 			continue
@@ -156,21 +156,21 @@ func TestEveryLineReallyRunsUnderCmd(t *testing.T) {
 	}
 
 	// Three lines, to show the separator is not a special case of two.
-	result := ExecuteCommand("cmd", JoinShellLines("cmd", []string{"echo ONE", "echo TWO", "echo THREE"}), "test:command_exec_lines")
+	result := executeAnswering(t, "cmd", JoinShellLines("cmd", []string{"echo ONE", "echo TWO", "echo THREE"}), "test:command_exec_lines")
 	if result.Stdout != "ONE\r\nTWO\r\nTHREE\r\n" {
 		t.Errorf("three lines printed %q", result.Stdout)
 	}
 
 	// A quoted argument has to survive the join as well as the /S quote pair
 	// rawCommandLineFor wraps the whole command in (M26-TMP-008).
-	result = ExecuteCommand("cmd", JoinShellLines("cmd", []string{`echo "a b"`, "echo SECOND"}), "test:command_exec_lines")
+	result = executeAnswering(t, "cmd", JoinShellLines("cmd", []string{`echo "a b"`, "echo SECOND"}), "test:command_exec_lines")
 	if result.Stdout != "\"a b\"\r\nSECOND\r\n" {
 		t.Errorf("a quoted argument before the separator printed %q", result.Stdout)
 	}
 
 	// And a caller who wants a literal ampersand escapes it cmd's way, which
 	// the join leaves alone.
-	result = ExecuteCommand("cmd", JoinShellLines("cmd", []string{`echo a^&b`, "echo SECOND"}), "test:command_exec_lines")
+	result = executeAnswering(t, "cmd", JoinShellLines("cmd", []string{`echo a^&b`, "echo SECOND"}), "test:command_exec_lines")
 	if result.Stdout != "a&b\r\nSECOND\r\n" {
 		t.Errorf("an escaped ampersand printed %q", result.Stdout)
 	}
@@ -200,7 +200,7 @@ func TestEveryLineRunsUnderTheShellsThatAlreadyWorked(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		result := ExecuteCommand(tc.shell, JoinShellLines(tc.shell, []string{"echo FIRST", "echo SECOND"}), "test:command_exec_lines")
+		result := executeAnswering(t, tc.shell, JoinShellLines(tc.shell, []string{"echo FIRST", "echo SECOND"}), "test:command_exec_lines")
 		if result.ErrorMessage != "" {
 			t.Errorf("%s: %s", tc.shell, result.ErrorMessage)
 			continue
@@ -218,7 +218,7 @@ func TestEveryLineRunsUnderTheShellsThatAlreadyWorked(t *testing.T) {
 func TestAnAllBlankBuilderIsRefusedRatherThanRun(t *testing.T) {
 	for _, shell := range []string{"cmd", "powershell", "sh"} {
 		command := JoinShellLines(shell, []string{"", "   "})
-		result := ExecuteCommand(shell, command, "test:command_exec_lines")
+		result := executeAnswering(t, shell, command, "test:command_exec_lines")
 		if result.ErrorMessage != errorCommandEmpty {
 			t.Errorf("%s: blank lines gave %+v, want the empty-command refusal", shell, result)
 		}
@@ -243,14 +243,14 @@ func TestAFailedLineDoesNotStopTheRestUnderCmd(t *testing.T) {
 	// proving nothing, and a missing program is the one failure cmd reports the
 	// same way every time -- a missing path given to `dir` is not.
 	const missing = "mutant-no-such-program-exists"
-	alone := ExecuteCommand("cmd", missing, "test:command_exec_lines")
+	alone := executeAnswering(t, "cmd", missing, "test:command_exec_lines")
 	if alone.ExitCode == 0 {
 		t.Fatalf("the line meant to fail exited 0, so this test would prove nothing: %+v", alone)
 	}
 
 	// It is followed by the rest, and the exit code is the last line's -- so an
 	// earlier failure does not show up in the result at all.
-	result := ExecuteCommand("cmd", JoinShellLines("cmd", []string{missing, "echo SECOND"}), "test:command_exec_lines")
+	result := executeAnswering(t, "cmd", JoinShellLines("cmd", []string{missing, "echo SECOND"}), "test:command_exec_lines")
 	if !strings.Contains(result.Stdout, "SECOND") {
 		t.Errorf("a line after a failing one did not run: stdout %q stderr %q", result.Stdout, result.Stderr)
 	}
@@ -261,11 +261,11 @@ func TestAFailedLineDoesNotStopTheRestUnderCmd(t *testing.T) {
 	// Which is what sh does with the same two statements, and the reason for
 	// the choice. Measured here rather than asserted in prose.
 	if _, err := exec.LookPath("sh"); err == nil {
-		shAlone := ExecuteCommand("sh", missing, "test:command_exec_lines")
+		shAlone := executeAnswering(t, "sh", missing, "test:command_exec_lines")
 		if shAlone.ExitCode == 0 {
 			t.Fatalf("sh ran %s successfully, so this comparison proves nothing: %+v", missing, shAlone)
 		}
-		shResult := ExecuteCommand("sh", JoinShellLines("sh", []string{missing, "echo SECOND"}), "test:command_exec_lines")
+		shResult := executeAnswering(t, "sh", JoinShellLines("sh", []string{missing, "echo SECOND"}), "test:command_exec_lines")
 		if !strings.Contains(shResult.Stdout, "SECOND") {
 			t.Errorf("sh did not run the line after a failing one: %q", shResult.Stdout)
 		}
@@ -276,7 +276,7 @@ func TestAFailedLineDoesNotStopTheRestUnderCmd(t *testing.T) {
 
 	// An explicit exit does end the run, in both shells, because that is what
 	// the caller wrote. `exit /b` inside cmd /C ends the whole command.
-	result = ExecuteCommand("cmd", JoinShellLines("cmd", []string{"exit /b 7", "echo SECOND"}), "test:command_exec_lines")
+	result = executeAnswering(t, "cmd", JoinShellLines("cmd", []string{"exit /b 7", "echo SECOND"}), "test:command_exec_lines")
 	if result.ExitCode != 7 {
 		t.Errorf("exit /b 7 gave exit code %d, want 7", result.ExitCode)
 	}

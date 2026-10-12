@@ -548,7 +548,7 @@ func TestTutorialInstallsTheWayItsOwnReleaseStepNeeds(t *testing.T) {
 
 	// A line that is nothing but `go install` or `go build ./...` is the install
 	// path that cannot work here. Matched whole, so that `go install
-	// golang.org/dl/go1.26.6@latest` -- which is advice about the toolchain, not
+	// golang.org/dl/go1.26.9@latest` -- which is advice about the toolchain, not
 	// about installing mutant -- does not trip it.
 	for _, line := range strings.Split(install, "\n") {
 		switch strings.TrimSpace(line) {

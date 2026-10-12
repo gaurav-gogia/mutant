@@ -11,7 +11,7 @@ WASM_REPL=1
 # and now their SHA256SUMS, sitting under dist/ next to nothing.
 WASM_OUT_DIR=""
 # How the Go toolchain is spelled on this machine. Nothing is read from the
-# environment: pass --go go1.26.6 to use a golang.org/dl shim. The version is
+# environment: pass --go go1.26.9 to use a golang.org/dl shim. The version is
 # NOT checked here -- see the note above GO_BUILD_FLAGS.
 GO_NAME="go"
 
@@ -62,7 +62,7 @@ Options:
   --no-wasm-repl      Skip browser REPL wasm build
   --wasm-out-dir <d>  Output directory for wasm artifacts (default: dist/wasm-repl)
   --go <command>      Go toolchain to build with (default: go). go.mod names the
-                      version a release is meant to use, e.g. --go go1.26.6
+                      version a release is meant to use, e.g. --go go1.26.9
 
 Writes a SHA256SUMS beside the binaries, and another beside the wasm
 artifacts, each checkable with `cd <dir> && sha256sum -c SHA256SUMS`.
