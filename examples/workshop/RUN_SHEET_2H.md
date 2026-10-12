@@ -13,9 +13,14 @@ them.
 
 ## Before anyone arrives
 
-1. `go install github.com/aoiflux/fsagen@latest` — the version, not `@latest`,
-   which is now v0.2.0 — and run
-   `.\examples\workshop\evidence\build_evidence.ps1` on your own machine.
+1. `go install github.com/aoiflux/fsagen@latest` and run
+   `.\examples\workshop\evidence\build_evidence.ps1` on your own machine. It
+   checks that this fsagen has every feature the playbooks use, then builds the
+   disk image and the case tree. If the case tree fails, it also builds the ads
+   and registry topics, so the deep dives still have their input.
+   `-Topic timestomp,ads,registry` builds only what the four deep dives read,
+   with no executable outside the image. Hand out one fsagen release to the room: a
+   newer generator version writes other bytes for the same seed.
    Confirm it finishes and check the file count against
    [evidence/README.md](evidence/README.md): **98 files, 131 timeline rows**.
    Generate on **NTFS**. On a volume with no birth time the script still

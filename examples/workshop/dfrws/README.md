@@ -36,7 +36,17 @@ Change the path on the line that names the input. Nothing else needs to change.
 
 Without its input, each program prints one `missing` line and exits cleanly.
 The `.golden` beside it records exactly that line. To make the workshop's own
-evidence, see [../evidence/README.md](../evidence/README.md).
+evidence for these four, and nothing else, run from the repository root:
+
+```
+.\examples\workshop\evidence\build_evidence.ps1 -Topic timestomp,ads,registry
+./examples/workshop/evidence/build_evidence.sh --topic timestomp,ads,registry
+```
+
+Each topic builds alone too: `timestomp` (the disk image), `ads` (History and
+Cookies) and `registry` (NTUSER.DAT). None of the three writes an executable
+where Defender scans it. [../evidence/README.md](../evidence/README.md) says
+what each one holds.
 
 ## What each one looks at
 

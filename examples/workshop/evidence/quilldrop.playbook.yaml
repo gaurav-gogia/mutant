@@ -1,9 +1,8 @@
 # Case QUILLDROP — fsagen playbook
 #
 # Synthesizes the triage collection the workshop investigates. Run it seeded so
-# every student's evidence is byte-identical. Two runs of this one file make
-# the whole corpus: the case tree and the timeline the beats read, and the disk
-# image dfrws/1_timestomp reads.
+# every student's evidence is byte-identical. This file tells the whole case:
+# it makes the case tree and the timeline the ten beats read.
 #
 #   fsagen --seed 88412 --playbook examples/workshop/evidence/quilldrop.playbook.yaml \
 #          --on-unsupported=skip \
@@ -11,22 +10,24 @@
 #          --timeline-format bodyfile --timeline-source modelled \
 #          examples/workshop/case
 #
-#   fsagen --seed 88412 --playbook examples/workshop/evidence/quilldrop.playbook.yaml \
-#          --image examples/workshop/case_quilldrop.img --image-fs ntfs \
-#          --image-size 64M --image-time 2026-03-12T06:00:00Z
+# THE TOPICS. topics/ holds one playbook per DFRWS deep dive, each a few steps
+# of this file copied unchanged: timestomp.playbook.yaml (the disk image
+# dfrws/1 reads), ads.playbook.yaml (the History and Cookies dfrws/2a and 2b
+# read) and registry.playbook.yaml (the NTUSER.DAT dfrws/3 reads). So a topic
+# builds on its own, and the ads and registry ones without the generated PE
+# Defender refuses. Editing a step here that a topic copies means editing the
+# topic too; sweep/workshop_topics_test.go fails until the two agree. The build
+# scripts choose: build_evidence.ps1 -Topic timestomp,ads,registry,case.
 #
-# The timeline comes from the first run, never the second: an image's modelled
-# timeline adds a $FILE_NAME row per file, and beat 6 would report each of
-# those as "in the timeline, not on disk".
+# NO PINNED GENERATOR. This file and its topics need the cookie jar (format:
+# chrome_cookies), redirect hops in the history (redirect: server), GPT, the
+# change journal, a stomp that moves the change time, and subsecond_jitter;
+# fsagen v0.4.0 was the first release with all of them, and an older one
+# refuses the files. The build
+# scripts check for each by the name `fsagen features --json` lists, so any
+# later release works:
 #
-# PIN THE GENERATOR. This file is written against fsagen v0.4.0. The cookie jar
-# (format: chrome_cookies) and the redirect hops in the history (redirect:
-# server) are new in that version, and an older one refuses them. Install
-# exactly:
-#
-#   go install github.com/aoiflux/fsagen@v0.4.0
-#
-# or download the v0.4.0 release binary and check it against its SHA256SUMS.
+#   go install github.com/aoiflux/fsagen@latest
 #
 # WHY THE TYPED BLOCKS. fsagen refuses to put filler bytes into a file whose
 # extension or name promises a structure, because a .exe full of base32 is
@@ -60,6 +61,11 @@
 # points at a real host.
 
 start: 2026-03-11T09:00:00Z
+
+# A real disk keeps times to 100 ns, so a scheduled time gets a seeded fraction
+# of a second. An explicit time, such as the timestomp's, stays on the whole
+# second, as a stomping tool usually leaves it.
+subsecond_jitter: true
 
 variables:
   victim: clerk

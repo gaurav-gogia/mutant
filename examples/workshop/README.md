@@ -62,6 +62,7 @@ for what it produces and which findings need NTFS. Until you run it, each
 program prints one line saying what is missing and exits cleanly — that is what
 the `.golden` files record. The `dfrws/` programs read a disk image, a registry
 hive and a cookie database as well; the same README lists them.
+`build_evidence.ps1 -Topic timestomp,ads,registry` builds those alone.
 
 ## Running a file
 

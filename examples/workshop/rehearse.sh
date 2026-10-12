@@ -206,6 +206,7 @@ SUMMARY="$TMP/summary"
 FAILED=0
 RUN_TOTAL=0
 SANDBOX=0
+UNPROBED=0
 RAN=0
 
 echo ""
@@ -237,15 +238,21 @@ for b in $BEATS; do
     RUN_TOTAL=$((RUN_TOTAL + elapsed))
     lines=$(wc -l < "$TMP/$b.out" | tr -d ' ')
 
-    # The two stderr lines that are a property of how this script invokes
-    # mutant rather than of the beat: the development-key notice, and one
-    # sandbox warning per stage where the host looks like an analysis machine.
-    # Anything else on stderr is the beat's own and is shown.
+    # The stderr lines that are a property of how this script invokes mutant,
+    # or of the host, rather than of the beat: the development-key notice, one
+    # sandbox warning per stage where the host looks like an analysis machine,
+    # and, on Linux and macOS, the one-line note that process protection has no
+    # probe that can run there. Anything else on stderr is the beat's own and is
+    # shown.
     if grep -q 'event=sandbox_detected' "$TMP/$b.err" 2>/dev/null; then
         SANDBOX=$((SANDBOX + 1))
     fi
+    if grep -q '^\[security\] process protection measured nothing ' "$TMP/$b.err" 2>/dev/null; then
+        UNPROBED=$((UNPROBED + 1))
+    fi
     grep -v '^\[dev\] ' "$TMP/$b.err" 2>/dev/null \
-        | grep -v '^\[security\] event=sandbox_detected ' > "$TMP/$b.err.other"
+        | grep -v '^\[security\] event=sandbox_detected ' \
+        | grep -v '^\[security\] process protection measured nothing ' > "$TMP/$b.err.other"
 
     status=OK
     note=""
@@ -334,6 +341,13 @@ if [ "$SANDBOX" -gt 0 ]; then
     echo "warned). --dev downgrades that to a warning, which is why they ran. An"
     echo "attendee who drops --dev here is halted instead, so teach from PowerShell"
     echo "or cmd on Windows, as README.md says."
+fi
+
+if [ "$UNPROBED" -gt 0 ]; then
+    echo ""
+    echo "mutant noted that its process protection has no probe that can run on"
+    echo "this OS ($UNPROBED of the beats said so). That is a property of the host,"
+    echo "not of the beats, so it is not listed under each one."
 fi
 
 echo ""
