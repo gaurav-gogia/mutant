@@ -23,6 +23,10 @@ import "bytes"
 // is already what `contains`, `index_of` and `unique` answer, and widening it
 // would silently reclassify an element a program had been told was absent. `==`
 // does promote, through each engine's numeric path, which never arrives here.
+//
+// Arrays and hashes are compared part by part through this same function, so a
+// float inside one is compared by value like a float anywhere else: [-0.0] is
+// equal to [0.0], and [NaN] is not equal to itself, as NaN is not.
 func ValuesEqual(a, b Object) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -66,12 +70,62 @@ func ValuesEqual(a, b Object) bool {
 	case *Error:
 		bv, ok := b.(*Error)
 		return ok && av.Equals(bv)
+	case *Closure:
+		// A function is equal to itself and to nothing else. Its render
+		// cannot say which function it is -- a closure renders an address,
+		// and the VM copies a closure on every store and load -- so the
+		// identity the copies share decides (M26-EVL-005).
+		bv, ok := b.(*Closure)
+		return ok && av.SameFunction(bv)
+	case *Function:
+		// The evaluator's function renders as its source text, which two
+		// distinct functions can share. The evaluator never copies a function
+		// value, so the pointer is its identity.
+		bv, ok := b.(*Function)
+		return ok && av == bv
+	case *Array:
+		// Element by element. Arrays used to be compared by their renders, and
+		// a render is a display form rather than an identity: Float.Inspect
+		// keeps six decimals, so [7.9999991] rendered exactly as [7.9999994],
+		// and a string renders without its quotes, so ["1"] rendered as [1].
+		bv, ok := b.(*Array)
+		if !ok || len(av.Elements) != len(bv.Elements) {
+			return false
+		}
+		for i := range av.Elements {
+			if !ValuesEqual(av.Elements[i], bv.Elements[i]) {
+				return false
+			}
+		}
+		return true
+	case *Hash:
+		// The same keys, each holding an equal value. A key is one entry by its
+		// HashKey, which carries every bit of a float key, so two float keys
+		// that render alike are still two keys here.
+		bv, ok := b.(*Hash)
+		if !ok || len(av.Pairs) != len(bv.Pairs) {
+			return false
+		}
+		for key, pair := range av.Pairs {
+			other, present := bv.Pairs[key]
+			if !present || !ValuesEqual(pair.Value, other.Value) {
+				return false
+			}
+		}
+		return true
 	default:
-		// Arrays and hashes land here. Both render in a stable order -- an
-		// array has one of its own, and Hash.Inspect sorts its keys -- so
-		// comparing their renders is an answer rather than a coin toss. It is
-		// still the weaker answer: two renders can agree where the values do
-		// not, which is what walking them element by element would catch.
+		// A builtin is a function value, and every builtin renders as the one
+		// constant "builtin function", so its render cannot tell two apart.
+		// Its pointer can: the builtin table holds one per builtin, both
+		// engines hand out that pointer, and storage passes a builtin through
+		// unchanged (mutil encryptObject/decryptObject). Its type lives in
+		// package builtin, which imports this one, so it is known here by its
+		// ObjectType alone.
+		if a.Type() == BUILTIN_OBJ {
+			return a == b
+		}
+		// Whatever else has no case above -- iterators and the like -- is
+		// still compared by its rendered form.
 		return a.Inspect() == b.Inspect()
 	}
 }

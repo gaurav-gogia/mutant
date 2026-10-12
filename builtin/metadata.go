@@ -1104,7 +1104,7 @@ var builtinDocs = map[string]builtinDoc{
 		},
 		returns: ret("true when the assertion held; an error naming what was seen when it did not", ParamBool)},
 	BuiltinNameAssertEq: {
-		signature: "assert_eq(got, want, message?)", summary: "Fails the current test unless got equals want. Scalars compare by value; arrays, hashes and structs compare by their rendered form, so key order does not matter.",
+		signature: "assert_eq(got, want, message?)", summary: "Fails the current test unless got equals want. Scalars compare by value; arrays, hashes and structs compare part by part, as == compares them, so key order does not matter and floats that print alike can still differ.",
 		params: []builtinParamDoc{
 			param("got", "The value produced; any type is accepted.", ParamAny),
 			param("want", "The value expected; any type is accepted.", ParamAny),

@@ -62,8 +62,11 @@ func (h *Hash) Type() ObjectType { return HASH_OBJ }
 // path that prints a hash (putln, putf, string conversion, nested hashes)
 // consistent.
 //
-// Integer keys are ordered numerically, so {2: ..., 10: ...} does not come out
-// with 10 first the way a plain string sort would.
+// Integer and float keys are ordered numerically, so {2: ..., 10: ...} does not
+// come out with 10 first the way a plain string sort would. For floats that is
+// also what keeps the order fixed: Float.Inspect keeps six decimals, so keys
+// such as 0.0000001 and 0.0000002 render alike, and ordered by their renders
+// they came out in whatever order the map handed them over.
 func (h *Hash) Inspect() string {
 	var out bytes.Buffer
 
@@ -97,6 +100,10 @@ func hashKeyLess(a, b Object) bool {
 		if right, ok := b.(*String); ok {
 			return left.Value < right.Value
 		}
+	case *Float:
+		if right, ok := b.(*Float); ok {
+			return floatKeyLess(left.Value, right.Value)
+		}
 	case *Bytes:
 		if right, ok := b.(*Bytes); ok {
 			return bytes.Compare(left.Value, right.Value) < 0
@@ -108,4 +115,23 @@ func hashKeyLess(a, b Object) bool {
 	}
 
 	return a.Inspect() < b.Inspect()
+}
+
+// floatKeyLess orders float keys numerically, and orders the keys `<` cannot
+// tell apart as well, because each of them is a key of its own: a float key is
+// one entry by its bits. -0.0 comes before 0.0, every NaN comes after every
+// number, and NaNs order among themselves by their bits. Without that last part
+// a NaN key would compare equal to every other key, which is no order at all.
+func floatKeyLess(left, right float64) bool {
+	leftNaN, rightNaN := math.IsNaN(left), math.IsNaN(right)
+	if leftNaN || rightNaN {
+		if leftNaN != rightNaN {
+			return rightNaN
+		}
+		return math.Float64bits(left) < math.Float64bits(right)
+	}
+	if left != right {
+		return left < right
+	}
+	return math.Signbit(left) && !math.Signbit(right)
 }

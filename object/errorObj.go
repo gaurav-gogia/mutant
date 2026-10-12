@@ -20,9 +20,10 @@ type Error struct {
 	//
 	// Two things follow from Object being an interface rather than a string:
 	//
-	//   - Inspect renders each value through the value's own Inspect, and
-	//     Inspect is the de-facto identity function for error equality, so two
-	//     errors compare equal only when their related values render alike.
+	//   - Inspect renders each value through the value's own Inspect, but
+	//     error equality does not go by that render: Equals compares related
+	//     values with ValuesEqual, so two related floats that print alike can
+	//     still differ, and a related function is equal only to itself.
 	//   - Anything that gob-encodes an Error must register the concrete object
 	//     types first, via serialize.RegisterGobTypes. This used to be a plain
 	//     struct of concrete types that needed no registration. It is not one
@@ -290,8 +291,9 @@ func (e *Error) relatedHash() *Hash {
 // true on the other. Comparing what went wrong rather than where settles both
 // at once, and a program that cares where reads err.line.
 //
-// Related is compared through each value's own Inspect, which is the identity
-// function the rest of the language already uses for equality.
+// Related values are compared with ValuesEqual, the definition `==`, contains
+// and index_of use. Comparing their renders made two related floats that differ
+// only below the sixth decimal one value, since Float.Inspect keeps six.
 func (e *Error) Equals(other *Error) bool {
 	if e == nil || other == nil {
 		return e == other
@@ -310,7 +312,7 @@ func (e *Error) Equals(other *Error) bool {
 		if (value == nil) != (otherValue == nil) {
 			return false
 		}
-		if value != nil && value.Inspect() != otherValue.Inspect() {
+		if value != nil && !ValuesEqual(value, otherValue) {
 			return false
 		}
 	}

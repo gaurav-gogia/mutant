@@ -304,7 +304,7 @@ func encryptObject(obj object.Object, key sealKey) (object.Object, error) {
 			}
 			free[i] = encFree
 		}
-		encObj = &object.Closure{Fn: closureObj.Fn, Free: free}
+		encObj = closureObj.Rebuilt(free)
 
 	case object.LUA_PATCH_OBJ:
 		patchObj := obj.(*object.LuaPatch)
@@ -609,7 +609,7 @@ func decryptObject(obj object.Object, key sealKey) (object.Object, error) {
 			}
 			free[i] = decFree
 		}
-		return &object.Closure{Fn: closureObj.Fn, Free: free}, nil
+		return closureObj.Rebuilt(free), nil
 
 	case object.MULTI_VALUE_OBJ:
 		multiObj := decObj.(*object.MultiValue)

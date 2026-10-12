@@ -75,8 +75,11 @@ A parent whose subtest failed has failed, even if it asserted nothing itself.
 | `assert_ok(value, message?)` | `value` is not an error |
 | `fail(message)` | never — for the branch a test should not reach |
 
-Scalars compare by value. Arrays, hashes and structs compare by their rendered
-form, so two hashes built in a different key order are equal. Strings are shown
+Scalars compare by value. Errors compare as `==` compares them: by message,
+context and related values, not by the line they were raised on. Arrays,
+hashes and structs compare part by part, as `==` compares them, so two hashes
+built in a different key order are equal, while `[7.9999991]` and
+`[7.9999994]` differ although both print as `[7.999999]`. Strings are shown
 quoted in a failure, because half of what a string assertion catches is
 whitespace.
 

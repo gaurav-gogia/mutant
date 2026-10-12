@@ -103,7 +103,7 @@ What `mutant test` reads. `test(name, fn)` names a test and runs it where it is 
 | `after_each(fn: FUNCTION) -> NULL` | all | Registers fn to run after each test declared after this call, at this nesting level and inside it. It runs whether the test passed, failed, or ended in an error. |
 | `assert(condition, message?: STRING) -> BOOLEAN` | all | Fails the current test unless condition is truthy. |
 | `assert_contains(container: STRING\|ARRAY\|HASH, value, message?: STRING) -> BOOLEAN` | all | Fails the current test unless container holds value: a substring of a string, an element of an array, or a key of a hash. |
-| `assert_eq(got, want, message?: STRING) -> BOOLEAN` | all | Fails the current test unless got equals want. Scalars compare by value; arrays, hashes and structs compare by their rendered form, so key order does not matter. |
+| `assert_eq(got, want, message?: STRING) -> BOOLEAN` | all | Fails the current test unless got equals want. Scalars compare by value; arrays, hashes and structs compare part by part, as == compares them, so key order does not matter and floats that print alike can still differ. |
 | `assert_err(value, substring?: STRING) -> BOOLEAN` | all | Fails the current test unless value is an error, optionally requiring its message to contain substring. This is what the second binding of a (value, err) call is checked with. |
 | `assert_ne(got, unwanted, message?: STRING) -> BOOLEAN` | all | Fails the current test when got equals unwanted, compared the way assert_eq compares. |
 | `assert_ok(value, message?: STRING) -> BOOLEAN` | all | Fails the current test when value is an error, quoting the error's own message. This is the check to put on the second binding of a (value, err) call that is expected to succeed. |

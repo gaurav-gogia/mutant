@@ -91,8 +91,17 @@ func evalInfixExpression(operator string, left, right object.Object) object.Obje
 		// Numeric arithmetic/comparison is shared with the WASM REPL via
 		// object.NumericInfix so the two tree-walking interpreters can't drift.
 		return raised(object.NumericInfix(operator, left, right))
-	// Bytes are compared before the Inspect fallback below, which would
-	// otherwise make a buffer equal to the string spelling its own hex.
+	// Functions compare by identity, and so does an array, hash or struct
+	// holding one. A function renders as its source text, so under the
+	// Inspect fallback two distinct functions with the same text were equal,
+	// and so were `[f]` and `[g]`. Mirrors the VM's branch in execComparison
+	// (M26-EVL-005). Ordering falls through to the refusals below.
+	case (operator == "==" || operator == "!=") &&
+		(object.HoldsFunction(left) || object.HoldsFunction(right)):
+		return nativeBoolToBoolObject(object.ValuesEqual(left, right) == (operator == "=="))
+	// Bytes are compared before the Inspect fallback below, which made a
+	// buffer equal to the string spelling its own hex before it had a type
+	// guard. This is where two buffers are compared: by content.
 	case left.Type() == object.BYTES_OBJ || right.Type() == object.BYTES_OBJ:
 		return evalBytesInfixExpression(operator, left, right)
 	// Errors likewise: the Inspect fallback renders a position this engine
@@ -110,10 +119,22 @@ func evalInfixExpression(operator string, left, right object.Object) object.Obje
 	// Mirrors the VM's execStructComparison.
 	case left.Type() == object.STRUCT_OBJ || right.Type() == object.STRUCT_OBJ:
 		return evalStructInfixExpression(operator, left, right)
+	// Two arrays, or two hashes: equal when object.ValuesEqual says so, part by
+	// part. Under the fallback below [7.9999991] was equal to [7.9999994],
+	// because Float.Inspect keeps six decimals. Mirrors the VM's
+	// execComparison.
+	case (operator == "==" || operator == "!=") && left.Type() == right.Type() &&
+		(left.Type() == object.ARRAY_OBJ || left.Type() == object.HASH_OBJ):
+		return nativeBoolToBoolObject(object.ValuesEqual(left, right) == (operator == "=="))
+	// The Inspect fallback, and only between two values of one type: a value
+	// is never equal to a value of another type. Without the type guard, null
+	// (which renders as "") was equal to "", "0" to 0, "true" to true and [1]
+	// to "[1]" (M26-VM-010). Integer against float took the numeric case at
+	// the top, so 1 == 1.0 is still true. Mirrors the VM's execComparison.
 	case operator == "==":
-		return nativeBoolToBoolObject(left.Inspect() == right.Inspect())
+		return nativeBoolToBoolObject(left.Type() == right.Type() && left.Inspect() == right.Inspect())
 	case operator == "!=":
-		return nativeBoolToBoolObject(left.Inspect() != right.Inspect())
+		return nativeBoolToBoolObject(left.Type() != right.Type() || left.Inspect() != right.Inspect())
 	case left.Type() != right.Type():
 		return newError("type mismatch: %s%s%s", left.Type(), operator, right.Type())
 	case (left.Type() == object.STRING_OBJ) && (right.Type() == object.STRING_OBJ):

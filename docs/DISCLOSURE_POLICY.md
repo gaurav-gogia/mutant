@@ -597,10 +597,10 @@ byte. A builtin whose parameter is STRING alone — `net_conn_write`,
 
 The mark is **never consulted inside `Inspect()`**. Making `Inspect()`
 classification-aware would be a worse bug than the one it fixes: `Inspect()` is
-the de-facto identity function for equality in both engines, for `unique`'s
-dedup key, for `contains` and `index_of`, and for hash-key ordering, so a preview
-there would make two distinct buffers compare equal, silently, in six subsystems
-at once. A marked buffer and an unmarked one holding the same bytes are the same
+still the identity some subsystems use for a buffer -- `unique`'s dedup key, the
+order `keys`, `values` and `entries` give buffer keys, and `==` on any value no
+type-specific rule covers -- so a preview there would make two distinct buffers
+one value, silently. A marked buffer and an unmarked one holding the same bytes are the same
 value to all of them, and a test holds it there.
 
 **The run time's own output is checked too, and not by `Inspect()`.** Three

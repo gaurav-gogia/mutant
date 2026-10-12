@@ -354,9 +354,12 @@ func nativeBoolToBoolObject(input bool) *object.Boolean {
 	return FALSE
 }
 
+// evalIdentifier reads a variable, and a read is a copy: see copyValue for why
+// a container is a value. An assignment's target is reached through evalTarget
+// instead, which is what lets a write land in the variable it names.
 func evalIdentifier(node *ast.Identifier, env *object.Environment) object.Object {
 	if val, ok := env.Get(node.Value); ok {
-		return val
+		return copyValue(val)
 	}
 	if resolved, registered := resolveBuiltin(node.Value, node.Value, env); registered {
 		return resolved
@@ -657,12 +660,22 @@ func evalForInStatement(node *ast.ForInStatement, env *object.Environment) objec
 			continue
 		}
 
+		// A fault ends the loop; an error *value* does not. The test used to be
+		// on ERROR_OBJ, which a fault shares with the value error() builds, so
+		// a body whose last expression was an error value -- error("e"), or
+		// `errs[i] = e`, since an assignment yields what it stored -- ended
+		// the loop after one iteration where the VM runs them all
+		// (M26-EVL-008). evalBlockBody draws the same line.
+		if isError(result) {
+			return result
+		}
+
 		switch result.Type() {
 		case object.BREAK_OBJ:
 			return NULL
 		case object.CONTINUE_OBJ:
 			continue
-		case object.RETURN_VALUE_OBJ, object.ERROR_OBJ:
+		case object.RETURN_VALUE_OBJ:
 			return result
 		}
 	}
@@ -696,12 +709,18 @@ func evalWhileStatement(node *ast.WhileStatement, env *object.Environment) objec
 			continue
 		}
 
+		// A fault ends the loop; an error value does not, as in
+		// evalForInStatement.
+		if isError(result) {
+			return result
+		}
+
 		switch result.Type() {
 		case object.BREAK_OBJ:
 			return NULL
 		case object.CONTINUE_OBJ:
 			continue
-		case object.RETURN_VALUE_OBJ, object.ERROR_OBJ:
+		case object.RETURN_VALUE_OBJ:
 			return result
 		}
 	}
@@ -751,8 +770,9 @@ func evalForStatement(node *ast.ForStatement, env *object.Environment) object.Ob
 		if result != nil && result.Type() == object.CONTINUE_OBJ {
 			// Continue with post execution
 		} else if result != nil {
-			// Handle return or error
-			if result.Type() == object.RETURN_VALUE_OBJ || result.Type() == object.ERROR_OBJ {
+			// Handle return or a fault. An error value is not a fault and
+			// does not end the loop, as in evalForInStatement.
+			if isError(result) || result.Type() == object.RETURN_VALUE_OBJ {
 				return result
 			}
 		}
@@ -897,8 +917,9 @@ func evalAssignExpression(node *ast.AssignExpression, env *object.Environment) o
 
 	// Handle field assignment: struct.field = value
 	if fieldExpr, ok := node.Left.(*ast.FieldExpression); ok {
-		// Evaluate the left side (should be a struct)
-		obj := eval(fieldExpr.Left, env)
+		// Evaluate the left side (should be a struct). evalTarget, not eval:
+		// eval would hand back a copy, and the write would land in that.
+		obj := evalTarget(fieldExpr.Left, env)
 		if isSignal(obj) {
 			return obj
 		}
@@ -925,11 +946,12 @@ func evalAssignExpression(node *ast.AssignExpression, env *object.Environment) o
 	}
 
 	// Handle index assignment: a[i] = value / h[k] = value. Arrays, buffers and
-	// hashes are all pointers, so mutating one in place is what the enclosing
-	// environment sees; no write-back is needed, which is why the VM emits a
-	// store after OpSetIndex and this does not.
+	// hashes are all pointers, and evalTarget reaches the one the variable
+	// holds rather than the copy a read makes, so mutating it in place is what
+	// the enclosing environment sees; no write-back is needed, which is why the
+	// VM emits a store after OpSetIndex and this does not.
 	if idxExpr, ok := node.Left.(*ast.IndexExpression); ok {
-		container := eval(idxExpr.Left, env)
+		container := evalTarget(idxExpr.Left, env)
 		if isSignal(container) {
 			return container
 		}

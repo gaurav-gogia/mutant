@@ -1905,7 +1905,7 @@ func (vm *VM) pushClosure(constIndex, numFree int) error {
 	}
 	vm.stackPointer = vm.stackPointer - numFree
 
-	closure := &object.Closure{Fn: fun, Free: free}
+	closure := object.NewClosure(fun, free)
 	return vm.push(closure)
 }
 
@@ -2399,8 +2399,19 @@ func (vm *VM) execComparison(op code.Opcode) error {
 		return vm.execFloatComparison(op, left, right)
 	}
 
+	// Functions compare by identity, and so does an array, hash or struct
+	// holding one. The fallback below compares rendered forms, a closure
+	// renders its address, and every load of a closure is a fresh copy, so
+	// under the fallback a function was never equal to itself, and nor was
+	// `[f]` (M26-EVL-005). Ordering is left to the refusals below.
+	if (op == code.OpEqual || op == code.OpUnEqual) &&
+		(object.HoldsFunction(left) || object.HoldsFunction(right)) {
+		return vm.push(nativeBoolToBooleanObject(object.ValuesEqual(left, right) == (op == code.OpEqual)))
+	}
+
 	// The fallback below compares rendered forms, and Bytes renders as hex, so
-	// without this a buffer would equal the string spelling its own hex.
+	// before the type guard in that fallback a buffer equalled the string
+	// spelling its own hex. This is where two buffers are compared: by content.
 	if ltype == object.BYTES_OBJ || rtype == object.BYTES_OBJ {
 		return vm.execBytesComparison(op, left, right)
 	}
@@ -2415,8 +2426,8 @@ func (vm *VM) execComparison(op code.Opcode) error {
 
 	// Enum values, for the same reason as bytes: the fallback compares
 	// rendered forms, an enum renders as `Status.Ok(0)`, and a string spelling
-	// that text would otherwise compare equal to the variant. `match` makes
-	// that reachable in a way plain `==` rarely was.
+	// that text compared equal to the variant before the fallback's type guard.
+	// `match` made that reachable in a way plain `==` rarely was.
 	if ltype == object.ENUM_VALUE_OBJ || rtype == object.ENUM_VALUE_OBJ {
 		return vm.execEnumComparison(op, left, right)
 	}
@@ -2430,11 +2441,25 @@ func (vm *VM) execComparison(op code.Opcode) error {
 		return vm.execStructComparison(op, left, right)
 	}
 
+	// Two arrays, or two hashes: equal when object.ValuesEqual says so, part
+	// by part. Under the fallback [7.9999991] was equal to [7.9999994], because
+	// Float.Inspect keeps six decimals. The evaluator asks the same question.
+	if ltype == rtype && (ltype == object.ARRAY_OBJ || ltype == object.HASH_OBJ) &&
+		(op == code.OpEqual || op == code.OpUnEqual) {
+		return vm.push(nativeBoolToBooleanObject(object.ValuesEqual(left, right) == (op == code.OpEqual)))
+	}
+
+	// The fallback compares rendered forms, and only between two values of one
+	// type: a value is never equal to a value of another type. Without the type
+	// guard, null (which renders as "") was equal to "", "0" to 0, "true" to
+	// true and [1] to "[1]" (M26-VM-010). Integer against float never gets
+	// here -- it took the numeric path above -- so 1 == 1.0 is still true.
+	// The evaluator's evalInfixExpression applies the same guard.
 	switch op {
 	case code.OpEqual:
-		return vm.push(nativeBoolToBooleanObject(right.Inspect() == left.Inspect()))
+		return vm.push(nativeBoolToBooleanObject(ltype == rtype && right.Inspect() == left.Inspect()))
 	case code.OpUnEqual:
-		return vm.push(nativeBoolToBooleanObject(right.Inspect() != left.Inspect()))
+		return vm.push(nativeBoolToBooleanObject(ltype != rtype || right.Inspect() != left.Inspect()))
 	default:
 		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
 	}

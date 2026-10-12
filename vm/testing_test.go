@@ -289,8 +289,9 @@ func TestNullRendersAsAWord(t *testing.T) {
 	}
 }
 
-// Two hashes built in different orders are the same hash. Comparing rendered
-// forms is what makes that true, since Hash.Inspect sorts its keys.
+// Two hashes built in different orders are the same hash. assert_eq matches
+// two hashes key by key, as `==` does, so the order they were built in takes no
+// part.
 func TestHashesCompareRegardlessOfOrder(t *testing.T) {
 	machine := runTestLedger(t, `test("t", fn() { assert_eq({"a": 1, "b": 2}, {"b": 2, "a": 1}); });`)
 	assertLedger(t, machine, "t:ok")

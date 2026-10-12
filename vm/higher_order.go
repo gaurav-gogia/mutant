@@ -215,22 +215,18 @@ func (vm *VM) hoSortBy(args []object.Object) (object.Object, error) {
 }
 
 // objectKeyLess orders sort_by keys of comparable scalar types.
+//
+// Numeric keys, INTEGER and FLOAT in any mix, are ordered by
+// object.CompareNumeric, which the evaluator's sortKeyLess shares: an INTEGER
+// widened to float64 rounds above 2^53, and two different keys would compare as
+// equal (M26-EVL-021). A NaN stands in no order, so it answers false both ways,
+// as the float64 < it replaces did.
 func objectKeyLess(a, b object.Object) (bool, *object.Error) {
+	if object.IsNumeric(a) && object.IsNumeric(b) {
+		c, ok := object.CompareNumeric(a, b)
+		return ok && c < 0, nil
+	}
 	switch av := a.(type) {
-	case *object.Integer:
-		switch bv := b.(type) {
-		case *object.Integer:
-			return av.Value < bv.Value, nil
-		case *object.Float:
-			return float64(av.Value) < bv.Value, nil
-		}
-	case *object.Float:
-		switch bv := b.(type) {
-		case *object.Float:
-			return av.Value < bv.Value, nil
-		case *object.Integer:
-			return av.Value < float64(bv.Value), nil
-		}
 	case *object.String:
 		if bv, ok := b.(*object.String); ok {
 			return av.Value < bv.Value, nil

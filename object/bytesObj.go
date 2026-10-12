@@ -30,10 +30,11 @@ type Bytes struct {
 	// printing, writing a file, sending on a socket, writing a report, a note,
 	// a cache entry or a ledger node -- and nowhere else.
 	//
-	// It is deliberately NOT consulted by Inspect. Inspect is the identity
-	// function for equality, dedup, containment and hash ordering (see below),
-	// and a classification-aware Inspect would make two different buffers
-	// compare equal in all of those at once.
+	// It is deliberately NOT consulted by Inspect, nor by equality. Two buffers
+	// are equal when their contents are (ValuesEqual, and `==` in both
+	// engines), and Inspect is still the key unique files a buffer under (see
+	// below), so a classification-aware Inspect would make two different
+	// buffers one element there.
 	//
 	// It survives being held: a variable is stored encrypted at rest, and
 	// Encrypted.Classified carries the mark beside the ciphertext so that
@@ -99,11 +100,12 @@ func (b *Bytes) Type() ObjectType { return BYTES_OBJ }
 // Inspect renders the buffer as contiguous lowercase hex.
 //
 // It is deliberately lossless and deliberately untruncated, because Inspect is
-// not only a display function here: it is the de-facto identity function for
-// equality in both engines, for unique's dedup key, for contains and index_of,
-// and for hash-key ordering. A preview -- "bytes(4096) 4d5a..." -- would make
-// two distinct buffers sharing a prefix compare equal, and would do it silently
-// in six subsystems at once.
+// not only a display function here: unique files a buffer, alone or inside
+// another value, under its type and this render. A preview -- "bytes(4096)
+// 4d5a..." -- would make two distinct buffers sharing a prefix one element
+// there, silently. Equality, contains and index_of compare contents
+// (ValuesEqual), and hash keys order by bytes.Compare, so none of those reads
+// the render.
 //
 // The cost is that rendering a large buffer materialises twice its size. The one
 // caller that only ever wanted a preview, the traceback's argument renderer,

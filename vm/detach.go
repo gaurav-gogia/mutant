@@ -174,8 +174,10 @@ func (b *workerBoundary) value(obj object.Object) object.Object {
 		// Registered before its captures are walked, so a cycle through it
 		// resolves here instead of recursing forever. Fn is shared
 		// deliberately: the compiled instructions are read-only, and every
-		// worker already runs them.
-		replacement := &object.Closure{Fn: o.Fn}
+		// worker already runs them. So is the identity: the worker holds the
+		// function value the caller handed it, with its own cells, and `==`
+		// still calls the two one function.
+		replacement := o.Rebuilt(nil)
 		b.closures[o] = replacement
 		free, changed := b.elements(o.Free)
 		if !changed {

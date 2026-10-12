@@ -35,7 +35,9 @@ What the files show:
   which is the other thing an import is for.
 
 The library files also run on their own, because a module is an ordinary `.mut`
-file. They just declare things and finish.
+file. They just declare things and finish, and like any program each prints
+the value it ends on, which here is the last function it declares:
+`fn largest(values)` and `fn line(name, values)`.
 
 ## Tests
 

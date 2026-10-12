@@ -691,6 +691,23 @@ let hits = 0;
 if (!hits) { putln("no hits"); }      // fires: 0 is falsy, so !0 is true
 ```
 
+### Equality
+
+`==` and `!=` never convert between types: a value is never equal to a value of
+another type, whatever the two render as. The one exception is numbers -- an
+integer and a float are compared by value, so `1 == 1.0` is true.
+
+```mutant
+"0" == 0;        // false: a string is not an integer
+"true" == true;  // false: a string is not a boolean
+[1] == "[1]";    // false: an array is not a string
+1 == 1.0;        // true: integers and floats compare as numbers
+```
+
+`null` is not the empty string either. A hash lookup that misses yields `null`,
+so `h["missing"] == ""` is false; test for a missing key with `has_key`, not by comparing
+the lookup with `""`.
+
 ### Logical operators
 
 `&&` (and) and `||` (or) combine conditions and **short-circuit** — the right
@@ -820,6 +837,29 @@ for (host in ["a", "b", "a"]) {
 let grid = [[1, 2], [3, 4]];
 grid[0][1] = 9;                                  // [[1, 9], [3, 4]]
 ```
+
+**A container is a value.** Binding an array, a hash, a struct or a buffer to a
+second name, passing it to a function, returning it, storing it inside another
+container or walking it with `for ... in` hands over a copy, so a write through
+one name is never seen through another:
+
+```mutant
+let a = [1, 2];
+let b = a;
+b[0] = 9;                                        // b is [9, 2]; a is still [1, 2]
+
+let h = {"k": [1]};
+let x = h["k"];
+x[0] = 5;                                        // h["k"] is still [1]
+```
+
+The write itself always reaches the variable its target names, at any depth,
+which is what the examples above rely on. A loop walks the collection as it was
+when the loop began: writing to that variable inside the loop changes the
+variable, not what the loop visits. What two pieces of code can share is a
+variable, never a container: a closure captures its free variables by reference
+(see [First-class functions and closures](#first-class-functions-and-closures)),
+so a closure that runs `a[0] = 9` changes the `a` it captured.
 
 Two targets are refused, and both are compile errors rather than writes that go
 nowhere:
