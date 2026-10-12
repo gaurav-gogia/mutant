@@ -12,30 +12,61 @@ type sandboxDetection struct {
 	Indicators []string
 }
 
-const sandboxDetectedThreshold = 70
+// SandboxDetectedThreshold is the confidence from which a run counts as
+// sandboxed, by the run's own checks and by the status builtins alike. A detector
+// adds up its indicators' confidences per sandbox type; on Linux, for one, the
+// specific indicators -- a Docker or WSL marker, a VM vendor in the CPU or the
+// firmware -- reach it alone, and the generic ones, such as the CPU's
+// hypervisor flag, do not.
+//
+// It is exported because builtin/security_status.go answers the same question
+// for the status builtin's "detected" field, and answered it from a literal 70
+// until 2.6.0. Two copies of one rule disagree the moment either moves, and
+// this one moving is how the builtin would have started publishing a different
+// answer from the detector's own.
+//
+//mutant:limit score
+const SandboxDetectedThreshold = 70
 
 const (
-	sandboxTypeNone    = "none"
+	// SandboxTypeNone is the type DetectSandboxType reports when it found
+	// nothing, and is exported for the same reason as the threshold above:
+	// builtin/security_status.go compared against the bare string.
+	SandboxTypeNone = "none"
+	// minConfidenceScore and maxConfidenceScore are the ends of the scale
+	// every detector scores on, and a score is clamped into them.
+	//
+	//mutant:format the 0-100 confidence scale of TamperDetail.Confidence
 	minConfidenceScore = 0
+	// maxConfidenceScore is the top of the same scale.
+	//
+	//mutant:format the 0-100 confidence scale of TamperDetail.Confidence
 	maxConfidenceScore = 100
 )
 
 // IsSandboxed returns true when environment signals indicate a high-confidence
 // container, virtualization, or sandboxed runtime.
 func IsSandboxed() bool {
-	_, confidence, err := DetectSandboxType()
-	if err != nil {
-		return false
-	}
-	return confidence >= sandboxDetectedThreshold
+	// An error from DetectSandboxType names checks it could not make, and the
+	// confidence beside it is what the other checks found. A check not made
+	// can only have hidden an indicator, so that confidence is a floor: at the
+	// threshold it is a detection whether or not every check ran. Answering
+	// false on any error reported a container it had found as no sandbox at
+	// all. (M26-TMP-013)
+	_, confidence, _ := DetectSandboxType()
+	return confidence >= SandboxDetectedThreshold
 }
 
 // DetectSandboxType returns the most likely sandbox type and confidence (0-100).
+//
+// A non-nil error names checks the detector could not make, such as a Linux
+// cgroup file it could not read. It comes beside the type and confidence the
+// other checks found, never in place of them: a check that was not made can
+// only have hidden an indicator, so what the others found still stands.
 func DetectSandboxType() (string, int, error) {
 	result, err := detectSandbox()
 	if err != nil {
 		securityDevLogf("sandbox detect error=%v", err)
-		return sandboxTypeNone, minConfidenceScore, err
 	}
 	if result.Confidence < minConfidenceScore {
 		result.Confidence = minConfidenceScore
@@ -44,12 +75,12 @@ func DetectSandboxType() (string, int, error) {
 		result.Confidence = maxConfidenceScore
 	}
 	if result.Type == "" || result.Confidence == minConfidenceScore {
-		securityDevLogf("sandbox detected=false type=none confidence=0 indicators=")
-		return sandboxTypeNone, minConfidenceScore, nil
+		securityDevLogf("sandbox detected=false type=%s confidence=0 indicators=", SandboxTypeNone)
+		return SandboxTypeNone, minConfidenceScore, err
 	}
 	securityDevLogf(
 		"sandbox detected=%t type=%s confidence=%d indicators=%s",
-		result.Confidence >= sandboxDetectedThreshold,
+		result.Confidence >= SandboxDetectedThreshold,
 		result.Type,
 		result.Confidence,
 		strings.Join(result.Indicators, ","),
@@ -57,19 +88,18 @@ func DetectSandboxType() (string, int, error) {
 	return result.Type, result.Confidence, err
 }
 
-// GetSandboxIndicators returns normalized detection indicators for audit/logging.
+// GetSandboxIndicators returns normalized detection indicators for audit/logging,
+// with the error DetectSandboxType returns: beside the indicators the other
+// checks found, not in place of them.
 func GetSandboxIndicators() ([]string, error) {
 	result, err := detectSandbox()
-	if err != nil {
-		return nil, err
-	}
 	if len(result.Indicators) == 0 {
-		return nil, nil
+		return nil, err
 	}
 
 	indicators := make([]string, len(result.Indicators))
 	copy(indicators, result.Indicators)
-	return indicators, nil
+	return indicators, err
 }
 
 // SandboxTamperDetail reports what the sandbox detector saw, for a run that is
@@ -77,10 +107,10 @@ func GetSandboxIndicators() ([]string, error) {
 // detectSandbox), so this re-reads the answer the gate already got rather than
 // probing again. (M-7)
 func SandboxTamperDetail() TamperDetail {
-	result, err := detectSandbox()
-	if err != nil {
-		return TamperDetail{Detector: "sandbox"}
-	}
+	// An error beside the detection names checks that were not made. It does
+	// not unmake the signals that fired, and they are what this reports.
+	// (M26-TMP-013)
+	result, _ := detectSandbox()
 
 	return TamperDetail{
 		Detector:   "sandbox",

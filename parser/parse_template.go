@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"mutant/ast"
@@ -41,11 +42,18 @@ func (p *Parser) parseTemplateLiteral() ast.Expression {
 
 // parseHole parses one ${...} hole's source as a single expression.
 //
-// The source is parsed inside padding that puts its first character at the
-// line and column it really occupies, so every position the sub-parser records
-// is a position in this file rather than in a fragment. Only the byte offsets
-// need correcting afterwards, since the padding is shorter than the text it
-// stands in for; line and column come out right by construction.
+// The sub-lexer is told where the hole's text sits in this file, so every
+// position it records is a file position in all three coordinates and nothing
+// needs correcting afterwards.
+//
+// It used to be given padding instead -- a newline per line and a space per
+// column, lexed along with the text -- and that was wrong twice. It was
+// quadratic, because each hole paid for padding as long as its own column and
+// N holes on one line are a sum (M26-LEX-009). And it bought only two of the
+// three coordinates: one byte of padding stands in for a whole line, so every
+// offset came out short by the difference and had to be shifted back by
+// whoever remembered to, which the typed errors and the recoverables below
+// never were (M26-LEX-018).
 //
 // It is parsed as an expression rather than as a program on purpose. A hole
 // holds no statement, so nothing in it should be asked for a terminating
@@ -59,8 +67,13 @@ func (p *Parser) parseHole(part token.StringPart) ast.Expression {
 		return nil
 	}
 
-	padding := strings.Repeat("\n", part.Start.Line-1) + strings.Repeat(" ", part.Start.Column-1)
-	sub := New(lexer.New(padding + part.Text))
+	sub := New(lexer.NewAt(part.Text, part.Start))
+
+	// The sub-parser recurses on this parser's stack, so it inherits the depth
+	// already spent. Without this a hole inside a hole inside a hole is the
+	// same stack with the counter reset to zero at every level, and the bound
+	// bounds nothing.
+	sub.depth = p.depth
 
 	if statementKeyword(sub.curToken.Type) {
 		p.appendError(p.curToken, fmt.Sprintf(
@@ -77,12 +90,20 @@ func (p *Parser) parseHole(part token.StringPart) ast.Expression {
 		expression = nil
 	}
 
-	// The sub-parser's plain-text errors carry no position of their own, so
-	// they are prefixed with the hole's. The typed errors need no such help:
-	// their ranges are already file ranges, which is what the padding bought.
+	// The sub-parser's plain-text errors are marked as coming from inside a
+	// hole, which is worth saying because the author is looking at a string
+	// literal. They used to carry the hole's line and column written in as
+	// well; Parser.PositionedErrors now prefixes every message with its own
+	// position, and the hole's start is a different place from the mistake, so
+	// writing it here printed two positions and sent the reader to the wrong
+	// one of them.
+	//
+	// The typed errors and the recoverables need no help at all, and that is
+	// now true of their offsets as well as of their lines and columns: NewAt
+	// put the sub-lexer at the hole's own position, so there is nothing left to
+	// rebase.
 	for _, msg := range sub.errors {
-		p.errors = append(p.errors, fmt.Sprintf("line %d:%d, inside ${...}: %s",
-			part.Start.Line, part.Start.Column, msg))
+		p.errors = append(p.errors, fmt.Sprintf("inside ${...}: %s", msg))
 	}
 	p.typedErrors = append(p.typedErrors, sub.typedErrors...)
 	p.recoverables = append(p.recoverables, sub.recoverables...)
@@ -91,16 +112,12 @@ func (p *Parser) parseHole(part token.StringPart) ast.Expression {
 		return nil
 	}
 
-	// The padding spends one byte per line and one per column; the real text
-	// starts wherever it starts. Everything the sub-parser recorded moves by
-	// the difference.
-	shift := part.Start.Offset - (part.Start.Line - 1) - (part.Start.Column - 1)
+	// Taken as they are. This was a loop that shifted each range as it copied
+	// it; there is nothing to shift now, and a copy is all it ever was.
 	if p.nodeRanges == nil {
 		p.nodeRanges = make(map[ast.Node]ast.Range)
 	}
-	for node, rng := range sub.nodeRanges {
-		p.nodeRanges[node] = rng.Shift(0, shift)
-	}
+	maps.Copy(p.nodeRanges, sub.nodeRanges)
 
 	return expression
 }

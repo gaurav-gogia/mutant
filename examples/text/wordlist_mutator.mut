@@ -1,3 +1,4 @@
+// Mutates a wordlist with an embedded Lua script.
 putln("=== wordlist_mutator ===");
 putln("Safe use: for defensive password-strength research only.");
 
@@ -6,57 +7,40 @@ let input_file_path = output_directory + "/test_wordlist.txt";
 let mutated_file_path = output_directory + "/mutated_wordlist.txt";
 let report_file_path = output_directory + "/report.json";
 
-let mkdir_result, err = fs_mkdir(output_directory);
-if (mkdir_result == false) {
+let made, _ = fs_mkdir(output_directory);
+if (made == false) {
     putln("failed to create output directory");
-};
+}
 
-let input_file_exists, err = fs_exists(input_file_path);
-if (input_file_exists == false) {
-    let seed_wordlist = "admin\npassword\nguest\n";
-    let seed_write_result, err = fs_write(input_file_path, seed_wordlist);
-    if (seed_write_result) {
+let exists, _ = fs_exists(input_file_path);
+if (exists == false) {
+    let seeded, _ = fs_write(input_file_path, "admin\npassword\nguest\n");
+    if (seeded) {
         putln("seeded test dataset: ", input_file_path);
     } else {
         putln("failed to seed dataset");
-    };
-};
+    }
+}
 
-let mutation_lua_script = "local data,err=mutant.read_file('example_output/wordlist_mutator/test_wordlist.txt'); if not data then return '' end; local out={}; local seen={}; for line in string.gmatch(data, '[^\\n]+') do line=string.gsub(line,'\\r',''); if line ~= '' then local v1=line; local v2=line..'123'; local v3=line..'2026'; local v4='!'..line; local v5=line..'!'; local v6=string.gsub(line,'a','4'); local v7=string.gsub(line,'e','3'); local v8=string.gsub(line,'i','1'); local v9=string.gsub(line,'o','0'); local v10=string.gsub(line,'s','5'); local vars={v1,v2,v3,v4,v5,v6,v7,v8,v9,v10}; for _,v in ipairs(vars) do if v ~= '' and not seen[v] then seen[v]=true; table.insert(out,v); end end end end; return table.concat(out,'\\n')";
-let mutation_result, mutation_err = lua_run_string(mutation_lua_script);
+let script = "local data,err=mutant.read_file('example_output/wordlist_mutator/test_wordlist.txt'); if not data then return '' end; local out={}; local seen={}; for line in string.gmatch(data, '[^\\n]+') do line=string.gsub(line,'\\r',''); if line ~= '' then local v1=line; local v2=line..'123'; local v3=line..'2026'; local v4='!'..line; local v5=line..'!'; local v6=string.gsub(line,'a','4'); local v7=string.gsub(line,'e','3'); local v8=string.gsub(line,'i','1'); local v9=string.gsub(line,'o','0'); local v10=string.gsub(line,'s','5'); local vars={v1,v2,v3,v4,v5,v6,v7,v8,v9,v10}; for _,v in ipairs(vars) do if v ~= '' and not seen[v] then seen[v]=true; table.insert(out,v); end end end end; return table.concat(out,'\\n')";
+let mutation, err = lua_run_string(script);
+if (err) {
+    putln("lua mutation failed: ", err);
+}
 
-if (mutation_err) {
-    putln("lua mutation failed: ", mutation_err);
-};
-
-// The script returns the newline-joined wordlist; lua_run_string wraps it in
-// {ok, result, error, schema_version}, which is why lines 49-50 below already
-// read mutation_result["ok"] and ["error"].
-let mutated_wordlist = mutation_result["result"];
-let write_mutated_result, err = fs_write(mutated_file_path, mutated_wordlist);
-if (write_mutated_result) {
+let written, _ = fs_write(mutated_file_path, mutation["result"]);
+if (written) {
     putln("wrote mutated list: ", mutated_file_path);
 } else {
     putln("failed to write mutated list");
-};
+}
 
-let lua_ok = true;
-if (mutation_err) {
-    lua_ok = false;
-};
+let report = {"profile": "wordlist_mutator", "input_file": input_file_path, "output_file": mutated_file_path, "lua_ok": mutation["ok"], "lua_error": mutation["error"]};
 
-let report = {
-    "profile": "wordlist_mutator",
-    "input_file": input_file_path,
-    "output_file": mutated_file_path,
-    "lua_ok": mutation_result["ok"],
-    "lua_error": mutation_result["error"]
-};
-
-let report_json, err = json_stringify(report);
-let write_report_result, err = fs_write(report_file_path, report_json);
-if (write_report_result) {
+let report_json, _ = json_stringify(report);
+let reported, _ = fs_write(report_file_path, report_json);
+if (reported) {
     putln("wrote report: ", report_file_path);
 } else {
     putln("failed to write report");
-};
+}

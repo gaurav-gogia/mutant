@@ -2,7 +2,8 @@
     "name": "mutant-language-tools",
     "displayName": "Mutant Language Tools",
     "description": "Language tools for Mutant, powered by a dedicated language server: strict canonical formatting, rich diagnostics (OS-aware platform warnings, unreachable code, unused/undefined/duplicate checks, semicolons), hover with capability categories, completion, semantic highlighting, go-to-definition, references, and rename.",
-    "version": "0.2.0",
+    "version": "0.3.0",
+    "mutantLanguageVersion": "2.6.0",
     "publisher": "aoiflux",
     "icon": "images/icon-128.png",
     "license": "AGPL-3.0-only",
@@ -166,9 +167,13 @@
                         "type": "number",
                         "description": "Polymorphic mutation level (0-10)."
                     },
+                    "passwordFile": {
+                        "type": "string",
+                        "description": "Path to a file holding the encryption/decryption password, passed as --password-file. Preferred: the password stays off the command line."
+                    },
                     "password": {
                         "type": "string",
-                        "description": "Optional encryption/decryption password."
+                        "description": "The encryption/decryption password itself, passed as --password-insecure: visible in the process table to every local user. Prefer passwordFile, or leave both unset to be prompted in the terminal."
                     },
                     "args": {
                         "type": "array",
@@ -246,7 +251,7 @@
                 "mutant.format.onType.enabled": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable on-type formatting for Mutant files. Off by default: on-type formatting reformats the whole document on every ';', '}' and newline, which is disruptive while typing. Format-on-save is enabled by default instead."
+                    "description": "Enable on-type formatting for Mutant files. Off by default: on-type formatting reformats the whole document on every ';' and '}', which is disruptive while typing. Format-on-save is enabled by default instead."
                 },
                 "mutant.lint.rules.duplicateTopLevelDeclaration.severity": {
                     "type": "string",
@@ -271,6 +276,18 @@
                         "off"
                     ],
                     "description": "Severity for unused top-level declaration lint diagnostics. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.unusedImport.severity": {
+                    "type": "string",
+                    "default": "information",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for an import that brings nothing this file uses. Information by default: the imported module's top-level statements run whether or not its namespace is used. An import also brings struct, enum and macro names, which are written bare, so an import whose namespace is never read can still be load-bearing. Set to 'off' to suppress the rule."
                 },
                 "mutant.lint.rules.undefinedDeclaration.severity": {
                     "type": "string",
@@ -355,6 +372,18 @@
                         "off"
                     ],
                     "description": "Severity for builtin argument-type diagnostics: warns when a builtin is passed a value of a type its parameter cannot accept (for example str_upper(42) or len(true)). Only builtins whose parameter types have been verified against their implementation are checked, and only arguments whose type is certain — a literal, or a name that is never reassigned. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.builtinArgChoice.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for builtin argument-word diagnostics: warns when a string literal is not one of the words a builtin parameter takes (for example db_bfs(h, n, 2, \"outbound\"), whose direction is out, in or both). The words are the builtin's own list and are compared the way the builtin compares them, ignoring case and surrounding space. Set to 'off' to suppress the rule."
                 },
                 "mutant.lint.rules.builtinSingleReturn.severity": {
                     "type": "string",
@@ -535,13 +564,85 @@
                         "off"
                     ],
                     "description": "Severity for path-traversal diagnostics: warns when a filesystem path is built from a value the program did not write \u2014 gets(), serve_arg(), net_conn_read(), or an HTTP request or response \u2014 and nothing in the file looks at that value before it reaches fs_read, fs_write, a *_read_file or an archive entry. A '..' segment walks out of whatever directory the rest of the path names, so the file is chosen by whoever supplied the value. The taint follows one hop of 'let' through concatenation and interpolation, and stops at a function boundary. Any mention of the value as an argument to a text-inspecting builtin (text_contains, regex_match, str_starts_with, text_replace, hashset_contains \u2026) counts as the check and silences the report; the rule cannot read which characters were looked for and takes the author's word. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.classifiedPlaintext.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for classified-plaintext diagnostics: warns when plaintext read out of a classified record \u2014 the result of record_read, the bytes of record_read_partial, a bytes_slice of either, a record_search hit or its context, or a literal array, hash or struct holding one \u2014 is handed to a builtin that refuses it: putln, putf, fs_write, fs_append, http_post, http_request, report_write, report_render, report_table, report_list, case_note, cache_put, ledger_add_node, ledger_add_edge, db_add_artifact or db_add_relation. The run time refuses the call, naming the record and its class; this says so at the line, before the program runs and asks for a passphrase. The lists are the run time's own, held to the code by tests. record_release(buffer, reason) is the deliberate way out, and its result is never reported. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.roleLiteral.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for role-literal diagnostics: warns when the role in case_open's or ledger_open's options is one they refuse — a word that is not one of the fixed roles, a recipient role (legal, external_partner, restricted_viewer), which names who a grant is issued to and not who is running the program, or \"unasserted\", which is what is recorded when no role is given. The message is the run time's own refusal. A role passed as an argument — case_assign's, role_define's, role_assign's — is reported by builtinArgChoice. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.filteredLedgerHandle.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for filtered-ledger-handle diagnostics: warns when the handle ledger_under_view returns is passed to a builtin that refuses it. Only the reads that read under a view — ledger_node, ledger_edge, ledger_provenance, ledger_path, ledger_subgraph, ledger_patterns, ledger_query_nodes and ledger_prove_node — take one, and ledger_close drops it; every writer and every other read refuses it by name when the program runs. The list is the run time's own, held to the code by a test. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.secretOption.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for secret-option diagnostics: warns about an option named passphrase, password, secret or key in the options hash of a builtin that handles a case — case_*, class_*, record_*, view_*, disclose_*, role_*, evidence_*, review_*, retention_*, erasure_* — or of ledger_open. Each refuses such an option by name before it looks at anything else: a passphrase is asked for at the terminal and is never an argument, because key material in program text is in every copy of the file. The names are matched exactly, as the run time matches them. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.lifecycleState.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for lifecycle-state diagnostics: warns when case_transition is asked for a state it never moves a case to — in_review, concluded, retained or registered — which it refuses whatever state the case is in. The message names the builtin that makes that move: review_request, review_decide or retention_set. A word that is not a state at all is reported by builtinArgChoice. Set to 'off' to suppress the rule."
+                },
+                "mutant.lint.rules.macroSafety.severity": {
+                    "type": "string",
+                    "default": "warning",
+                    "enum": [
+                        "error",
+                        "warning",
+                        "information",
+                        "hint",
+                        "off"
+                    ],
+                    "description": "Severity for macro-safety diagnostics: warns when a macro body calls a builtin the compiler refuses while it is expanding — one that reads or writes a file, reaches the network, starts a process, draws entropy, reads the clock, decodes cryptographic material, or answers from state something else set. The message is the expander's own sentence and says which of those the builtin does. Nothing inside quote(...) is reported, because that is the source the macro emits rather than code the compiler runs; an unquote(...) inside it is. Set to 'off' to suppress the rule."
                 }
             }
         },
         "configurationDefaults": {
             "[mutant]": {
                 "editor.formatOnSave": true,
-                "editor.formatOnType": false
+                "editor.formatOnType": true
             }
         },
         "menus": {

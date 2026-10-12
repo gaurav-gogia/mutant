@@ -36,13 +36,13 @@ type typeInferer struct {
 	nodeTypes   map[mast.Node]Type
 	structNames map[string]bool
 	enumNames   map[string]bool
-	// solved holds each function literal's parameter kinds, worked out by
-	// fn_solver.go before this walk. Seeding them turns a body that could only
-	// be typed as Any into one whose return type follows from its parameters.
-	solved map[*mast.FunctionLiteral]*solvedFunction
 	// structFields holds each struct's field types as seen in its initializers,
 	// keyed structName -> fieldName -> Type. See observeStructField.
 	structFields map[string]map[string]Type
+	// imports is the set of namespaces the file's imports bind. It is part
+	// of the shadow predicate below: a module called `fs` means that
+	// module's read, not fs_read.
+	imports map[string]struct{}
 }
 
 // inferTypes returns a map of AST node -> inferred Type (only confidently-typed
@@ -57,7 +57,7 @@ func inferTypes(s *Snapshot) (map[mast.Node]Type, map[string]map[string]Type) {
 		structNames:  make(map[string]bool),
 		enumNames:    make(map[string]bool),
 		structFields: make(map[string]map[string]Type),
-		solved:       s.solvedFunctions(),
+		imports:      importNamespaces(s.Program.Statements),
 	}
 	// Struct/enum type names are file-global; collect them first so a reference
 	// before the declaration still resolves.
@@ -79,6 +79,42 @@ func inferTypes(s *Snapshot) (map[mast.Node]Type, map[string]map[string]Type) {
 		inf.stmt(stmt, root)
 	}
 	return inf.nodeTypes, inf.structFields
+}
+
+// bound is this layer's answer to "is the name already taken?", the
+// question builtinCallee asks before folding `fs.read` into `fs_read`.
+// Every surface models scope differently and supplies its own; this one
+// is the inferred environment plus the file's imports and type names,
+// which is the whole of what the walk knows.
+func (inf *typeInferer) bound(env *typeEnv) func(string) bool {
+	return func(name string) bool {
+		if _, imported := inf.imports[name]; imported {
+			return true
+		}
+		if inf.structNames[name] || inf.enumNames[name] {
+			return true
+		}
+		if env == nil {
+			return false
+		}
+		_, known := env.get(name)
+		return known
+	}
+}
+
+// calleeName resolves the builtin a call names, in either spelling.
+//
+// Inference asked `call.Function.(*mast.Identifier)` and so saw only the
+// flat one. `let d = hash_blake2(x)` was typed and `let d = hash.blake2(x)`
+// was Any, which is the difference between an inlay hint that says what the
+// program holds and one that says nothing -- for the spelling the module
+// system encourages.
+func (inf *typeInferer) calleeName(call *mast.CallExpression, env *typeEnv) (string, bool) {
+	if call == nil {
+		return "", false
+	}
+	name, _, ok := builtinCallee(call.Function, inf.bound(env))
+	return name, ok
 }
 
 func (inf *typeInferer) record(node mast.Node, t Type) {
@@ -104,7 +140,7 @@ func (inf *typeInferer) stmt(stmt mast.Statement, env *typeEnv) {
 			return
 		}
 		inf.expr(n.Value, env) // record inner nodes
-		types := inf.multiBindTypes(n.Value, len(names))
+		types := inf.multiBindTypes(n.Value, len(names), env)
 		for i, nm := range names {
 			if nm == nil {
 				continue
@@ -185,7 +221,7 @@ func (inf *typeInferer) stmt(stmt mast.Statement, env *typeEnv) {
 // multiBindTypes distributes types across `let a, b = value` names. A fallible
 // builtin call types the first name as the value and the last as error; anything
 // else is Any.
-func (inf *typeInferer) multiBindTypes(value mast.Expression, count int) []Type {
+func (inf *typeInferer) multiBindTypes(value mast.Expression, count int, env *typeEnv) []Type {
 	types := make([]Type, count)
 	for i := range types {
 		types[i] = AnyType
@@ -194,11 +230,11 @@ func (inf *typeInferer) multiBindTypes(value mast.Expression, count int) []Type 
 	if !ok {
 		return types
 	}
-	id, ok := call.Function.(*mast.Identifier)
+	name, ok := inf.calleeName(call, env)
 	if !ok {
 		return types
 	}
-	if sig, ok := builtinReturnType(id.Value); ok && sig.pair && count >= 2 {
+	if sig, ok := builtinReturnType(name); ok && sig.pair && count >= 2 {
 		types[0] = sig.ret
 		types[count-1] = Type{Kind: TypeError}
 	}
@@ -248,9 +284,9 @@ func (inf *typeInferer) exprKind(e mast.Expression, env *typeEnv) Type {
 		}
 		return arrayOf(elem)
 	case *mast.HashLiteral:
-		for k, v := range n.Pairs {
-			inf.expr(k, env)
-			inf.expr(v, env)
+		for _, pair := range n.Pairs {
+			inf.expr(pair.Key, env)
+			inf.expr(pair.Value, env)
 		}
 		return tHash
 	case *mast.StructLiteral:
@@ -345,15 +381,15 @@ func (inf *typeInferer) exprKind(e mast.Expression, env *typeEnv) Type {
 		for i, a := range n.Arguments {
 			argTypes[i] = inf.expr(a, env)
 		}
-		if id, ok := n.Function.(*mast.Identifier); ok {
+		if name, ok := inf.calleeName(n, env); ok {
 			// Builtins whose result depends on their argument types
 			// (element-preserving array ops, map's mapper return, numeric
 			// kind-preservers) refine what the fixed builtinReturnTypes table —
 			// which can only name a bare `array` — is able to express.
-			if t, ok := argAwareCallType(id.Value, argTypes); ok {
+			if t, ok := argAwareCallType(name, argTypes); ok {
 				return t
 			}
-			if sig, ok := builtinReturnType(id.Value); ok {
+			if sig, ok := builtinReturnType(name); ok {
 				// A (value, err) builtin used as a single value is the whole
 				// pair, not its first half. Saying `string` here would make
 				// hover and the inlay hint on `let data = fs_read(p)` describe
@@ -386,20 +422,29 @@ func (inf *typeInferer) exprKind(e mast.Expression, env *typeEnv) Type {
 		return inf.matchType(n, env)
 	case *mast.FunctionLiteral:
 		child := newTypeEnv(env)
-		solvedParams := inf.solved[n]
-		for i, p := range n.Parameters {
+		// `let walk = fn(...) { ... walk ... }` names the literal walk, and in
+		// its own body walk is the literal -- the compiler's
+		// DefineFunctionName -- whatever an outer walk holds (M26-SEM-020).
+		// Declared before the parameters, which may shadow it, as the compiler
+		// declares them.
+		if n.Name != "" {
+			child.set(n.Name, Type{Kind: TypeFunction})
+		}
+		for _, p := range n.Parameters {
 			if p == nil {
 				continue
 			}
-			// A solved parameter narrowed to exactly one kind is worth seeding;
-			// a union collapses to Any, because the lattice has no union to
-			// carry it and a guess would be worse than the gradual unknown.
-			paramType := AnyType
-			if solvedParams != nil && i < len(solvedParams.kinds) {
-				paramType = solvedParams.kinds[i].asType()
-			}
-			child.set(p.Value, paramType)
-			inf.record(p, paramType)
+			// A parameter is Any, whatever fn_solver.go deduced for it. That
+			// deduction is how the body USES the name, not what a caller
+			// passes: `str_upper(a)` given 5 returns an error value and the
+			// function carries on holding 5, and a use behind
+			// `if (type_of(v) == "STRING") { return v; }` says nothing about
+			// the other path. Seeding it here made every alias of the
+			// parameter, the function's return type and every call's result
+			// carry the guess -- into hover, inlay hints and the
+			// argument-type diagnostic (M26-SEM-003).
+			child.set(p.Value, AnyType)
+			inf.record(p, AnyType)
 		}
 		if n.Body != nil {
 			inf.stmt(n.Body, child)

@@ -31,6 +31,7 @@ const (
 	LINTCMD    = "lint"
 	TESTCMD    = "test"
 	DEBUGCMD   = "debug"
+	GRAPHCMD   = "graph"
 	VERSION    = "Version: " + global.Version
 )
 
@@ -74,6 +75,7 @@ var commandHandlers = map[string]func([]string) int{
 	LINTCMD:    handleLintCommand,
 	TESTCMD:    handleTestCommand,
 	DEBUGCMD:   handleDebugCommand,
+	GRAPHCMD:   handleGraphCommand,
 }
 
 func main() {
@@ -84,6 +86,11 @@ func main() {
 }
 
 func run(args []string) int {
+	// The case-key passphrase seam is filled here and nowhere else, so that a
+	// program reaches a terminal only when it was started by this command line.
+	// See case_key_passphrase.go for why this is not an init().
+	installCaseKeyPassphraseSource()
+
 	// Flag validation runs before anything else, including the embedded-payload
 	// branch, so a contradictory command line is rejected identically whichever
 	// entry point would have served it. (M-5)
@@ -192,7 +199,7 @@ func shouldAttemptEmbeddedRun(args []string) bool {
 
 	for _, arg := range args[1:] {
 		switch arg {
-		case RELEASECMD, GENCMD, RUNCMD, HELPCMD, FMTCMD, LINTCMD, TESTCMD, DEBUGCMD:
+		case RELEASECMD, GENCMD, RUNCMD, HELPCMD, FMTCMD, LINTCMD, TESTCMD, DEBUGCMD, GRAPHCMD:
 			return false
 		}
 
@@ -466,7 +473,7 @@ func handleFileInvocation(args []string) (bool, int) {
 
 func isBuiltinCommand(arg string) bool {
 	switch arg {
-	case RELEASECMD, GENCMD, RUNCMD, HELPCMD, FMTCMD, LINTCMD, TESTCMD, DEBUGCMD:
+	case RELEASECMD, GENCMD, RUNCMD, HELPCMD, FMTCMD, LINTCMD, TESTCMD, DEBUGCMD, GRAPHCMD:
 		return true
 	default:
 		return false
@@ -556,7 +563,8 @@ func refuseDevModeForRelease(args []string) error {
 
 	return errors.New("--dev cannot be used when producing a release artifact: the development " +
 		"key is a compile-time constant shared by every Mutant binary, so the artifact would " +
-		"have no confidentiality. Pass --password <value> instead")
+		"have no confidentiality. Omit --dev and be prompted for a password, or use " +
+		"--password-file <path> or --password-stdin")
 }
 
 func handleGenCommand(args []string) int {
@@ -679,6 +687,8 @@ func printHelpTopic(args []string) {
 		printTestHelp()
 	case DEBUGCMD:
 		printDebugHelp()
+	case GRAPHCMD:
+		printGraphHelp()
 	default:
 		fmt.Printf("unknown help topic: %s\n\n", args[0])
 		printGeneralHelp()
@@ -702,6 +712,8 @@ Usage:
   mutant lint [--strict] <file-or-dir>...
   mutant test [options] [file-or-dir]...
   mutant debug [--port N] [file.mut]
+  mutant graph export --out <dir> <entry.mut>
+  mutant graph query --store <dir> <question> [argument]
   mutant help [command]
 
 Commands:
@@ -713,6 +725,9 @@ Commands:
   test       Run *_test.mut files: named tests, assertions and coverage.
   debug      Serve the Debug Adapter Protocol for an editor (breakpoints,
              stepping, variables). Started by the editor, not by hand.
+  graph      Export a program's symbol graph -- declarations, references and
+             imports across the whole module closure -- to a graph store, and
+             ask it a fixed set of questions.
   help       Show general or command-specific help.
 
 Global options:
@@ -726,10 +741,10 @@ Password options:
   --password-file PATH       Read the password from PATH. Refused if the file is
                              readable by other users (POSIX permissions only).
   --password-stdin           Read the password from stdin, for CI and pipelines.
-  --password <value>         DEPRECATED: visible in the process table and shell
-                             history. Warns on use; will require
-                             --password-insecure in the next minor release.
-  --password-insecure <v>    Same as --password, opted into explicitly.
+  --password-insecure <v>    The password on argv, where every local user can
+                             read it from the process table and the shell keeps
+                             it in history. Only for someone who accepts that.
+  --password, --pwd          Refused since 2.6.0; use one of the above.
 
 Execution modes (pick at most one; naming two is an error):
   --secure                   Secure mode: the default. A security probe hit ends
@@ -800,8 +815,9 @@ Options:
   --src <file>         Path to the .mut source file.
   --password-file PATH Read the encryption password from PATH.
   --password-stdin     Read the encryption password from stdin.
-  --password <value>   DEPRECATED: visible in the process table. Warns on use.
-  --pwd <value>        Alias for --password.
+  --password-insecure <value>
+                       The password on argv, visible in the process table.
+  --password, --pwd    Refused since 2.6.0; use one of the above.
   --module-path <dir>  Directory to search for imports that do not resolve
                        relative to the file that wrote them. Repeat the flag to
                        add more; they are searched in the order given.
@@ -859,8 +875,9 @@ Options:
   --arch <name>        Target architecture. Default: current host architecture.
   --password-file PATH Read the encryption password from PATH.
   --password-stdin     Read the encryption password from stdin.
-  --password <value>   DEPRECATED: visible in the process table. Warns on use.
-  --pwd <value>        Alias for --password.
+  --password-insecure <value>
+                       The password on argv, visible in the process table.
+  --password, --pwd    Refused since 2.6.0; use one of the above.
   --module-path <dir>  Directory to search for imports that do not resolve
                        relative to the file that wrote them. Repeat the flag to
                        add more; they are searched in the order given.
@@ -1096,8 +1113,8 @@ func prepareRelease(args []string) (string, string, string, credential.Request, 
 	releasecmd.StringVar(&src, "src", "", "Mutant Source Code File Path by using -src flag")
 	releasecmd.StringVar(&goos, "os", runtime.GOOS, "Use thie flag to specify target OS for cross-compilation by using -os flag")
 	releasecmd.StringVar(&goarch, "arch", runtime.GOARCH, "Use thie flag to specify target Architecture for cross-compilation by using -arch flag")
-	releasecmd.StringVar(&password, "password", "", "Password on argv (deprecated -- visible in the process table)")
-	releasecmd.StringVar(&password, "pwd", "", "Short for -password")
+	releasecmd.StringVar(&password, "password", "", "Refused since 2.6.0 -- parsed only so the refusal can name it")
+	releasecmd.StringVar(&password, "pwd", "", "Refused since 2.6.0, like -password")
 	registerPasswordFlags(releasecmd)
 	registerModulePathFlag(releasecmd, &modulePaths)
 	releasecmd.IntVar(&mutationLevel, "mutation", defaultPolymorphicLevel, "Polymorphic mutation level (0-10)")
@@ -1146,8 +1163,8 @@ func prepareGenRun(args []string) (string, credential.Request, int, int64, []str
 	gencmd := flag.NewFlagSet(GENCMD, flag.ExitOnError)
 
 	gencmd.StringVar(&src, "src", "", "Mutant Source Code File Path by using -src flag")
-	gencmd.StringVar(&password, "password", "", "Password on argv (deprecated -- visible in the process table)")
-	gencmd.StringVar(&password, "pwd", "", "Short for -password")
+	gencmd.StringVar(&password, "password", "", "Refused since 2.6.0 -- parsed only so the refusal can name it")
+	gencmd.StringVar(&password, "pwd", "", "Refused since 2.6.0, like -password")
 	registerPasswordFlags(gencmd)
 	registerModulePathFlag(gencmd, &modulePaths)
 	gencmd.IntVar(&mutationLevel, "mutation", defaultPolymorphicLevel, "Polymorphic mutation level (0-10)")

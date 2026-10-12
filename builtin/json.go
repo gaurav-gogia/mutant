@@ -2,11 +2,26 @@ package builtin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"mutant/object"
 )
+
+// maxJSONDepth bounds how deeply arrays and objects may nest in one document.
+// It is the bound encoding/json's own decoder applied while these builtins
+// used it, kept the same now that they read a document token by token, so
+// nothing that parsed before is refused for its depth.
+//
+// The bound and its refusal are this tree's under either of Go's two
+// encoding/json engines; decodeJSONValue explains how.
+//
+//mutant:limit depth
+const maxJSONDepth = 10000
 
 func JsonStringify(args ...object.Object) object.Object {
 	if len(args) != 1 {
@@ -18,7 +33,7 @@ func JsonStringify(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("argument to `json_stringify` could not be converted to JSON: %s", err.Error()))
 	}
 
-	bytes, err := json.Marshal(value)
+	bytes, err := json.Marshal(jsonFloatsStayFloat(value))
 	if err != nil {
 		return resultAndError(nil, newError("argument to `json_stringify` could not be converted to JSON: %s", err.Error()))
 	}
@@ -36,11 +51,8 @@ func JsonParse(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("argument to `json_parse` must be STRING, got %s", args[0].Type()))
 	}
 
-	decoder := json.NewDecoder(strings.NewReader(input.Value))
-	decoder.UseNumber()
-
-	var raw any
-	if err := decoder.Decode(&raw); err != nil {
+	raw, err := decodeJSONDocument(input.Value)
+	if err != nil {
 		return resultAndError(nil, newError("argument to `json_parse` is not valid JSON: %s", err.Error()))
 	}
 
@@ -50,6 +62,205 @@ func JsonParse(args ...object.Object) object.Object {
 	}
 
 	return resultAndError(parsed, nil)
+}
+
+// decodeJSONDocument reads exactly one JSON value from text, and refuses three
+// things encoding/json lets through without a word:
+//
+//   - Anything after the value. '{"a":1} {"b":2}' came back as {a: 1}, and a
+//     trailing '}' passed ndjson_parse, which says a malformed line fails
+//     (M26-DAT-017).
+//   - A key written twice in one object, where the library keeps the last
+//     copy, so '{"user":"alice","user":"mallory"}' answered mallory and hid
+//     alice.
+//   - Text the library would change before handing it over: bytes that are
+//     not UTF-8, and a \u escape that is half a surrogate pair. Both come
+//     back as U+FFFD, a different string from the one in the file.
+func decodeJSONDocument(text string) (any, error) {
+	if err := jsonTextCheck(text); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	value, err := decodeJSONValue(decoder, text, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	switch token, err := decoder.Token(); {
+	// errors.Is rather than ==, matching security/json_tail.go. Go 1.26
+	// carries two encoding/json engines and the newer one wraps Token()'s
+	// errors, so a bare comparison here would read a genuine end of input
+	// as a tail and refuse every well-formed document the day somebody
+	// builds with it. The two implementations of this one rule are held to
+	// each other by TestTheTwoRepeatedKeyReadersAgree; this is the other
+	// half of the same hazard.
+	case errors.Is(err, io.EOF):
+		return value, nil
+	case err != nil:
+		return nil, err
+	default:
+		return nil, fmt.Errorf("%v follows the value; a document holds one value", token)
+	}
+}
+
+// decodeJSONValue reads one value token by token, so that an object's keys are
+// seen as they arrive and a repeated one can be refused. text is the document
+// the decoder reads, so the next value can be looked at before Token() takes
+// it, and separator is the one byte the grammar puts before that value: 0 for
+// a document's value or an array's first element, ',' for a later element,
+// ':' for an object member's value.
+//
+// Go carries two encoding/json engines, chosen by the goexperiment.jsonv2
+// build tag. The original one's Decoder.Token() puts no limit on how deeply
+// delimiters nest; the newer one's refuses past the same 10,000 levels in its
+// own words ("exceeded max depth"). So the depth is checked before Token() is
+// handed a container that would cross maxJSONDepth, and the refusal is the
+// same whichever engine built the binary (M26-DAT-041).
+func decodeJSONValue(decoder *json.Decoder, text string, depth int, separator byte) (any, error) {
+	// A value at the bound may be a scalar, never another array or object.
+	// Looking at the text first matters under the jsonv2 engine, whose
+	// Token() refuses that container itself, in its own words; the check
+	// after Token() below is the same rule, for an engine that hands the
+	// container over.
+	if depth >= maxJSONDepth && jsonValueOpensContainer(text, decoder.InputOffset(), separator) {
+		return nil, jsonDepthError()
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil // a string, a json.Number, a bool or nil
+	}
+	if depth >= maxJSONDepth {
+		return nil, jsonDepthError()
+	}
+	switch delim {
+	case '[':
+		items := make([]any, 0)
+		elementSeparator := byte(0) // nothing comes before the first element
+		for decoder.More() {
+			item, err := decodeJSONValue(decoder, text, depth+1, elementSeparator)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+			elementSeparator = ','
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return items, nil
+	case '{':
+		fields := make(map[string]any)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("an object key is %v, not a string", keyToken)
+			}
+			if _, repeated := fields[key]; repeated {
+				return nil, fmt.Errorf("the key %q appears twice in one object", key)
+			}
+			value, err := decodeJSONValue(decoder, text, depth+1, ':')
+			if err != nil {
+				return nil, err
+			}
+			fields[key] = value
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return fields, nil
+	}
+	return nil, fmt.Errorf("unexpected %v", delim)
+}
+
+func jsonDepthError() error {
+	return fmt.Errorf("arrays and objects nest deeper than %d levels", maxJSONDepth)
+}
+
+// jsonValueOpensContainer reports whether the next value in text, after the
+// last token the decoder returned (which ends at offset), begins an array or
+// an object. Both engines leave the separator before a value unread until
+// that value is asked for, so whitespace, then separator (unless it is 0),
+// then whitespace come first. It skips only that one separator: any other
+// text before the value is a syntax error, and false leaves Token() to report
+// it in the place it occurs rather than calling a malformed document too deep.
+func jsonValueOpensContainer(text string, offset int64, separator byte) bool {
+	if offset < 0 || offset > int64(len(text)) {
+		return false
+	}
+	rest := strings.TrimLeft(text[offset:], " \t\r\n")
+	if separator != 0 {
+		if rest == "" || rest[0] != separator {
+			return false
+		}
+		rest = strings.TrimLeft(rest[1:], " \t\r\n")
+	}
+	return strings.HasPrefix(rest, "[") || strings.HasPrefix(rest, "{")
+}
+
+// jsonTextCheck refuses JSON text that encoding/json would quietly rewrite: a
+// byte that is not UTF-8, or a \u escape naming one half of a UTF-16 surrogate
+// pair. Inside a string it tracks escapes exactly as the grammar does, so a
+// quote or a backslash that is itself escaped is never taken for structure.
+func jsonTextCheck(text string) error {
+	if !utf8.ValidString(text) {
+		for i := 0; i < len(text); {
+			r, width := utf8.DecodeRuneInString(text[i:])
+			if r == utf8.RuneError && width == 1 {
+				return fmt.Errorf("byte %d is not UTF-8", i)
+			}
+			i += width
+		}
+	}
+	inString := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if !inString {
+			inString = c == '"'
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			unit, ok := jsonEscapeUnit(text, i)
+			if !ok {
+				i++ // a one-character escape, or a malformed one the decoder names
+				continue
+			}
+			switch {
+			case unit >= 0xD800 && unit <= 0xDBFF:
+				if low, ok := jsonEscapeUnit(text, i+6); ok && low >= 0xDC00 && low <= 0xDFFF {
+					i += 11
+					continue
+				}
+				return fmt.Errorf("the escape %s at byte %d is half of a surrogate pair, which no string can hold", text[i:i+6], i)
+			case unit >= 0xDC00 && unit <= 0xDFFF:
+				return fmt.Errorf("the escape %s at byte %d is half of a surrogate pair, which no string can hold", text[i:i+6], i)
+			}
+			i += 5
+		}
+	}
+	return nil
+}
+
+// jsonEscapeUnit reads the \uXXXX escape at text[i], if there is one.
+func jsonEscapeUnit(text string, i int) (uint64, bool) {
+	if i+6 > len(text) || text[i] != '\\' || text[i+1] != 'u' {
+		return 0, false
+	}
+	unit, err := strconv.ParseUint(text[i+2:i+6], 16, 16)
+	if err != nil {
+		return 0, false
+	}
+	return unit, true
 }
 
 func objectToJSONValue(obj object.Object) (any, error) {
@@ -131,11 +342,12 @@ func jsonValueToObject(value any) (object.Object, error) {
 		}
 		i, err := v.Int64()
 		if err != nil {
-			f, fErr := v.Float64()
-			if fErr != nil {
-				return nil, err
-			}
-			return &object.Float{Value: f}, nil
+			// An integer too wide for INTEGER keeps its exact decimal text, as
+			// it does from every other decoder here, rather than being rounded
+			// into a FLOAT: 18446744073709551615 came back as ...616.0
+			// (M26-DAT-018). The decoder has already checked the literal, so
+			// the only way Int64 fails is range.
+			return stringObj(raw), nil
 		}
 		return intObj(i), nil
 	case []any:

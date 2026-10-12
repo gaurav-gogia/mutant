@@ -122,8 +122,10 @@ func TestAssignmentTargetIsSilentOnWhatCompiles(t *testing.T) {
 // which is the only thing that keeps the editor's answer and the build's answer
 // the same answer.
 //
-// The compiler is a test-only import here: the shipped language server does not
-// link it, and should not -- it analyzes files that do not compile yet.
+// The language server links the compiler now, to report its refusals in its own
+// words (M26-LSP-028), but that pass runs only on a file that parses and stops
+// at the first refusal, so this rule still decides every target itself -- and
+// is held to the compiler's answer here.
 func TestTheEditorAndTheCompilerRefuseTheSameTargets(t *testing.T) {
 	sources := []string{
 		`[1, 2][0] = 9;`,

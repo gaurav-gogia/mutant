@@ -112,6 +112,15 @@ func singleBindings(statements []mast.Statement) map[string]mast.Expression {
 	return values
 }
 
+// maxFollowedNames bounds how many names, slices and entries a rule follows
+// from an argument back to where its value was made -- classifiedPlaintext to a
+// read, filteredLedgerHandle to ledger_under_view. A chain longer than this is
+// not worth the risk of following a binding somewhere it does not reach, and a
+// rule that stops early stays quiet, which is the direction it errs in.
+//
+//mutant:limit depth
+const maxFollowedNames = 8
+
 // resolveOneHop returns the expression an argument stands for: itself, or --
 // when it is a bare name this scope binds exactly once -- the expression it was
 // bound to.
@@ -182,9 +191,9 @@ func literalEntry(expr mast.Expression, key string) (mast.Expression, bool) {
 		if node == nil {
 			return nil, false
 		}
-		for name, value := range node.Pairs {
-			if text, ok := literalString(name); ok && text == key {
-				return value, true
+		for _, pair := range node.Pairs {
+			if text, ok := literalString(pair.Key); ok && text == key {
+				return pair.Value, true
 			}
 		}
 	case *mast.StructLiteral:
@@ -224,7 +233,6 @@ func forEachBuiltinCall(
 	shadowed map[string]struct{},
 	visit func(name string, anchor mast.Node, call *mast.CallExpression, bindings map[string]mast.Expression),
 ) {
-	live := liveBuiltinNames()
 	isShadowed := func(name string) bool {
 		_, taken := shadowed[name]
 		return taken
@@ -240,10 +248,7 @@ func forEachBuiltinCall(
 					return
 				}
 				name, anchor, ok := builtinCallee(call.Function, isShadowed)
-				if !ok {
-					return
-				}
-				if _, exists := live[name]; !exists {
+				if !ok || !isLiveBuiltin(name) {
 					return
 				}
 				// Built on first use: most scopes hold no call this family
@@ -256,4 +261,29 @@ func forEachBuiltinCall(
 			})
 		}
 	})
+}
+
+// forEachTopStatement visits the statements a scope is written from, and not the
+// statements nested inside them.
+//
+// It is what a rule wants when it walks each statement's expressions with
+// walkExpressions, because that walk already descends through blocks, `if` arms
+// and loop bodies on its own. Pairing it with forEachStatementInScope -- which
+// visits a nested statement as well as the one it sits in -- visits a call once
+// per enclosing statement instead of once. Measured: a call three blocks deep
+// was reported seven times, once for each `if` statement and each of its
+// blocks and once for the statement itself. evidenceMutation and pathTraversal
+// both did it, and each reported the same seven.
+// forEachBuiltinCall has always ranged over the scope's own statements for this
+// reason; this is that loop, named, so the next rule has something to reach for.
+//
+// A scope's nested function literals are a scope of their own and are reached by
+// forEachScope, never from here.
+func forEachTopStatement(scope []mast.Statement, visit func(mast.Statement)) {
+	for _, stmt := range scope {
+		if isNilStatement(stmt) {
+			continue
+		}
+		visit(stmt)
+	}
 }

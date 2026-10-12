@@ -16,6 +16,7 @@ package webrepl
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,12 @@ type REPL struct {
 	symbolTable *compiler.SymbolTable
 	macroEnv    *object.Environment
 
+	// sealer encrypts each line's bytecode over the pool the session carries.
+	// It is the same helper the terminal REPL uses, which is the point: the two
+	// front ends had the identical defect and must not be able to drift apart
+	// in how they fix it.
+	sealer *mutil.ReplSealer
+
 	// Struct and enum declarations accumulate across lines: each Eval compiles
 	// on its own, so a type declared earlier has to be handed back to the
 	// compiler or it reads as undefined on the next line.
@@ -71,6 +78,7 @@ func New() *REPL {
 		globals:     make([]object.Object, global.GlobalSize),
 		symbolTable: symbolTable,
 		macroEnv:    object.NewEnvironment(),
+		sealer:      mutil.NewReplSealer(replPassword),
 		structDefs:  make(map[string][]*ast.Identifier),
 		enumDefs:    make(map[string][]string),
 	}
@@ -85,7 +93,8 @@ func (r *REPL) Eval(input string) (string, error) {
 
 	p := parser.New(lexer.New(input))
 	program := p.ParseProgram()
-	if errs := p.Errors(); len(errs) > 0 {
+	// No path, as in the terminal REPL: the input is one submitted fragment.
+	if errs := p.PositionedErrors(""); len(errs) > 0 {
 		return "", errors.New(strings.Join(errs, "\n"))
 	}
 
@@ -103,14 +112,16 @@ func (r *REPL) Eval(input string) (string, error) {
 		return "", err
 	}
 
-	byteCode := mutil.EncryptByteCode(comp.ByteCode(), replPassword)
+	// r.sealer, not mutil.EncryptByteCode: see the CLI REPL and
+	// mutil.ReplSealer. The browser carries the same pool across Eval calls and
+	// had the same defect.
+	byteCode, sealErr := r.sealer.Seal(comp.ByteCode())
+	if sealErr != nil {
+		return "", sealErr
+	}
 	r.constants = byteCode.Constants
-	for name, fields := range byteCode.StructDefs {
-		r.structDefs[name] = fields
-	}
-	for name, variants := range byteCode.EnumDefs {
-		r.enumDefs[name] = variants
-	}
+	maps.Copy(r.structDefs, byteCode.StructDefs)
+	maps.Copy(r.enumDefs, byteCode.EnumDefs)
 
 	// putln/putf print through builtin.Output(); capture that so the browser
 	// gets the text back as a string rather than losing it to the wasm console.

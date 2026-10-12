@@ -24,17 +24,66 @@ type KDFParams struct {
 }
 
 const (
-	// Argon2id recommended parameters (OWASP)
-	DefaultArgon2Time    = 1
-	DefaultArgon2Memory  = 64 * 1024 // 64 MB
+	// DefaultArgon2Time is the Argon2id pass count an artifact's password key
+	// is derived with. The generator writes the cost into the artifact beside
+	// the salt and the runner derives with what the artifact says, so the
+	// default can change without stranding an artifact already written. One
+	// pass over DefaultArgon2Memory meets OWASP's Argon2id minimum for a
+	// single pass, 46 MiB.
+	//
+	//mutant:limit iterations
+	DefaultArgon2Time = 1
+	// DefaultArgon2Memory is the Argon2id memory cost of an artifact's
+	// password key, in the kibibytes Argon2 counts in: 64 MiB.
+	//
+	//mutant:limit kibibytes
+	DefaultArgon2Memory = 64 * 1024
+	// DefaultArgon2Threads is the Argon2id lane count of an artifact's
+	// password key: four, as both of RFC 9106's recommended parameter sets
+	// use.
+	//
+	//mutant:limit count
 	DefaultArgon2Threads = 4
-	DefaultKeyLen        = 32 // 256 bits
-	MinArgon2Time        = 1
-	MaxArgon2Time        = 8
-	MinArgon2Memory      = 64 * 1024       // 64 MB
-	MaxArgon2Memory      = 4 * 1024 * 1024 // 4 GB (in KB units)
-	MinArgon2Threads     = 1
-	MaxArgon2Threads     = 16
+	// DefaultKeyLen is the length of an artifact's password key. The artifact
+	// cipher is AES-256-GCM and an artifact records no key length, so every
+	// artifact's key is this long.
+	//
+	//mutant:format FIPS 197: an AES-256 key
+	DefaultKeyLen = 32
+
+	// MinArgon2Time is Argon2's own floor of one pass.
+	//
+	//mutant:format RFC 9106 section 3.1
+	MinArgon2Time = 1
+	// MaxArgon2Time bounds the passes an artifact's header may ask for. The
+	// runner derives the key before it has anything to authenticate the header
+	// with, so this is a cost a crafted header could name. It stops at the
+	// costliest derivation in the tree -- caseKeyProfiles' and
+	// grantFileProfiles' three passes over 256 MiB in four lanes, which
+	// TestCaseKeyProfileIsInBand holds inside these bounds.
+	//
+	//mutant:limit iterations
+	MaxArgon2Time = 3
+	// MinArgon2Memory is the least memory an artifact's header may ask for:
+	// the default this build writes, so a header edited down to a cheap
+	// derivation is refused rather than honoured.
+	//
+	//mutant:limit kibibytes
+	MinArgon2Memory = 64 * 1024
+	// MaxArgon2Memory bounds the memory an artifact's header may ask for, at
+	// the same costliest derivation MaxArgon2Time stops at: 256 MiB.
+	//
+	//mutant:limit kibibytes
+	MaxArgon2Memory = 256 * 1024
+	// MinArgon2Threads is Argon2's own floor of one lane.
+	//
+	//mutant:format RFC 9106 section 3.1
+	MinArgon2Threads = 1
+	// MaxArgon2Threads bounds the lanes an artifact's header may ask for, at
+	// the four every derivation in the tree uses.
+	//
+	//mutant:limit count
+	MaxArgon2Threads = 4
 
 	// HKDF info strings
 	HKDFInfoBytecode  = "mutant-bytecode-encryption-v1"
@@ -123,7 +172,27 @@ func DeriveKeyDeterministic(sourceHash []byte, metadata string) ([]byte, *KDFPar
 	return key, params, nil
 }
 
-// ReconstructKey reconstructs a key from password and stored parameters
+// ReconstructKey derives a key again from a password and the parameters stored
+// beside the data it opens. It takes "argon2id" and nothing else.
+//
+// It used to accept "hkdf-sha256" too, and that branch derived the key from
+// params.Salt as both the secret and the salt without ever reading the
+// password: every passphrase produced the same key, so a stored blob naming
+// that algorithm opened under any password at all, an empty one included. It
+// is refused now rather than removed, so the one caller keeps compiling.
+//
+// Nothing ever reached it, which is why this closes a trap instead of changing
+// a behaviour something depended on: AESDecrypt builds its own KDFParams with
+// "argon2id" written in and never takes the algorithm from the data, and
+// DecodeParams -- the only thing that would read an algorithm name out of a
+// stored blob -- has no callers and cannot parse what KDFParams.Encode writes.
+// record_crypto.go's DeriveWrappingKey documents routing around this function
+// for exactly this reason (M26-SEC-009).
+//
+// A key that is derived without a password is what DeriveKeyDeterministic is
+// for, and it is not one a password can reconstruct: reconstructing it needs
+// nothing but the stored salt, so offering it through a function that asks for
+// a password would be the same false assurance somewhere else.
 func ReconstructKey(password string, params *KDFParams) ([]byte, error) {
 	switch params.Algorithm {
 	case "argon2id":
@@ -137,14 +206,9 @@ func ReconstructKey(password string, params *KDFParams) ([]byte, error) {
 		), nil
 
 	case "hkdf-sha256":
-		// For HKDF, we need the original source hash
-		// This should be derived from the salt which stores the source hash
-		hkdfReader := hkdf.New(sha256.New, params.Salt, params.Salt, params.Info)
-		key := make([]byte, params.KeyLen)
-		if _, err := io.ReadFull(hkdfReader, key); err != nil {
-			return nil, err
-		}
-		return key, nil
+		return nil, errors.New("hkdf-sha256 is not a password algorithm: the key it " +
+			"names is derived from the stored salt alone, so reconstructing it would " +
+			"ignore the password and open under any passphrase at all")
 
 	default:
 		return nil, fmt.Errorf("unknown KDF algorithm: %s", params.Algorithm)

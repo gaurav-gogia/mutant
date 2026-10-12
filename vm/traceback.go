@@ -80,6 +80,10 @@ const (
 //
 // MacroLine is non-zero only for an instruction a macro produced, and points at
 // the macro's definition rather than its call. Line already points at the call.
+// What holds that "only" up is the entry the compiler records in the macro
+// table where an expansion ends: without one the table's last entry stays in
+// force, and every instruction after the first macro in a program reports that
+// macro as its origin. See code.LineTableBuilder.AddOrReset.
 type TracebackFrame struct {
 	Function string
 
@@ -283,10 +287,11 @@ func (vm *VM) frameArguments(frame *Frame) (args []string) {
 			break
 		}
 
-		// Stack values are encrypted at rest; decryptForUse is what every
-		// other reader of the stack goes through, and it returns the value
-		// untouched when it is not encrypted.
-		value := renderArgValue(vm.decryptForUse(vm.stack[slot]))
+		// Stack values are encrypted at rest, and a captured parameter is
+		// held in a cell that decryptForUse deliberately does not open, so
+		// unwrapForDisplay takes the cell off and decrypts what was inside
+		// it. decryptForUse alone returned the cell, ciphertext and all.
+		value := renderArgValue(vm.unwrapForDisplay(vm.stack[slot]))
 		if i < len(fn.Params) && fn.Params[i] != "" {
 			value = fn.Params[i] + "=" + value
 		}
@@ -305,27 +310,12 @@ func (vm *VM) frameArguments(frame *Frame) (args []string) {
 // renderArgValue renders one argument compactly. An absent value is a slot the
 // caller never filled, which happens when a frame is inspected before its
 // arguments are in place.
+//
+// The rendering itself is in vm/display.go, which the debugger's variables pane
+// calls too: this was the same code in both files, and a traceback and a pane
+// differ in how much room they have and in nothing else.
 func renderArgValue(obj object.Object) string {
-	if obj == nil {
-		return "<unset>"
-	}
-
-	// Bytes renders as full hex deliberately, because Inspect doubles as the
-	// identity function for equality and deduplication. A traceback is the one
-	// caller that only ever wanted a preview, so it asks for one rather than
-	// materialising a megabyte of hex to then cut it back to forty characters.
-	if buf, ok := obj.(*object.Bytes); ok {
-		return buf.Preview(maxRenderedArgValue / 4)
-	}
-
-	text := strings.Join(strings.Fields(obj.Inspect()), " ")
-	if len(text) > maxRenderedArgValue {
-		text = text[:maxRenderedArgValue-3] + "..."
-	}
-	if text == "" {
-		return string(obj.Type())
-	}
-	return text
+	return renderForDisplay(obj, maxRenderedArgValue)
 }
 
 // RuntimeError is a VM failure carrying the call stack it happened on.
@@ -355,6 +345,89 @@ func (e *RuntimeError) Traceback() string {
 	}
 	return renderFrames(e.Frames, e.Source)
 }
+
+// withoutInstructionMetadata renders err with the instruction pointer and the
+// opcode taken back out of its message.
+//
+// Mutation rewrites the instruction stream, so both numbers describe the build
+// and not the program: one division by zero reported "ip=6 op=OpDiv" at
+// mutation 0 and "ip=12 op=OpDiv" at mutation 10. They belong in an error that
+// ends the run, where a bug report needs them. They do not belong in a value
+// the program itself receives, because a program that prints such a value
+// prints different output at each mutation level -- which breaks the promise
+// that mutation changes the bytecode and not what a program does, and tells
+// whoever reads that output where the mutated instructions landed.
+//
+// The substitution is by rendering rather than by a hand-built prefix: the
+// instruction error's own text is swapped for its cause's, so anything wrapped
+// around it survives and no second place has to agree on the format.
+func withoutInstructionMetadata(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+
+	var instruction *instructionError
+	if errors.As(err, &instruction) {
+		message = strings.Replace(message, instruction.Error(), instruction.Err.Error(), 1)
+	}
+	return message
+}
+
+// scriptFacingError is a VM failure on its way to becoming a value the program
+// holds: the message without the instruction metadata, and the position and
+// stack of the frame it actually failed on.
+//
+// The position is carried as fields rather than written into the message on
+// purpose. An error renders one position, from Error.File/Line/Column, and for
+// a failed task the VM stamps that with the call that COLLECTED the failure --
+// the task_wait -- rather than the one that caused it. Appending a second
+// position to the message would print both and leave the reader to work out
+// which was which. So this replaces the position instead of competing with it,
+// and what it replaces it with is the better answer: an ip named an offset
+// into an obfuscated instruction stream that no author can look up, and named
+// a different offset at every mutation level, while the frame names the line
+// they wrote and names it identically at every level.
+//
+// The original error stays underneath, so errors.Is and errors.As go on
+// answering about the failure rather than about this wrapper.
+func scriptFacingError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	wrapped := &scriptError{message: withoutInstructionMetadata(err), err: err}
+
+	var runtime *RuntimeError
+	if errors.As(err, &runtime) && len(runtime.Frames) > 0 {
+		wrapped.frame = runtime.Frames[0]
+		wrapped.stack = make([]string, 0, len(runtime.Frames))
+		for _, frame := range runtime.Frames {
+			wrapped.stack = append(wrapped.stack, frame.String())
+		}
+	}
+	return wrapped
+}
+
+type scriptError struct {
+	message string
+	frame   TracebackFrame
+	stack   []string
+	err     error
+}
+
+func (e *scriptError) Error() string { return e.message }
+func (e *scriptError) Unwrap() error { return e.err }
+
+// Position and Stack are how the failure site crosses a package boundary. The
+// task registry lives in builtin and cannot import the VM, so it matches these
+// by shape rather than by name; see failureSite in builtin/tasks.go. A line of
+// zero means the program carried no debug info and there is nothing to report.
+func (e *scriptError) Position() (file string, line, column int) {
+	return e.frame.File, e.frame.Line, e.frame.Column
+}
+
+func (e *scriptError) Stack() []string { return e.stack }
 
 // renderFrames is the shared renderer: collapse repeats, cap the length, and
 // annotate each surviving frame with its source line.

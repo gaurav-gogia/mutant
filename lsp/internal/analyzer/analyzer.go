@@ -9,7 +9,9 @@ import (
 	mast "mutant/ast"
 	"mutant/builtin"
 	"mutant/lexer"
+	localprotocol "mutant/lsp/internal/protocol"
 	mutantparser "mutant/parser"
+	"mutant/sema"
 	"mutant/token"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
@@ -32,6 +34,68 @@ func (a *Analyzer) Analyze(src string) *Snapshot {
 	}
 }
 
+// AnalyzeInWorkspace is Analyze for a document that has a place in a program:
+// a path on disk, and a workspace that knows what the file's imports name.
+//
+// It is a second entry point rather than a wider signature on Analyze because
+// Analyze has 9 production call sites and about 108 in total. Rewriting ~99
+// tests to pass a nil workspace would be a large diff that asserts nothing, and
+// the ones that matter -- api.Lint, which is handed a string with no file
+// context at all, and the REPL -- genuinely have no path to give.
+//
+// A nil workspace is legal and yields exactly what Analyze yields. Every
+// cross-module feature then declines rather than guessing, which is the same
+// posture the editor takes towards a module it has not read yet.
+func (a *Analyzer) AnalyzeInWorkspace(path, src string, workspace *sema.Workspace) *Snapshot {
+	snapshot := a.Analyze(src)
+	if path != "" {
+		snapshot.ModuleKey = sema.CanonicalKey(path)
+	}
+	snapshot.workspace = workspace
+	return snapshot
+}
+
+// scopeCtx builds the context sema resolves names in for this document.
+//
+// The split is the point: everything file-local -- which names are bound at a
+// position, which enums are declared here -- comes from the snapshot's own scope
+// walk, and everything cross-module comes from the workspace. Neither knows how
+// to do the other's half, and one resolver puts them together with the
+// precedence the compiler uses.
+//
+// With no workspace this still resolves the builtin fold and enum variants,
+// which is all a single file can mean.
+func (s *Snapshot) scopeCtx(pos lsp.Position) sema.ScopeCtx {
+	local := s.localScopeAt(pos)
+	if s == nil || s.workspace == nil {
+		return sema.ScopeCtx{
+			Module: "",
+			Bound:  local.Bound,
+			Enums:  local.Enums,
+		}
+	}
+	return s.workspace.ScopeCtxFor(s.ModuleKey, local)
+}
+
+// isBoundAt reports whether the author bound name to a value at pos -- a let, a
+// parameter, a loop binding or an import namespace.
+//
+// A struct or enum name is not one, however plainly it is visible: a type name
+// never enters the compiler's symbol table, so the compiler does not count one,
+// and an editor that did would decide `rand.int` is a field read in any file
+// that happens to declare `struct rand`. See Graph.LocalScopeAt, which is the
+// one place that rule is applied.
+//
+// It must not report true for a bare builtin either. That exclusion is commit
+// a901ce4: a caller that counts builtins as bindings breaks exactly the
+// families whose own name is also a registered builtin, and there are four.
+func (s *Snapshot) isBoundAt(name string, pos lsp.Position) bool {
+	if s == nil || s.Program == nil || name == "" {
+		return false
+	}
+	return s.localScopeAt(pos).Bound(name)
+}
+
 func (s *Snapshot) NodeAt(pos lsp.Position) (mast.Node, mast.Range, bool) {
 	if s == nil || s.Program == nil || s.Program.NodePositions == nil {
 		return nil, mast.Range{}, false
@@ -41,11 +105,16 @@ func (s *Snapshot) NodeAt(pos lsp.Position) (mast.Node, mast.Range, bool) {
 	var bestRange mast.Range
 	bestSize := int(^uint(0) >> 1)
 
+	// Converted once, here, and not per node: this loop visits every node in
+	// the document, and turning a protocol position into a byte column costs a
+	// walk of that position's line.
+	line, column := s.TokenPosition(pos)
+
 	for node, rng := range s.Program.NodePositions {
 		if !rng.IsValid() {
 			continue
 		}
-		if !contains(rng, pos) {
+		if !rangeContains(rng, line, column) {
 			continue
 		}
 		size := rng.End.Offset - rng.Start.Offset
@@ -95,22 +164,111 @@ func (s *Snapshot) HoverText(pos lsp.Position) (string, mast.Range, bool) {
 				}
 			}
 		}
-		if text, ok := builtinHoverText(n.Value); ok {
-			return text, rng, true
+		identifierLabel := func() string {
+			label := fmt.Sprintf("identifier `%s`", n.Value)
+			if ty, ok := s.TypeOf(n); ok {
+				label += fmt.Sprintf(" : %s", ty)
+			}
+			return label
+		}
+		// typeDeclarationText is the hover on the name a struct or enum
+		// declaration writes. The type cards find a type by its name alone: the
+		// fields come from the first top-level struct of that name, the variants
+		// from the first top-level enum, a field's inferred type from every
+		// literal of that name, and the use count from the last type declared
+		// under it. So a card describes this declaration only when this is the
+		// one declaration of its kind under its name and the lookup reads this
+		// very statement. Anywhere else the card would be another declaration's,
+		// or there would be none and the hover would fall through to whatever
+		// else shares the spelling: a `struct quote` declared inside a function
+		// hovered as the quote macro special form, and the enum of
+		// `struct Color { a }` and `enum Color { b }` as the struct, with its
+		// field. There the hover says only what is certain, the kind and the
+		// name.
+		typeDeclarationText := func(declared *sema.Node) string {
+			label := fmt.Sprintf("struct `%s`", n.Value)
+			if declared.Kind == sema.KindEnum {
+				label = fmt.Sprintf("enum `%s`", n.Value)
+			}
+			for _, other := range s.Graph().Declarations() {
+				if other != declared && other.Kind == declared.Kind && other.Name == declared.Name {
+					return label
+				}
+			}
+			if declared.Kind == sema.KindStruct {
+				s.buildStructIndex()
+				if st := s.structDecls[n.Value]; st != nil && st.Name == n {
+					if card, ok := structCard(s, n.Value); ok {
+						return card.render()
+					}
+				}
+				return label
+			}
+			for _, stmt := range s.Program.Statements {
+				enum, ok := stmt.(*mast.EnumStatement)
+				if !ok || enum.Name == nil || enum.Name.Value != n.Value {
+					continue
+				}
+				if enum.Name == n {
+					if card, ok := enumCard(s, n.Value); ok {
+						return card.render()
+					}
+				}
+				break
+			}
+			return label
+		}
+		// The identifier a declaration writes is that declaration, and is
+		// described as one: never as a builtin or a macro special form that
+		// happens to share its spelling, and never as another declaration of
+		// the same name. The graph is asked rather than isBoundAt, because the
+		// scope cannot answer at the name itself: a value let, a let of several
+		// names and a for-in binding become visible only after their value or
+		// iterable, which the compiler compiles first (M26-SEM-021,
+		// M26-SEM-007). Gated on the scope alone, `let sum = 0;` hovered at its
+		// sum showed the builtin sum's card while go-to-definition from the same
+		// position landed on the let (M26-SEM-011). A use inside a let's own
+		// value declares nothing, so the second sum of `let sum = sum([1]);`
+		// still reaches the builtin, which is what the compiler reads there.
+		if declared, ok := s.Graph().DeclarationAt(s.TokenPosition(pos)); ok && declared.Ident == n {
+			if declared.Kind == sema.KindStruct || declared.Kind == sema.KindEnum {
+				return typeDeclarationText(declared), rng, true
+			}
+			return identifierLabel(), rng, true
+		}
+		// Only an unbound name is the builtin. `let first = 1;` makes `first`
+		// the author's value, which is what the VM reads (M26-SEM-011).
+		if !s.isBoundAt(n.Value, pos) {
+			if text, ok := builtinHoverText(n.Value); ok {
+				return text, rng, true
+			}
 		}
 		// A struct or enum name used anywhere — a literal's type, an annotation
-		// in prose, a bare mention — reaches the same card as its declaration.
+		// in prose, a bare mention — and not answered above reaches the card its
+		// name finds. That is the card its declaration shows when the name is
+		// declared once in the file, by one top-level struct or enum.
 		if text, ok := declaredTypeCard(s, n.Value); ok {
 			return text, rng, true
 		}
 		if text, ok := macroSpecialFormHoverText(n.Value); ok {
 			return text, rng, true
 		}
-		label := fmt.Sprintf("identifier `%s`", n.Value)
-		if ty, ok := s.TypeOf(n); ok {
-			label += fmt.Sprintf(" : %s", ty)
+		// `hash.blake2` is `hash_blake2`, so hovering either half reaches the
+		// card the flat spelling reaches. This sits after everything that
+		// resolves a real binding, which is what keeps a variable called `hash`
+		// winning the way it wins in the compiler -- and before the
+		// bare-identifier fallback, which is what used to answer
+		// "identifier `blake2`" for a call into the standard library.
+		if name, onField, ok := s.namespacedBuiltinAt(pos); ok {
+			if onField {
+				if text, ok := builtinHoverText(name); ok {
+					return text, rng, true
+				}
+			} else if text, ok := builtinFamilyHoverText(n.Value); ok {
+				return text, rng, true
+			}
 		}
-		return label, rng, true
+		return identifierLabel(), rng, true
 	case *mast.IntegerLiteral:
 		return fmt.Sprintf("integer `%d`", n.Value), rng, true
 	case *mast.FloatLiteral:
@@ -175,7 +333,7 @@ func (s *Snapshot) HoverText(pos lsp.Position) (string, mast.Range, bool) {
 			return text, rng, true
 		}
 	case *mast.ForInStatement:
-		if text, ok := keywordHoverText("for"); ok {
+		if text, ok := forInHoverText(); ok {
 			return text, rng, true
 		}
 	case *mast.ReturnStatement:
@@ -210,6 +368,9 @@ func (s *Snapshot) PrepareRename(pos lsp.Position) (string, mast.Range, bool) {
 	if !locationsOK {
 		return "", mast.Range{}, false
 	}
+	if !s.RenameableAt(pos) {
+		return "", mast.Range{}, false
+	}
 
 	node, rng, ok := s.NodeAt(pos)
 	if !ok {
@@ -232,10 +393,30 @@ func (s *Snapshot) CompletionItemsAt(pos lsp.Position) []lsp.CompletionItem {
 	seen := make(map[string]struct{}, len(keywords)+len(builtin.Builtins)+8)
 	for _, keyword := range keywords {
 		kind := lsp.CompletionItemKindKeyword
-		items = append(items, lsp.CompletionItem{Label: keyword, Kind: &kind})
+		completion := lsp.CompletionItem{Label: keyword, Kind: &kind}
+		// The same table hover reads. A keyword completion carried no
+		// documentation at all while the descriptions sat one file away, and
+		// four of them -- in, else, true, false -- were reachable from
+		// nowhere else: none is an AST node of its own, so a cursor on one
+		// lands on whatever encloses it. This is the second route to them.
+		if doc, ok := keywordHoverText(keyword); ok {
+			completion.Documentation = lsp.MarkupContent{Kind: lsp.MarkupKindMarkdown, Value: doc}
+		}
+		items = append(items, completion)
 		seen[keyword] = struct{}{}
 	}
+	// A visible binding of a builtin's name is what the VM calls, so the
+	// builtin's item gives way to it and the binding's own item is added below
+	// (M26-SEM-011). Bound is the compiler's predicate: a struct or enum of the
+	// same name does not shadow the builtin, and does not here either.
+	var boundHere func(string) bool
+	if s != nil && s.Program != nil {
+		boundHere = s.localScopeAt(pos).Bound
+	}
 	for _, b := range builtin.Builtins {
+		if boundHere != nil && boundHere(b.Name) {
+			continue
+		}
 		kind := lsp.CompletionItemKindFunction
 		completion := lsp.CompletionItem{Label: b.Name, Kind: &kind, Detail: builtinCompletionDetail(b.Name)}
 		if doc, ok := builtinHoverText(b.Name); ok {
@@ -257,23 +438,23 @@ func (s *Snapshot) CompletionItemsAt(pos lsp.Position) []lsp.CompletionItem {
 
 	bindings := s.VisibleBindingsAt(pos)
 	sort.Slice(bindings, func(i, j int) bool {
-		return bindings[i].ident.Value < bindings[j].ident.Value
+		return bindings[i].name < bindings[j].name
 	})
 	for _, bind := range bindings {
-		if bind.ident == nil {
+		if bind.name == "" {
 			continue
 		}
-		if _, ok := seen[bind.ident.Value]; ok {
+		if _, ok := seen[bind.name]; ok {
 			continue
 		}
 		kind := bind.kind
-		item := lsp.CompletionItem{Label: bind.ident.Value, Kind: &kind}
+		item := lsp.CompletionItem{Label: bind.name, Kind: &kind}
 		if ty, ok := s.TypeOf(bind.ident); ok {
 			detail := ty.String()
 			item.Detail = &detail
 		}
 		items = append(items, item)
-		seen[bind.ident.Value] = struct{}{}
+		seen[bind.name] = struct{}{}
 	}
 
 	return stableCompletionItems(items)
@@ -367,8 +548,8 @@ func (s *Snapshot) documentSymbol(stmt mast.Statement) (lsp.DocumentSymbol, bool
 		return lsp.DocumentSymbol{
 			Name:           n.Name.Value,
 			Kind:           kind,
-			Range:          toLSPRange(stmtRange),
-			SelectionRange: toLSPRange(selection),
+			Range:          s.Range(stmtRange),
+			SelectionRange: s.Range(selection),
 		}, true
 	case *mast.StructStatement:
 		if n.Name == nil {
@@ -387,15 +568,15 @@ func (s *Snapshot) documentSymbol(stmt mast.Statement) (lsp.DocumentSymbol, bool
 			children = append(children, lsp.DocumentSymbol{
 				Name:           field.Value,
 				Kind:           lsp.SymbolKindField,
-				Range:          toLSPRange(fieldRange),
-				SelectionRange: toLSPRange(fieldRange),
+				Range:          s.Range(fieldRange),
+				SelectionRange: s.Range(fieldRange),
 			})
 		}
 		return lsp.DocumentSymbol{
 			Name:           n.Name.Value,
 			Kind:           lsp.SymbolKindStruct,
-			Range:          toLSPRange(stmtRange),
-			SelectionRange: toLSPRange(selection),
+			Range:          s.Range(stmtRange),
+			SelectionRange: s.Range(selection),
 			Children:       children,
 		}, true
 	case *mast.EnumStatement:
@@ -415,15 +596,15 @@ func (s *Snapshot) documentSymbol(stmt mast.Statement) (lsp.DocumentSymbol, bool
 			children = append(children, lsp.DocumentSymbol{
 				Name:           variant.Value,
 				Kind:           lsp.SymbolKindEnumMember,
-				Range:          toLSPRange(variantRange),
-				SelectionRange: toLSPRange(variantRange),
+				Range:          s.Range(variantRange),
+				SelectionRange: s.Range(variantRange),
 			})
 		}
 		return lsp.DocumentSymbol{
 			Name:           n.Name.Value,
 			Kind:           lsp.SymbolKindEnum,
-			Range:          toLSPRange(stmtRange),
-			SelectionRange: toLSPRange(selection),
+			Range:          s.Range(stmtRange),
+			SelectionRange: s.Range(selection),
 			Children:       children,
 		}, true
 	default:
@@ -503,32 +684,6 @@ func (s *Snapshot) leadingLineCommentForIdentifier(ident *mast.Identifier) strin
 	return strings.Join(comments, "\n")
 }
 
-func contains(rng mast.Range, pos lsp.Position) bool {
-	line := int(pos.Line) + 1
-	col := int(pos.Character) + 1
-	if isBefore(line, col, rng.Start.Line, rng.Start.Column) {
-		return false
-	}
-	if !isBefore(line, col, rng.End.Line, rng.End.Column) && !(line == rng.End.Line && col == rng.End.Column) {
-		return false
-	}
-	return true
-}
-
-func isBefore(lineA, colA, lineB, colB int) bool {
-	if lineA != lineB {
-		return lineA < lineB
-	}
-	return colA < colB
-}
-
-func toLSPRange(rng mast.Range) lsp.Range {
-	return lsp.Range{
-		Start: lsp.Position{Line: lsp.UInteger(rng.Start.Line - 1), Character: lsp.UInteger(rng.Start.Column - 1)},
-		End:   lsp.Position{Line: lsp.UInteger(rng.End.Line - 1), Character: lsp.UInteger(rng.End.Column - 1)},
-	}
-}
-
 func nodeSpecificity(node mast.Node) int {
 	if node == nil {
 		return 0
@@ -603,7 +758,7 @@ func (s *Snapshot) semanticTokenList() []semanticToken {
 	overrides := collectSemanticTokenTypeOverrides(s.Program)
 
 	tokens := make([]semanticToken, 0, len(s.Program.NodePositions)/4)
-	tokens = append(tokens, lexicalSemanticTokens(s.Source)...)
+	tokens = append(tokens, lexicalSemanticTokens(s.Mapper(), s.Source)...)
 	for node, rng := range s.Program.NodePositions {
 		if !rng.IsValid() {
 			continue
@@ -612,13 +767,13 @@ func (s *Snapshot) semanticTokenList() []semanticToken {
 		if !ok {
 			continue
 		}
-		length := tokenLength(node, rng)
+		length := s.tokenLength(node, rng)
 		if length == 0 {
 			continue
 		}
 		tokens = append(tokens, semanticToken{
 			line:   uint32(rng.Start.Line - 1),
-			start:  uint32(rng.Start.Column - 1),
+			start:  uint32(s.Position(rng.Start).Character),
 			length: length,
 			typeID: typeID,
 			mod:    mod,
@@ -737,18 +892,20 @@ func semanticTokenTypeForNode(node mast.Node, overrides map[mast.Node]semanticTo
 		default:
 			return semanticTokenTypeIndex["variable"], 0, true
 		}
-	case *mast.FunctionLiteral:
-		return semanticTokenTypeIndex["function"], 0, true
-	case *mast.StructStatement:
-		return semanticTokenTypeIndex["type"], 0, true
-	case *mast.EnumStatement:
-		return semanticTokenTypeIndex["enum"], 0, true
 	default:
+		// A function literal, struct or enum statement gets no token of its
+		// own. One over the whole node overlaps every token inside it, which
+		// LSP 3.16 allows only to a client that advertised
+		// overlappingTokenSupport -- VS Code does not -- and it was emitted only
+		// when the node fitted on one line, so the same declaration coloured
+		// differently depending on its line breaks (M26-SEM-015). The parts
+		// that mean something are painted on their own: the declared name in
+		// collectStatementTokenOverrides, the rest lexically.
 		return 0, 0, false
 	}
 }
 
-func lexicalSemanticTokens(src string) []semanticToken {
+func lexicalSemanticTokens(m *localprotocol.Mapper, src string) []semanticToken {
 	l := lexer.New(src)
 	out := make([]semanticToken, 0, len(src)/8)
 	for {
@@ -763,16 +920,16 @@ func lexicalSemanticTokens(src string) []semanticToken {
 		if !tok.Start.IsValid() || !tok.End.IsValid() || tok.End.Line != tok.Start.Line {
 			continue
 		}
-		length := uint32(tok.End.Column - tok.Start.Column)
+		length := m.SpanLength(tok.Start.Line-1, tok.Start.Column-1, tok.End.Column-1)
 		if length == 0 {
-			length = uint32(len([]rune(tok.Literal)))
+			length = utf16Len(tok.Literal)
 		}
 		if length == 0 {
 			continue
 		}
 		out = append(out, semanticToken{
 			line:   uint32(tok.Start.Line - 1),
-			start:  uint32(tok.Start.Column - 1),
+			start:  uint32(m.PositionAt(tok.Start.Line-1, tok.Start.Column-1).Character),
 			length: length,
 			typeID: typeID,
 			mod:    0,
@@ -846,12 +1003,19 @@ func collectStatementTokenOverrides(stmt mast.Statement, overrides map[mast.Node
 		collectExpressionTokenOverrides(s.Iterable, overrides)
 		collectStatementTokenOverrides(s.Body, overrides)
 	case *mast.StructStatement:
+		// The declared name is the type, as `Point` of `Point{x: 1}` is.
+		if s.Name != nil {
+			overrides[s.Name] = semanticTokenOverride{typeID: semanticTokenTypeIndex["type"], modifier: 0}
+		}
 		for _, field := range s.Fields {
 			if field != nil {
 				overrides[field] = semanticTokenOverride{typeID: semanticTokenTypeIndex["property"], modifier: 0}
 			}
 		}
 	case *mast.EnumStatement:
+		if s.Name != nil {
+			overrides[s.Name] = semanticTokenOverride{typeID: semanticTokenTypeIndex["enum"], modifier: 0}
+		}
 		for _, variant := range s.Variants {
 			if variant != nil {
 				overrides[variant] = semanticTokenOverride{typeID: semanticTokenTypeIndex["enumMember"], modifier: 0}
@@ -910,6 +1074,25 @@ func collectExpressionTokenOverrides(expr mast.Expression, overrides map[mast.No
 			}
 		}
 		collectExpressionTokenOverrides(e.Function, overrides)
+		// The dotted spelling of the same call, corrected *after* that walk:
+		// the walk paints the member a `property`, the colour of a struct
+		// field, and reading `fs.read` in one colour and `fs_read` in another
+		// says they are two things.
+		//
+		// Like the bare-identifier arm above, this asks the registry rather
+		// than the scope. A painting pass has no scope to consult, and a wrong
+		// colour on a variable that shadows a family is a much smaller harm
+		// than a wrong hover card -- which does consult it.
+		if field, ok := e.Function.(*mast.FieldExpression); ok && field != nil && field.Field != nil {
+			if namespace, isIdent := field.Left.(*mast.Identifier); isIdent && namespace != nil {
+				if folded := semaResolver.ResolveField(sema.ScopeCtx{}, namespace.Value, field.Field.Value); folded.Kind == sema.FieldBuiltinFold {
+					overrides[field.Field] = semanticTokenOverride{
+						typeID:   semanticTokenTypeIndex["function"],
+						modifier: semanticTokenModifierBit("defaultLibrary"),
+					}
+				}
+			}
+		}
 		for _, arg := range e.Arguments {
 			collectExpressionTokenOverrides(arg, overrides)
 		}
@@ -925,9 +1108,9 @@ func collectExpressionTokenOverrides(expr mast.Expression, overrides map[mast.No
 		collectExpressionTokenOverrides(e.Left, overrides)
 		collectExpressionTokenOverrides(e.Index, overrides)
 	case *mast.HashLiteral:
-		for key, value := range e.Pairs {
-			collectExpressionTokenOverrides(key, overrides)
-			collectExpressionTokenOverrides(value, overrides)
+		for _, pair := range e.Pairs {
+			collectExpressionTokenOverrides(pair.Key, overrides)
+			collectExpressionTokenOverrides(pair.Value, overrides)
 		}
 	case *mast.AssignExpression:
 		collectExpressionTokenOverrides(e.Left, overrides)
@@ -974,7 +1157,13 @@ func isNilInterface(v any) bool {
 	}
 }
 
-func tokenLength(node mast.Node, rng mast.Range) uint32 {
+// tokenLength is a semantic token's length in UTF-16 code units.
+//
+// Every arm counted in the wrong unit before: a rune count for the literals, and
+// the byte difference end-start for everything else. The two are equal to the
+// right answer only on an ASCII line, and the literal arms are additionally
+// wrong for any rune outside the basic multilingual plane.
+func (s *Snapshot) tokenLength(node mast.Node, rng mast.Range) uint32 {
 	if !rng.IsValid() {
 		return 0
 	}
@@ -983,11 +1172,11 @@ func tokenLength(node mast.Node, rng mast.Range) uint32 {
 		if n == nil {
 			return 0
 		}
-		return uint32(len([]rune(n.Value)))
+		return utf16Len(n.Value)
 	case *mast.IntegerLiteral:
-		return uint32(len([]rune(n.TokenLiteral())))
+		return utf16Len(n.TokenLiteral())
 	case *mast.FloatLiteral:
-		return uint32(len([]rune(n.TokenLiteral())))
+		return utf16Len(n.TokenLiteral())
 	case *mast.StringLiteral:
 		// A semantic token cannot span lines, and a triple-quoted literal --
 		// or one text piece of an interpolated one -- can. Leaving it out
@@ -997,11 +1186,11 @@ func tokenLength(node mast.Node, rng mast.Range) uint32 {
 		if rng.End.Line != rng.Start.Line {
 			return 0
 		}
-		return uint32(len([]rune(n.TokenLiteral())))
+		return utf16Len(n.TokenLiteral())
 	default:
 		if rng.End.Line != rng.Start.Line || rng.End.Column <= rng.Start.Column {
 			return 0
 		}
-		return uint32(rng.End.Column - rng.Start.Column)
+		return s.Mapper().SpanLength(rng.Start.Line-1, rng.Start.Column-1, rng.End.Column-1)
 	}
 }

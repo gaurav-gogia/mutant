@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"mutant/ast"
@@ -48,9 +49,11 @@ type VM struct {
 
 	// builtins is what an OpGetBuiltin operand indexes, resolved once at
 	// construction: from the program's own name table, or -- for bytecode
-	// predating names -- from the frozen ordinal snapshot. builtinsErr holds a
-	// resolution failure until Run can return it, because the constructors
-	// cannot.
+	// predating names -- from a frozen ordinal table: v2.4.x's, or v2.3.x's when
+	// the container has no OpcodeMap (see compiler.LegacyRegistryOf, and
+	// builtin/legacy_ordinals.go for what each table does and does not
+	// describe). builtinsErr holds a resolution failure until Run can return it,
+	// because the constructors cannot.
 	builtins        []*builtin.BuiltIn
 	builtinsErr     error
 	builtinsVersion int
@@ -131,7 +134,6 @@ var (
 const (
 	initialStackCapacity   = global.StackSize
 	initialGlobalsCapacity = global.GlobalSize
-	initialFrameCapacity   = global.MaxFrames
 	integritySweepBase     = uint64(251)
 	integritySweepSpread   = uint64(83)
 	integrityProbeSpread   = uint64(31)
@@ -257,6 +259,8 @@ func resolveBuiltins(bc *compiler.ByteCode) ([]*builtin.BuiltIn, error) {
 			version, compiler.BytecodeVersion)
 	case version >= compiler.BytecodeVersionNamedBuiltins:
 		return builtin.ResolveNames(bc.BuiltinNames)
+	case bc.LegacyRegistry() == compiler.LegacyRegistryV23:
+		return builtin.ResolveLegacyOrdinalsV23()
 	default:
 		return builtin.ResolveLegacyOrdinals()
 	}
@@ -366,6 +370,39 @@ func (vm *VM) ensureGlobalCapacity(index int) {
 	vm.globals = resized
 }
 
+// initialFrameCapacity is how much room the frame slice is allocated with before
+// anything runs. ensureFrameCapacity grows it on demand, so it is a starting size
+// and not a ceiling; maxCallDepth below is the ceiling.
+//
+// It was global.MaxFrames, which is the whole of M26-VM-021's complaint about that
+// package and half of why M26-VM-006 went unnoticed: traceback.go and resource.go
+// are both written as though a runaway recursion ends in an error the VM reports,
+// and a constant called MaxFrames is why anyone would think so.
+const initialFrameCapacity = 2048
+
+// maxCallDepth is how many calls may be on the stack at once. The next one past it
+// is refused with an error naming the number, which is a diagnostic the author can
+// act on; what happened before was not.
+//
+// Nothing bounded depth at all. A recursion with no stopping case grew the frame
+// slice until the host gave out -- measured at 73,298 frames in 8 seconds with no
+// error -- and a recursion written through map, filter, each, reduce, sort_by,
+// with_resource or test grew the Go stack as well, because each of those re-enters
+// execLoop through CallClosureSync. That form ends in `fatal error: stack
+// overflow`, which no recover contains, so the process dies with the runner's
+// deferred cleanup unrun: no CleanupSensitiveData, no WaitForTasks.
+//
+// 10,000 is high enough that it is not a program's problem -- Python's default is
+// 1,000 and Node's is around 11,000 -- and low enough to hold the Go stack well
+// inside its own default. Measured: 10,000 nested CallClosureSync re-entries fit
+// in 32 MiB of Go stack and not in 16 MiB, against a 1 GiB default, so the frame
+// ceiling is what stops the native path too and no second limit is needed. The
+// refusal takes about two seconds to arrive, which is the per-sweep frame integrity
+// walk being quadratic in depth (M26-VM-012) and not this check.
+//
+//mutant:limit depth
+const maxCallDepth = 10_000
+
 func (vm *VM) ensureFrameCapacity(required int) {
 	if required <= len(vm.frames) {
 		return
@@ -378,7 +415,7 @@ func (vm *VM) ensureFrameCapacity(required int) {
 }
 
 func (vm *VM) encryptForStorage(obj object.Object) object.Object {
-	encObj, err := mutil.EncryptObject(obj, vm.inslen, vm.password)
+	encObj, err := mutil.EncryptObjectWithStream(obj, vm.inslen, vm.password, vm.valueStream())
 	if err == nil {
 		return encObj
 	}
@@ -386,7 +423,7 @@ func (vm *VM) encryptForStorage(obj object.Object) object.Object {
 }
 
 func (vm *VM) decryptForUse(obj object.Object) object.Object {
-	decObj, err := mutil.DecryptObject(obj, vm.inslen, vm.password)
+	decObj, err := mutil.DecryptObjectWithStream(obj, vm.inslen, vm.password, vm.valueStream())
 	if err == nil {
 		return decObj
 	}
@@ -473,8 +510,29 @@ func (vm *VM) getGlobal(index int) object.Object {
 // CleanupRuntimeSensitiveData clears encrypted runtime data buffers after execution.
 // clearGlobals controls whether globals are wiped; clearConstants controls whether constants are wiped.
 func (vm *VM) CleanupRuntimeSensitiveData(clearGlobals bool, clearConstants bool) {
+	// Whether the stack is wiped or merely released follows clearGlobals, and it
+	// has to: since M26-VM-001 a stack slot and a global can be the same object.
+	// A value that is only moving is moved rather than opened and sealed again,
+	// so OpSetGlobal hands the stack's own object to the global, and pop leaves
+	// its pointer behind in the slot it vacated -- so the backing array still
+	// reaches a global after the value has been stored there.
+	//
+	// Wiping in place is therefore incompatible with keeping the globals, and
+	// the caller has already said which it wants. clearGlobals is false only for
+	// the REPL, where the next line is the same program continuing and the
+	// globals are its state. Wiping the stack there emptied a hash a global still
+	// held, and record_seal refused a range with no "offset" on the line after
+	// the one that built it.
+	//
+	// So when the globals stay, the slots are dropped and not wiped. What no
+	// global owns becomes garbage, and in storage form: the stack holds sealed
+	// values, and the REPL keeps the password alive between lines in any case,
+	// because without it no global could be opened. When the globals go, the run
+	// is over and everything the stack can reach is wiped as before.
 	for i := range vm.stack {
-		vm.clearObjectSensitiveData(vm.stack[i])
+		if clearGlobals {
+			vm.clearObjectSensitiveData(vm.stack[i])
+		}
 		vm.stack[i] = nil
 	}
 	vm.stackPointer = 0
@@ -508,6 +566,11 @@ func (vm *VM) CleanupRuntimeSensitiveData(clearGlobals bool, clearConstants bool
 	}
 	vm.frameIndex = 0
 	vm.password = ""
+
+	// The stream was derived from the password the line above just dropped, and
+	// it now carries the key this VM's values are sealed with as well as its
+	// instructions (M26-VM-001). Nothing derived from the secret outlives it.
+	vm.xorStream.Zero()
 }
 
 // CleanupSensitiveData clears runtime buffers and constants. Intended for one-shot execution paths.
@@ -626,6 +689,21 @@ func (vm *VM) instructionStream() *security.XORStream {
 		vm.xorStream = security.NewXORStream(int64(vm.inslen), vm.password)
 	}
 	return vm.xorStream
+}
+
+// valueStream is the same derived key under the name the other half of the VM
+// reads it by. A stored value's payload is sealed from the start of the
+// keystream under (inslen, password) -- the pair the instruction stream is
+// derived from -- so one derivation per run now covers the opcodes and the
+// values both.
+//
+// Deriving it per value was the cost of a container load rather than the
+// cipher: building an array of 800 elements in a loop made 2,890,011
+// derivations, two SHA-256 hashes each, for 22 MiB of payload (M26-VM-001).
+// A value that records a seed of its own is still opened with a key derived
+// for that seed; mutil.sealKey has the case and the reason.
+func (vm *VM) valueStream() *security.XORStream {
+	return vm.instructionStream()
 }
 
 // readUint16 and readUint8 decode an operand at an absolute instruction offset.
@@ -931,7 +1009,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			if err := vm.push(hash); err != nil {
 				return vm.runtimeErrorAt(ip, op, err)
 			}
-		case code.OpEqual, code.OpUnEqual, code.OpGreater, code.OpGreaterEqual:
+		case code.OpEqual, code.OpUnEqual, code.OpGreater, code.OpGreaterEqual, code.OpLess, code.OpLessEqual:
 			if err := vm.execComparison(op); err != nil {
 				return vm.runtimeErrorAt(ip, op, err)
 			}
@@ -1030,7 +1108,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			pos := int(res)
 			vm.currentFrame().ip += 2
 			condition := vm.pop()
-			if !isTruthy(condition) {
+			if !object.IsTruthy(condition) {
 				vm.currentFrame().ip = pos - 1
 			}
 		case code.OpSetGlobal:
@@ -1043,7 +1121,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			}
 			vm.currentFrame().ip += 2
 			vm.ensureGlobalCapacity(int(globalIndex))
-			vm.setGlobal(int(globalIndex), vm.pop())
+			vm.setGlobalStored(int(globalIndex))
 		case code.OpGetGlobal:
 			if ip+2 >= len(ins) {
 				return fmt.Errorf("OpGetGlobal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
@@ -1054,7 +1132,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			}
 			vm.currentFrame().ip += 2
 			vm.ensureGlobalCapacity(int(globalIndex))
-			if err := vm.push(vm.getGlobal(int(globalIndex))); err != nil {
+			if err := vm.pushGlobal(int(globalIndex)); err != nil {
 				return err
 			}
 		case code.OpSetLocal:
@@ -1071,8 +1149,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			if slot < 0 || slot >= len(vm.stack) {
 				return vm.runtimeErrorfAt(ip, op, "local slot %d outside the stack (bp=%d, len=%d)", slot, frame.bp, len(vm.stack))
 			}
-			obj := vm.pop()
-			vm.stack[slot] = vm.encryptForStorage(obj)
+			vm.stack[slot] = vm.popStored()
 		case code.OpGetLocal:
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("OpGetLocal: not enough bytes for operand at ip=%d, len=%d", ip, len(ins))
@@ -1087,7 +1164,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			if slot < 0 || slot >= len(vm.stack) {
 				return vm.runtimeErrorfAt(ip, op, "local slot %d outside the stack (bp=%d, len=%d)", slot, frame.bp, len(vm.stack))
 			}
-			if err := vm.push(vm.decryptForUse(vm.stack[slot])); err != nil {
+			if err := vm.pushStored(vm.stack[slot]); err != nil {
 				return err
 			}
 		case code.OpGetBuiltin:
@@ -1136,7 +1213,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			if cell, ok := captured.(*object.Cell); ok {
 				captured = cell.Value
 			}
-			if err := vm.push(vm.decryptForUse(captured)); err != nil {
+			if err := vm.pushStored(captured); err != nil {
 				return err
 			}
 		case code.OpSetFree:
@@ -1159,7 +1236,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 				// bytecode did not come from this compiler.
 				return vm.runtimeErrorfAt(ip, op, "captured variable %d is not assignable storage", freeIndex)
 			}
-			cell.Value = vm.encryptForStorage(vm.pop())
+			cell.Value = vm.popStored()
 		case code.OpGetLocalCell, code.OpSetLocalCell, code.OpCaptureLocal:
 			if ip+1 >= len(ins) {
 				return fmt.Errorf("%s: not enough bytes for operand at ip=%d, len=%d", runtimeOpcodeName(op), ip, len(ins))
@@ -1184,11 +1261,11 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			}
 			switch op {
 			case code.OpGetLocalCell:
-				if err := vm.push(vm.decryptForUse(cell.Value)); err != nil {
+				if err := vm.pushStored(cell.Value); err != nil {
 					return err
 				}
 			case code.OpSetLocalCell:
-				cell.Value = vm.encryptForStorage(vm.pop())
+				cell.Value = vm.popStored()
 			case code.OpCaptureLocal:
 				// The cell itself, not its contents: OpClosure copies what is on
 				// the stack into the new closure's Free list, and copying the
@@ -1318,7 +1395,7 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			if vm.stackPointer <= 0 {
 				return vm.runtimeErrorfAt(ip, op, "stack underflow")
 			}
-			if err := vm.push(vm.decryptForUse(vm.stack[vm.stackPointer-1])); err != nil {
+			if err := vm.pushStored(vm.stack[vm.stackPointer-1]); err != nil {
 				return vm.runtimeErrorAt(ip, op, err)
 			}
 		case code.OpDestructure:
@@ -1392,9 +1469,12 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 				fields[fieldName] = fieldValue
 			}
 
+			// fieldNames came from the struct's own definition above, in
+			// declaration order, which is the order Inspect renders.
 			structObj := &object.Struct{
-				TypeName: typeName,
-				Fields:   fields,
+				TypeName:   typeName,
+				FieldOrder: fieldNames,
+				Fields:     fields,
 			}
 			if err := vm.push(structObj); err != nil {
 				return err
@@ -1419,17 +1499,27 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			case *object.Struct:
 				val, exists := target.Fields[fieldName]
 				if !exists {
-					val = global.Null
+					// This used to be null. A struct's field set is declared in
+					// the program, so a name outside it is a mistake, and the
+					// null made it a value instead: it compared unequal to
+					// everything, printed as nothing, and flowed on into
+					// whatever read it. The compiler refuses this before the
+					// program runs wherever it can prove the receiver's type;
+					// this is the rest.
+					return errors.New(object.UnknownStructFieldMessage(
+						target.TypeName, fieldName, target.FieldNames()))
 				}
 				if err := vm.push(val); err != nil {
 					return err
 				}
 			case *object.Error:
-				// Errors read like structs, deliberately. An unknown name gives
-				// null here exactly as it does above, so inspecting an error
-				// never introduces a failure mode that inspecting a struct does
-				// not already have -- and a field that a stripped build stamps
-				// nothing into still reads, as 0 or "".
+				// An unknown name is null on an error and a refusal on a struct.
+				// That was one rule and is now two, because the reasons were
+				// never the same: a struct's field set is declared in the
+				// program, so a name outside it can be reported, while an
+				// error's field set is the runtime's own and a field a stripped
+				// build stamps nothing into still has to read, as 0 or "".
+				// TestUnknownErrorFieldIsNullNotAFault keeps this half.
 				val, exists := target.Field(fieldName)
 				if !exists {
 					val = global.Null
@@ -1458,6 +1548,15 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 			value := vm.pop()
 			obj := vm.pop()
 			if structObj, ok := obj.(*object.Struct); ok {
+				if _, declared := structObj.Fields[fieldName]; !declared {
+					// Writing a field the type does not declare used to add it.
+					// The record then stopped matching its declaration, two
+					// records of one type could hold different field sets, and
+					// the field the author meant to change kept its old value --
+					// with the write appearing to succeed.
+					return errors.New(object.UnknownStructFieldWriteMessage(
+						structObj.TypeName, fieldName, structObj.FieldNames()))
+				}
 				structObj.Fields[fieldName] = value
 				if err := vm.push(structObj); err != nil {
 					return err
@@ -1510,17 +1609,37 @@ func (vm *VM) runInstructions(baseFrameIndex int) error {
 				return err
 			}
 		default:
-			// An opcode this build does not know. It reaches here in exactly one
-			// way: bytecode compiled by a newer toolchain, since opcodes are only
-			// ever appended and a value once emitted never changes meaning.
+			// An opcode this build does not know. Refusing is the whole point of
+			// the arm: without it the switch simply matched nothing, the
+			// instruction pointer advanced by one, and the operand bytes of the
+			// instruction it did not recognise were executed as opcodes -- a
+			// program that runs to completion and answers with nonsense. Refusing
+			// to run half of it is the same choice Run() already makes for a
+			// builtin this runtime lacks.
 			//
-			// Saying so is the whole point of the arm. Without it the switch
-			// simply matched nothing, the instruction pointer advanced by one,
-			// and the operand bytes of the instruction it did not recognise were
-			// executed as opcodes -- a program that runs to completion and
-			// answers with nonsense. Refusing to run half of it is the same
-			// choice Run() already makes for a builtin this runtime lacks.
-			return vm.runtimeErrorfAt(ip, op, "unknown opcode %d: this program was built by a newer version of mutant", byte(op))
+			// Naming one cause was wrong. The arm used to state flatly that the
+			// program was built by a newer version of mutant, reasoning that
+			// opcodes are only ever appended so an unknown value can only come
+			// from a newer toolchain. That holds for the byte the compiler
+			// emitted; it does not hold for the byte that arrives here, which is
+			// whatever the instruction stream decrypted to. An opcode that
+			// decodes to nothing is just as likely to mean the stream did not
+			// decrypt -- the key derives from (instruction length, password), so
+			// bytecode decrypted under the wrong length produces uniformly random
+			// opcodes, which is precisely what the REPL's own re-encryption bug
+			// (M26-TOOL-013) did to a function defined on an earlier line. Every
+			// such session was told to upgrade mutant.
+			//
+			// Both causes are therefore named, in the order a reader can act on:
+			// the local one first. The fix for M26-TOOL-013 removes the only
+			// known in-tree way to reach this through decryption, so the
+			// remaining ones are damaged or truncated bytecode, a wrong
+			// --password, and a genuinely newer toolchain that added an opcode
+			// without raising the container version (a newer container version is
+			// refused earlier, by resolveBuiltins, with its own message).
+			return vm.runtimeErrorfAt(ip, op,
+				"unknown opcode %d: this instruction did not decode -- the bytecode may be damaged or decrypted with the wrong key, or it may have been built by a newer version of mutant",
+				byte(op))
 		}
 	}
 
@@ -1534,11 +1653,33 @@ func runtimeOpcodeName(op code.Opcode) string {
 	return fmt.Sprintf("opcode_%d", op)
 }
 
+// instructionError is a failure named by where in the bytecode it happened.
+//
+// The instruction pointer and the opcode are fields now as well as text. As
+// text they are what a crash report needs, and an error that ends the run
+// still carries them exactly as it did. As fields they can be left back out,
+// which is what a failure on its way to becoming a value the program holds
+// needs: mutation rewrites the instruction stream, so both numbers describe
+// the build rather than the program. See scriptFacingMessage.
+type instructionError struct {
+	IP  int
+	Op  code.Opcode
+	Err error
+}
+
+func (e *instructionError) Error() string {
+	return fmt.Sprintf("vm_runtime_error ip=%d op=%s: %s", e.IP, runtimeOpcodeName(e.Op), e.Err)
+}
+
+// Unwrap keeps errors.Is and errors.As answering about the cause, which is
+// what the %w this replaced did.
+func (e *instructionError) Unwrap() error { return e.Err }
+
 func (vm *VM) runtimeErrorAt(ip int, op code.Opcode, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("vm_runtime_error ip=%d op=%s: %w", ip, runtimeOpcodeName(op), err)
+	return &instructionError{IP: ip, Op: op, Err: err}
 }
 
 func (vm *VM) runtimeErrorfAt(ip int, op code.Opcode, format string, args ...interface{}) error {
@@ -1764,7 +1905,7 @@ func (vm *VM) pushClosure(constIndex, numFree int) error {
 	}
 	vm.stackPointer = vm.stackPointer - numFree
 
-	closure := &object.Closure{Fn: fun, Free: free}
+	closure := object.NewClosure(fun, free)
 	return vm.push(closure)
 }
 
@@ -1776,6 +1917,92 @@ func (vm *VM) push(obj object.Object) error {
 	vm.stackPointer++
 
 	return nil
+}
+
+// pushStored puts on the stack a value that is already in storage form, which
+// is what a stack slot, a global and a cell all hold.
+//
+// It is push(decryptForUse(obj)) with the two halves that cancel removed.
+// decryptForUse opens the value and push seals the result with the same seed
+// and the same password, so what lands on the stack is what it started as --
+// and for a sealed value that round trip is two ChaCha20 passes and two
+// allocations over the whole payload. Reading a 3 MiB buffer inside a loop
+// spent two thirds of its time on it (M26-VM-001).
+//
+// A container moves this way too, and that is the case the sweep cares about:
+// the example that failed its time limit keeps its 3 MiB buffer in a struct
+// field, so the value being moved is a struct and the round trip was four
+// passes over the buffer for every field read.
+//
+// For a container the stored object and the plaintext object are different
+// objects, so this does make the slot and the stack entry one object. That is
+// safe here, and the reason holds across the whole dispatch loop rather than
+// case by case: *nothing in this VM mutates a container in storage form*. Every
+// path that writes one opens it first -- execSetIndex and OpSetField both take
+// their target from pop(), and opening rebuilds the container and every element
+// in it -- so the write lands on a fresh copy and is stored back into the
+// binding that asked for it. `let b = a; b[0] = 9;` leaves a alone because the
+// write never touched the object a holds.
+//
+// The one place that writes a stored container in place is
+// clearObjectSensitiveData, and it is the exception that has to be handled
+// rather than waved through: a global is reachable from the stack's backing
+// array once a value has been moved into it, so a wipe of the stack reaches a
+// global. CleanupRuntimeSensitiveData therefore wipes the stack only when the
+// globals go with it; see the comment there, and
+// TestAGlobalSurvivesTheStackBeingReleased, which is the test this kit was
+// missing. vm/stored_form_test.go holds the aliasing invariant itself.
+func (vm *VM) pushStored(obj object.Object) error {
+	vm.ensureStackCapacity(vm.stackPointer + 1)
+	vm.stack[vm.stackPointer] = obj
+	vm.stackPointer++
+	return nil
+}
+
+// popStored takes the top of the stack in storage form: the mirror of
+// pushStored, for the stores, which seal what pop has just opened.
+func (vm *VM) popStored() object.Object {
+	if vm.stackPointer <= 0 {
+		faultf("stack underflow: pop with nothing on the stack")
+	}
+
+	obj := vm.stack[vm.stackPointer-1]
+	vm.stackPointer--
+	return obj
+}
+
+// pushGlobal is pushStored for a global, with the one case that has no storage
+// form to hand on: the wrapper memory mode keeps a global as ciphertext bytes
+// in a SecureGlobal rather than as an object, so there the value has to be
+// opened and resealed as it always was.
+func (vm *VM) pushGlobal(index int) error {
+	if _, wrapped := vm.secureGlobals[index]; !wrapped && index >= 0 && index < len(vm.globals) {
+		return vm.pushStored(vm.globals[index])
+	}
+	return vm.push(vm.getGlobal(index))
+}
+
+// setGlobalStored stores into a global a value that is already in storage form:
+// pushGlobal's mirror, and the other half of not opening a value that is only
+// moving. setGlobal(pop()) opened the top of the stack and sealed it again with
+// the same key, which is the same identity round trip in the other direction.
+//
+// The wrapper memory mode is the one case that cannot take it, for the reason
+// pushGlobal has: a SecureGlobal holds ciphertext bytes it produces itself,
+// from a value in the clear, so there the stack's value is opened as it always
+// was. The SecureGlobal a non-wrapper store replaces is still cleared, because
+// a global that has been one keeps its wrapper until something overwrites it.
+func (vm *VM) setGlobalStored(index int) {
+	if vm.useWrapperGlobals() {
+		vm.setGlobal(index, vm.pop())
+		return
+	}
+
+	if previous, ok := vm.secureGlobals[index]; ok {
+		previous.Clear()
+		delete(vm.secureGlobals, index)
+	}
+	vm.globals[index] = vm.popStored()
 }
 
 // pop takes the top of the stack. An empty stack is a fault rather than an
@@ -1948,14 +2175,17 @@ func (vm *VM) execBinaryBytesOperation(op code.Opcode, left, right object.Object
 		return fmt.Errorf("unknown bytes operator: %d", op)
 	}
 
-	lval := left.(*object.Bytes).Value
-	rval := right.(*object.Bytes).Value
+	lbuf := left.(*object.Bytes)
+	rbuf := right.(*object.Bytes)
 
-	joined := make([]byte, 0, len(lval)+len(rval))
-	joined = append(joined, lval...)
-	joined = append(joined, rval...)
+	joined := make([]byte, 0, len(lbuf.Value)+len(rbuf.Value))
+	joined = append(joined, lbuf.Value...)
+	joined = append(joined, rbuf.Value...)
 
-	return vm.push(&object.Bytes{Value: joined})
+	// Classified plaintext joined to anything is still classified plaintext;
+	// see object.JoinClassification.
+	return vm.push(&object.Bytes{Value: joined,
+		Classified: object.JoinClassification(lbuf.Classified, rbuf.Classified)})
 }
 
 func (vm *VM) execSetIndex(container, index, value object.Object) (object.Object, error) {
@@ -2036,26 +2266,28 @@ func (vm *VM) execErrorField(errObj, index object.Object) error {
 
 func (vm *VM) execMultiValueIndex(multiValue, index object.Object) error {
 	multi := multiValue.(*object.MultiValue)
-	i := index.(*object.Integer).Value
-	max := int64(len(multi.Values) - 1)
-	if i > max || i < 0 {
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(multi.Values))
+	if !ok {
 		return vm.push(global.Null)
 	}
-	return vm.push(multi.Values[i])
+	return vm.push(multi.Values[at])
 }
 
+// execStringIndex yields the rune at i as a one-rune string.
+//
+// By rune, not by byte, because that is what every other string operation here
+// means: the for-in iterator, str_char_at, str_substr and str_reverse all work in
+// runes, and object.NewIterator's comment says why. Indexing by byte did not even
+// return the byte -- Go converts a byte to the rune of that number, so byte 0xc3
+// came back as U+00C3, a character the string does not contain.
+//
+// Both rules are object.RuneAt's; see the head of object/index.go.
 func (vm *VM) execStringIndex(str, index object.Object) error {
-	strVal := str.(*object.String).Value
-	i := index.(*object.Integer).Value
-	max := int64(len(strVal) - 1)
-	if i > max {
+	char, ok := object.RuneAt(str.(*object.String).Value, index.(*object.Integer).Value)
+	if !ok {
 		return vm.push(global.Null)
-	} else if i < 0 {
-		strObj := &object.String{Value: string(strVal[max+i+1])}
-		return vm.push(strObj)
 	}
-	strObj := &object.String{Value: string(strVal[i])}
-	return vm.push(strObj)
+	return vm.push(&object.String{Value: char})
 }
 
 // execBytesIndex yields the byte at i as an INTEGER 0-255.
@@ -2066,31 +2298,20 @@ func (vm *VM) execStringIndex(str, index object.Object) error {
 // conversion. Negative indices count from the end, as they do everywhere else.
 func (vm *VM) execBytesIndex(buf, index object.Object) error {
 	data := buf.(*object.Bytes).Value
-	i := index.(*object.Integer).Value
-	max := int64(len(data) - 1)
-
-	if i > max {
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(data))
+	if !ok {
 		return vm.push(global.Null)
 	}
-	if i < 0 {
-		if max+i+1 < 0 {
-			return vm.push(global.Null)
-		}
-		return vm.push(&object.Integer{Value: int64(data[max+i+1])})
-	}
-	return vm.push(&object.Integer{Value: int64(data[i])})
+	return vm.push(&object.Integer{Value: int64(data[at])})
 }
 
 func (vm *VM) execArrayIndex(array, index object.Object) error {
-	arrayObj := array.(*object.Array)
-	i := index.(*object.Integer).Value
-	max := int64(len(arrayObj.Elements) - 1)
-	if i > max {
+	elements := array.(*object.Array).Elements
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(elements))
+	if !ok {
 		return vm.push(global.Null)
-	} else if i < 0 {
-		return vm.push(arrayObj.Elements[max+i+1])
 	}
-	return vm.push(arrayObj.Elements[i])
+	return vm.push(elements[at])
 }
 
 func (vm *VM) execHashIndex(hash, index object.Object) error {
@@ -2109,19 +2330,25 @@ func (vm *VM) execHashIndex(hash, index object.Object) error {
 	return vm.push(pair.Value)
 }
 
+// execBangOperation pushes the negation of the operand's truthiness, which is what
+// `!` means.
+//
+// It used to switch on pointer identity against global.True, global.False and
+// global.Null, and push False for anything else. Those three are the only values
+// such a rule can see, so the four falsy values that are not singletons -- 0, 0.0,
+// "" and an empty buffer -- came back false, the same answer as !true. 0 was falsy
+// and !0 was falsy, so `if (x)` and `if (!x)` both skipped their branch and `!!x`
+// was not `x` (M26-VM-007).
+//
+// Identity was not the fault, and that is worth recording because it looks like it
+// was. A false held in a variable, an array element, a hash value or a parameter
+// still arrives here as global.False: the pointer survives encryptForStorage,
+// mutil.EncryptObject in the global store, and decryptForUse on the way back. That
+// was measured, not assumed, and TestBangIsRightWhereverTheValueCameFrom keeps it
+// measured. The fault was a default arm standing in for a rule, and object.IsTruthy
+// is the rule.
 func (vm *VM) execBangOperation() error {
-	operand := vm.pop()
-
-	switch operand {
-	case global.True:
-		return vm.push(global.False)
-	case global.False:
-		return vm.push(global.True)
-	case global.Null:
-		return vm.push(global.True)
-	default:
-		return vm.push(global.False)
-	}
+	return vm.push(nativeBoolToBooleanObject(!object.IsTruthy(vm.pop())))
 }
 
 func (vm *VM) execMinusOperation() error {
@@ -2156,6 +2383,33 @@ func (vm *VM) execBitNotOperation() error {
 	return vm.push(result)
 }
 
+// comparisonRefusal is the error for a comparison the operands do not support,
+// naming the operator as the program spells it. It printed the opcode's number,
+// so `1 < h["x"]` on a missing field failed as "unknown operator: 59 (INTEGER
+// NULL)".
+func comparisonRefusal(op code.Opcode, left, right object.Object) error {
+	return fmt.Errorf("unknown operator: %s %s %s", left.Type(), comparisonSymbol(op), right.Type())
+}
+
+// comparisonSymbol is the source spelling of a comparison opcode.
+func comparisonSymbol(op code.Opcode) string {
+	switch op {
+	case code.OpEqual:
+		return "=="
+	case code.OpUnEqual:
+		return "!="
+	case code.OpGreater:
+		return ">"
+	case code.OpGreaterEqual:
+		return ">="
+	case code.OpLess:
+		return "<"
+	case code.OpLessEqual:
+		return "<="
+	}
+	return fmt.Sprintf("opcode %d", op)
+}
+
 func (vm *VM) execComparison(op code.Opcode) error {
 	right := vm.pop()
 	left := vm.pop()
@@ -2172,8 +2426,19 @@ func (vm *VM) execComparison(op code.Opcode) error {
 		return vm.execFloatComparison(op, left, right)
 	}
 
+	// Functions compare by identity, and so does an array, hash or struct
+	// holding one. The fallback below compares rendered forms, a closure
+	// renders its address, and every load of a closure is a fresh copy, so
+	// under the fallback a function was never equal to itself, and nor was
+	// `[f]` (M26-EVL-005). Ordering is left to the refusals below.
+	if (op == code.OpEqual || op == code.OpUnEqual) &&
+		(object.HoldsFunction(left) || object.HoldsFunction(right)) {
+		return vm.push(nativeBoolToBooleanObject(object.ValuesEqual(left, right) == (op == code.OpEqual)))
+	}
+
 	// The fallback below compares rendered forms, and Bytes renders as hex, so
-	// without this a buffer would equal the string spelling its own hex.
+	// before the type guard in that fallback a buffer equalled the string
+	// spelling its own hex. This is where two buffers are compared: by content.
 	if ltype == object.BYTES_OBJ || rtype == object.BYTES_OBJ {
 		return vm.execBytesComparison(op, left, right)
 	}
@@ -2188,19 +2453,42 @@ func (vm *VM) execComparison(op code.Opcode) error {
 
 	// Enum values, for the same reason as bytes: the fallback compares
 	// rendered forms, an enum renders as `Status.Ok(0)`, and a string spelling
-	// that text would otherwise compare equal to the variant. `match` makes
-	// that reachable in a way plain `==` rarely was.
+	// that text compared equal to the variant before the fallback's type guard.
+	// `match` made that reachable in a way plain `==` rarely was.
 	if ltype == object.ENUM_VALUE_OBJ || rtype == object.ENUM_VALUE_OBJ {
 		return vm.execEnumComparison(op, left, right)
 	}
 
+	// Structs, for the same reason again and with the sharpest edge of the
+	// four: a struct renders as `P { b: 2, a: 1 }`, so under the fallback the
+	// string spelling that text was equal to the record itself -- and until
+	// Inspect was given an order, the fallback could not even answer that two
+	// structs built from one literal were equal.
+	if ltype == object.STRUCT_OBJ || rtype == object.STRUCT_OBJ {
+		return vm.execStructComparison(op, left, right)
+	}
+
+	// Two arrays, or two hashes: equal when object.ValuesEqual says so, part
+	// by part. Under the fallback [7.9999991] was equal to [7.9999994], because
+	// Float.Inspect keeps six decimals. The evaluator asks the same question.
+	if ltype == rtype && (ltype == object.ARRAY_OBJ || ltype == object.HASH_OBJ) &&
+		(op == code.OpEqual || op == code.OpUnEqual) {
+		return vm.push(nativeBoolToBooleanObject(object.ValuesEqual(left, right) == (op == code.OpEqual)))
+	}
+
+	// The fallback compares rendered forms, and only between two values of one
+	// type: a value is never equal to a value of another type. Without the type
+	// guard, null (which renders as "") was equal to "", "0" to 0, "true" to
+	// true and [1] to "[1]" (M26-VM-010). Integer against float never gets
+	// here -- it took the numeric path above -- so 1 == 1.0 is still true.
+	// The evaluator's evalInfixExpression applies the same guard.
 	switch op {
 	case code.OpEqual:
-		return vm.push(nativeBoolToBooleanObject(right.Inspect() == left.Inspect()))
+		return vm.push(nativeBoolToBooleanObject(ltype == rtype && right.Inspect() == left.Inspect()))
 	case code.OpUnEqual:
-		return vm.push(nativeBoolToBooleanObject(right.Inspect() != left.Inspect()))
+		return vm.push(nativeBoolToBooleanObject(ltype != rtype || right.Inspect() != left.Inspect()))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2226,7 +2514,37 @@ func (vm *VM) execEnumComparison(op code.Opcode, left, right object.Object) erro
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
+	}
+}
+
+// execStructComparison decides equality for any comparison with a struct on
+// either side. Two structs are equal when they are the same type and hold an
+// equal value under every field name; a struct is never equal to a value of
+// another type, whatever it renders as.
+//
+// Structs used to reach the Inspect fallback, and Inspect ranged a Go map.
+// Ranging a map yields a different order on every call -- not merely on every
+// run -- so two structs built from the same literal were usually unequal, and a
+// struct was usually unequal to itself. Giving Inspect a declaration order
+// settles what is printed. It does not make a render the right thing to
+// compare, for exactly the reason it is not for bytes, errors and enum values.
+//
+// Ordering is undefined, as it is for those three. The operand domains behind
+// the analyzer's diagnostics are derived from these functions, and `<` on two
+// records has no meaning worth inventing here.
+func (vm *VM) execStructComparison(op code.Opcode, left, right object.Object) error {
+	leftStruct, leftOK := left.(*object.Struct)
+	rightStruct, rightOK := right.(*object.Struct)
+	equal := leftOK && rightOK && leftStruct.Equals(rightStruct)
+
+	switch op {
+	case code.OpEqual:
+		return vm.push(nativeBoolToBooleanObject(equal))
+	case code.OpUnEqual:
+		return vm.push(nativeBoolToBooleanObject(!equal))
+	default:
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2248,7 +2566,7 @@ func (vm *VM) execErrorComparison(op code.Opcode, left, right object.Object) err
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2271,7 +2589,7 @@ func (vm *VM) execBytesComparison(op code.Opcode, left, right object.Object) err
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2287,8 +2605,12 @@ func (vm *VM) execFloatComparison(op code.Opcode, left, right object.Object) err
 		return vm.push(nativeBoolToBooleanObject(leftValue > rightValue))
 	case code.OpGreaterEqual:
 		return vm.push(nativeBoolToBooleanObject(leftValue >= rightValue))
+	case code.OpLess:
+		return vm.push(nativeBoolToBooleanObject(leftValue < rightValue))
+	case code.OpLessEqual:
+		return vm.push(nativeBoolToBooleanObject(leftValue <= rightValue))
 	default:
-		return fmt.Errorf("unknown operator: %d", op)
+		return comparisonRefusal(op, left, right)
 	}
 }
 func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) error {
@@ -2303,8 +2625,12 @@ func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) e
 		return vm.push(nativeBoolToBooleanObject(leftValue > rightValue))
 	case code.OpGreaterEqual:
 		return vm.push(nativeBoolToBooleanObject(leftValue >= rightValue))
+	case code.OpLess:
+		return vm.push(nativeBoolToBooleanObject(leftValue < rightValue))
+	case code.OpLessEqual:
+		return vm.push(nativeBoolToBooleanObject(leftValue <= rightValue))
 	default:
-		return fmt.Errorf("unknown operator: %d", op)
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2397,13 +2723,28 @@ func (vm *VM) currentFrame() *Frame {
 	}
 	return vm.frames[vm.frameIndex-1]
 }
-func (vm *VM) pushFrame(f *Frame) {
+
+// pushFrame enters a frame, or refuses to because the call would be too deep.
+//
+// The refusal belongs here rather than in callClosure because this is the only
+// place a frame is entered. OpCall reaches it through callClosure and so does
+// CallClosureSync, the bridge the executor-native builtins call a closure through,
+// so one check bounds both -- and a path added later is bounded without having to
+// be told. Counting frames rather than calls is deliberate: a program that calls a
+// function sixty thousand times in a loop is ordinary, and a program with ten
+// thousand calls open at once is not.
+func (vm *VM) pushFrame(f *Frame) error {
+	if vm.frameIndex >= maxCallDepth {
+		return fmt.Errorf("this call would be %d deep, over the limit of %d nested calls",
+			vm.frameIndex+1, maxCallDepth)
+	}
 	vm.ensureFrameCapacity(vm.frameIndex + 1)
 	vm.frames[vm.frameIndex] = f
 	vm.frameIndex++
 	if f != nil && f.cl != nil && f.cl.Fn != nil {
 		vm.registerFrameIntegrity(f.cl.Fn)
 	}
+	return nil
 }
 func (vm *VM) popFrame() *Frame {
 	if vm.frameIndex <= 0 {
@@ -2421,27 +2762,47 @@ func (vm *VM) execCall(numArgs int) error {
 		return fmt.Errorf("call with %d arguments reaches outside the stack (sp=%d)", numArgs, vm.stackPointer)
 	}
 
+	// What stood here fell back to vm.stack[0] whenever the slot held anything
+	// that was not callable, so calling a non-function did not fail: it called
+	// whatever sat at the bottom of the stack, which is usually the function
+	// currently running or the first builtin the top-level statement pushed. A
+	// dispatch table with no entry for the value it was keyed on therefore
+	// re-invoked its own caller and handed back that result, with nothing
+	// reported anywhere. When that result was the caller itself the program did
+	// not merely answer wrongly -- it recursed until something stopped it, and
+	// the frame-integrity probe walks every active frame, so what stopped it
+	// was the clock. Only when stack[0] happened not to be callable either did
+	// the program get the refusal it should always have had. (M26-VM-003)
+	//
+	// The callee is read raw, and the raw slot is what gets called. A callable
+	// is never stored encrypted -- EncryptObject has no arm for a closure or a
+	// builtin -- and this switch is the same test the fallback's own condition
+	// made, so a working call pays nothing here and callClosure still receives
+	// the closure that is on the stack. Decrypting first would not: the
+	// CLOSURE_OBJ arm of DecryptObject rebuilds the closure around a fresh Free
+	// slice, which is both a copy per call and a second decryption of every
+	// free variable that OpGetFree decrypts again where it reads it.
+	switch callee := vm.stack[calleeIndex].(type) {
+	case *object.Closure:
+		return vm.callClosure(callee, numArgs)
+	case *builtin.BuiltIn:
+		return vm.callBuiltin(callee, numArgs)
+	}
+
+	// Not callable, so the only thing left to do is say what it was.
+	//
 	// A slot below the stack pointer can still be nil: callClosure raises the
 	// pointer over a frame's locals without writing them.
-	var callee object.Object
-	if at := vm.stack[calleeIndex]; at != nil && (at.Type() == object.CLOSURE_OBJ || at.Type() == object.BUILTIN_OBJ) {
-		callee = at
-	} else if len(vm.stack) > 0 {
-		callee = vm.stack[0]
-	}
-	if callee == nil {
-		return fmt.Errorf("calling non-function and non-built-in")
+	at := vm.stack[calleeIndex]
+	if at == nil {
+		return fmt.Errorf("calling non-function and non-built-in: the callee slot holds nothing")
 	}
 
-	switch calleeType := callee.(type) {
-	case *object.Closure:
-		return vm.callClosure(calleeType, numArgs)
-	case *builtin.BuiltIn:
-		return vm.callBuiltin(calleeType, numArgs)
-
-	default:
-		return fmt.Errorf("calling non-function and non-built-in")
-	}
+	// Decrypted here and nowhere else. A scalar on the stack is stored
+	// encrypted, so the raw slot reports ENCRYPTED where the author wrote an
+	// integer, and naming the stack's word instead of the program's would make
+	// the message useless to the person who has to fix the call.
+	return fmt.Errorf("calling non-function and non-built-in: %s", vm.decryptForUse(at).Type())
 }
 
 func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
@@ -2450,7 +2811,12 @@ func (vm *VM) callClosure(cl *object.Closure, numArgs int) error {
 	}
 
 	frame := NewFrame(cl, vm.stackPointer-numArgs)
-	vm.pushFrame(frame)
+	// Nothing is half-done when this fails: the frame was built but not entered and
+	// the stack pointer has not moved, so the error unwinds exactly like a wrong-arity
+	// one, and CallClosureSync's own restore puts a native re-entry back as it was.
+	if err := vm.pushFrame(frame); err != nil {
+		return err
+	}
 	vm.ensureStackCapacity(frame.bp + cl.Fn.NumLocals)
 	vm.stackPointer = frame.bp + cl.Fn.NumLocals
 	// Before boxing, so a captured local starts its cell empty rather than
@@ -2647,26 +3013,4 @@ func nativeBoolToBooleanObject(native bool) *object.Boolean {
 		return global.True
 	}
 	return global.False
-}
-
-func isTruthy(obj object.Object) bool {
-	// Conventional truthiness (dev-sec-platform-upgrades): false, null, empty
-	// string, 0 and 0.0 are falsy; everything else is truthy. This matches the
-	// webrepl path and removes the "" -is-truthy footgun.
-	switch o := obj.(type) {
-	case *object.Boolean:
-		return o.Value
-	case *object.Null:
-		return false
-	case *object.String:
-		return len(o.Value) != 0
-	case *object.Bytes:
-		return len(o.Value) != 0
-	case *object.Integer:
-		return o.Value != 0
-	case *object.Float:
-		return o.Value != 0
-	default:
-		return true
-	}
 }

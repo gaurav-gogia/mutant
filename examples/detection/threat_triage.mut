@@ -1,47 +1,57 @@
-// threat_triage.mut — run the detection heuristics over supplied evidence.
-//
-// Feeds facts to the detection builtins (suspicious files, C2 beaconing) and the
-// IOC helpers (extraction + defanging). All offline and self-contained.
+// Run the detection heuristics and IOC helpers over evidence the program writes itself.
 
-let header = fn(title) { putln("=== " + title + " ==="); };
+let dir = "example_output/threat_triage";
+
+let seed = fn(name, body) {
+    let path = dir + "/" + name;
+    let _, err = fs_write(path, body);
+    if (err) {
+        putln("[error] fs_write:", err);
+    }
+    return path;
+};
 
 let run = fn() {
-    header("threat_triage");
+    putln("=== threat_triage ===");
 
-    // Suspicious-file heuristics: double extensions, magic/extension mismatch.
-    let files = ["invoice.pdf.exe", "report.docx", "update.scr", "photo.jpg"];
-    let sus, err = detect_suspicious_files(files);
+    let _, err = fs_mkdir(dir);
+    if (err) {
+        putln("[error] fs_mkdir:", err);
+        return false;
+    }
+
+    let invoice = seed("invoice.pdf.exe", "benign looking content");
+    let report = seed("report.docx", "quarterly report, nothing to see");
+    let photo = seed("photo.jpg", "not really a jpeg either");
+    let found, err = detect_suspicious_files([invoice, report, photo]);
     if (err) {
         putln("[error] detect_suspicious_files:", err);
     } else {
-        putln("suspicious findings:", sus);
-    };
+        putln("suspicious findings:", found);
+    }
 
-    // Beacon detection over synthetic, highly-periodic flows (~60s interval,
-    // near-constant size) — the shape of C2 beaconing.
-    let flows = [
-        { "dst": "185.12.0.9", "ts": 1000, "bytes": 512 },
-        { "dst": "185.12.0.9", "ts": 1060, "bytes": 515 },
-        { "dst": "185.12.0.9", "ts": 1121, "bytes": 510 },
-        { "dst": "185.12.0.9", "ts": 1180, "bytes": 511 },
-        { "dst": "185.12.0.9", "ts": 1240, "bytes": 513 }
-    ];
-    let beacons, berr = detect_network_beacon(flows);
-    if (berr) {
-        putln("[error] detect_network_beacon:", berr);
+    // The read error is worded by the OS, so print only what reads the same everywhere.
+    let gone, err = detect_suspicious_files([dir + "/not_here.pdf.exe"]);
+    if (err) {
+        putln("[error] detect_suspicious_files:", err);
+    } else {
+        putln("unreadable scan, complete:", gone["complete"], "unread:", len(gone["unread"]));
+        putln("unreadable scan, name signals:", gone["unread"][0]["reasons"]);
+    }
+
+    let ip = "185.12.0.9";
+    let flows = [{"dst": ip, "ts": 1000, "bytes": 512}, {"dst": ip, "ts": 1060, "bytes": 515}, {"dst": ip, "ts": 1121, "bytes": 510}, {"dst": ip, "ts": 1180, "bytes": 511}, {"dst": ip, "ts": 1240, "bytes": 513}];
+    let beacons, err = detect_network_beacon(flows);
+    if (err) {
+        putln("[error] detect_network_beacon:", err);
     } else {
         putln("beacon analysis:", beacons);
-    };
+    }
 
-    // IOC extraction from free text, then defang for safe reporting.
-    let text = "seen beaconing to 185.12.0.9 and evil.example.com; " +
-        "dropper sha256 44d88612fea8a8f36de82e1278abb02f";
-    // extract_iocs cannot fail, so it returns one hash rather than a pair.
-    let iocs = extract_iocs(text);
+    let iocs = extract_iocs("seen beaconing to 185.12.0.9 and evil.example.com; dropper sha256 44d88612fea8a8f36de82e1278abb02f");
     putln("ipv4 IOCs   :", iocs["ipv4"]);
     putln("domain IOCs :", iocs["domains"]);
     putln("defanged URL:", defang("http://evil.example.com/payload"));
-
     return true;
 };
 

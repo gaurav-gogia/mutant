@@ -4,7 +4,9 @@ import (
 	"sync"
 
 	mast "mutant/ast"
+	localprotocol "mutant/lsp/internal/protocol"
 	"mutant/parser"
+	"mutant/sema"
 )
 
 // Snapshot is a parsed view of one document.
@@ -20,6 +22,19 @@ type Snapshot struct {
 	ParseErrors  []parser.ParseError
 	Recoverables []parser.RecoverableError
 
+	// ModuleKey and workspace are what this document knows about the rest of
+	// the program, and both are optional: a nil workspace means "this file and
+	// nothing else", which is exactly what the REPL, the playground, api.Lint
+	// and ~99 tests want, and what Analyze(src) has always produced.
+	//
+	// They are read-only here. The workspace is owned by the server and shared
+	// by every open document -- deliberately not per-snapshot, because a
+	// module's exports are read by every file that imports it and rebuilding
+	// them once per importer per keystroke is the latency regression no unit
+	// test would catch.
+	ModuleKey string
+	workspace *sema.Workspace
+
 	// typeMap is the lazily-built, best-effort type of each confidently-typed AST
 	// node (see infer.go). It powers hover/completion/inlay type info and has no
 	// runtime effect. Built once via typeOnce. structFields (structName ->
@@ -29,23 +44,71 @@ type Snapshot struct {
 	typeMap      map[mast.Node]Type
 	structFields map[string]map[string]Type
 
+	// graphOnce guards the name graph: which declaration each name in this
+	// document refers to, which declarations are in scope where, and where each
+	// one is used. It is sema.BuildFile's single walk, and it replaced five
+	// separate ones in this package. Built once, on the first question that
+	// needs it, so an analysis that only lints never pays for it.
+	graphOnce sync.Once
+	graph     *sema.Graph
+
+	// structIndexOnce guards the two lookups struct_type.go answers from: the
+	// struct literal each let-bound name was initialised from, keyed by the
+	// identifier that declares it, and the first top-level declaration of each
+	// struct name. Both were a walk per question, and the graph build and
+	// StructFieldDiagnostics ask once per field read (M26-SEM-004).
+	structIndexOnce sync.Once
+	structLiterals  map[*mast.Identifier]string
+	structDecls     map[string]*mast.StructStatement
+
 	// solvedOnce guards the constraint solver in fn_solver.go, which works out
-	// each user function's parameter kinds from how its body uses them. It runs
-	// before inference rather than inside it, because inference consumes its
-	// result: a parameter solved to a single kind is seeded into the function's
-	// scope, so the body — and therefore the return type — can be typed from it.
+	// how each user function's body uses its parameters. Only the function card
+	// reads it, as "used as STRING". Inference does not: it used to seed the
+	// result into each body, which made a usage deduction into every alias's,
+	// return's and call result's type (M26-SEM-003), so the solver is built only
+	// when a card is. It resolves every name through the graph, so building it
+	// builds the graph too; solvedFunctions has the rule that keeps that from
+	// deadlocking.
 	solvedOnce sync.Once
 	solvedFns  map[*mast.FunctionLiteral]*solvedFunction
+
+	// boundFnOnce guards boundFns, which maps each name a let binds to a
+	// function literal, at any depth, to that literal. Signature help, hover and
+	// inlay hints ask it once per call site, so it is built once.
+	boundFnOnce sync.Once
+	boundFns    map[*mast.Identifier]*mast.FunctionLiteral
+
+	// mapperOnce guards the index that converts between the byte columns the
+	// lexer and the AST record and the UTF-16 code units Position.character is
+	// measured in. The two agree on an ASCII line and on no other, so every
+	// position crossing the protocol boundary goes through it -- see
+	// protocol.Mapper for why the conversion lives at the boundary rather than
+	// in the lexer. Built from Source on the first question that needs one, so
+	// an analysis that answers none never pays for it.
+	mapperOnce sync.Once
+	mapper     *localprotocol.Mapper
 }
 
-// solvedFunctions returns the solved parameter kinds for every user function in
-// the document, building them once on first use.
+// solvedFunctions returns how the body of every user function in the document
+// uses its parameters, working it out once on first use.
+//
+// The solver asks the graph what each name refers to, so the first call builds
+// the graph from inside solvedOnce. That is safe for one reason, and the reason
+// has to stay true: nothing reachable from the graph's build calls this. The
+// build asks structHeldBy which struct a declaration holds, and structHeldBy
+// reaches the struct index (structIndexOnce) and the inference pass (typeOnce).
+// A sync.Once that is entered again from inside its own Do waits for itself, so
+// if anything on that path ever asked for the solver, the first card hovered
+// would hang solvedOnce -> graphOnce -> typeOnce -> solvedOnce, and a
+// deadlocked language server reports nothing at all. Inference stopped reading
+// the solver for reasons of its own (M26-SEM-003) and must not start again.
+// TestBuildingTheGraphNeverBuildsTheSolver pins the rule.
 func (s *Snapshot) solvedFunctions() map[*mast.FunctionLiteral]*solvedFunction {
 	if s == nil {
 		return nil
 	}
 	s.solvedOnce.Do(func() {
-		s.solvedFns = solveFunctionParams(s.Program)
+		s.solvedFns = solveFunctionParams(s)
 	})
 	return s.solvedFns
 }

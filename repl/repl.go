@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math/rand"
 	"mutant/ast"
 	"mutant/builtin"
@@ -376,11 +377,6 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 	if scanner.Err() != nil {
 		log.Fatalln(scanner.Err())
 	}
-	env := object.NewEnvironment()
-	lineReader := newInteractiveLineReader(in, out, env)
-	if lineReader != nil {
-		defer lineReader.Close()
-	}
 	macroEnv := object.NewEnvironment()
 
 	constants := []object.Object{}
@@ -391,9 +387,30 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 	// could be misled about. The announcement exists for artifacts that outlive
 	// the process; a REPL session produces none.
 	replPassword := mutil.GetPwd()
+	// One sealer for the whole session: it is what remembers which instruction
+	// length the constants carried between lines are currently encrypted under.
+	replSealer := mutil.NewReplSealer(replPassword)
 	symbolTable := compiler.NewSymbolTable()
 	for i, v := range builtin.Builtins {
 		symbolTable.DefineBuiltin(i, v.Name)
+	}
+
+	// Struct and enum declarations accumulate across lines. Each line compiles
+	// on its own, so a type declared on an earlier line has to be handed back
+	// to this line's compiler or it reads as undefined: `struct Point { x; y; }`
+	// followed by `let p = Point { x: 1, y: 2 };` reported "undefined struct
+	// type: Point". webrepl/repl.go carries the same two maps for the same
+	// reason and has since it was written; the terminal REPL was not given the
+	// same fix. (M26-TOOL-022)
+	structDefs := map[string][]*ast.Identifier{}
+	enumDefs := map[string][]string{}
+
+	// After the symbol table, because completion reads it: the names a session
+	// offers are the globals it has defined, and the table is the only place
+	// they exist. (M26-TOOL-024)
+	lineReader := newInteractiveLineReader(in, out, symbolTable)
+	if lineReader != nil {
+		defer lineReader.Close()
 	}
 
 	for {
@@ -410,7 +427,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 			return
 		}
 
-		if vanity(line, out, enableMacros, env) {
+		if vanity(line, out, symbolTable) {
 			if lineReader != nil {
 				lineReader.AddHistory(line, false)
 			}
@@ -424,7 +441,26 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 			if lineReader != nil {
 				lineReader.AddHistory(line, true)
 			}
-			errrs.PrintParseErrors(out, p.Errors())
+			// A REPL line has no path, so the prefix is line:col alone.
+			errrs.PrintParseErrors(out, p.PositionedErrors(""))
+			continue
+		}
+
+		// The refusal is decided from the parsed program and not from the typed
+		// text. macroCheck was a case-insensitive substring search for "macro",
+		// "quote" and "unquote" over the whole line, string literals and longer
+		// identifiers included, and a matching line was refused and never
+		// compiled -- so `let q = "a quote";` was rejected as macro use and the
+		// following `q;` then reported an undefined variable, and
+		// `let macroCount = 2;` could not be entered at all.
+		// evaluator.UsesMacros walks the tree with the walk ExpandMacros
+		// itself uses, so the REPL refuses exactly the lines the expander
+		// would act on. (M26-TOOL-021)
+		if !enableMacros && evaluator.UsesMacros(program) {
+			if lineReader != nil {
+				lineReader.AddHistory(line, true)
+			}
+			io.WriteString(out, macrosDisabledNotice)
 			continue
 		}
 
@@ -450,6 +486,7 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 		}
 
 		comp := compiler.NewWithState(symbolTable, constants)
+		comp.SeedTypeDefinitions(structDefs, enumDefs)
 		if err := comp.Compile(program); err != nil {
 			if lineReader != nil {
 				lineReader.AddHistory(line, true)
@@ -458,9 +495,24 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 			continue
 		}
 
-		byteCode := comp.ByteCode()
-		byteCode = mutil.EncryptByteCode(byteCode, replPassword)
+		// replSealer, not mutil.EncryptByteCode: the pool carries forward, so a
+		// function compiled on an earlier line is already encrypted and has to
+		// be re-keyed to this line's instruction length rather than encrypted
+		// again. See mutil.ReplSealer.
+		byteCode, sealErr := replSealer.Seal(comp.ByteCode())
+		if sealErr != nil {
+			if lineReader != nil {
+				lineReader.AddHistory(line, true)
+			}
+			errrs.PrintMachineError(out, sealErr.Error())
+			continue
+		}
 		constants = byteCode.Constants
+		// The declarations this line made, carried to the next one. Read off
+		// the sealed bytecode because Seal re-keys the pool in place and hands
+		// back the same ByteCode, which is where webrepl reads them too.
+		maps.Copy(structDefs, byteCode.StructDefs)
+		maps.Copy(enumDefs, byteCode.EnumDefs)
 
 		machine := vm.NewWithGlobalStoreAndPassword(byteCode, globals, replPassword)
 		if err := machine.Run(); err != nil {
@@ -468,7 +520,8 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 				lineReader.AddHistory(line, true)
 			}
 			globals = machine.GlobalStore()
-			machine.CleanupRuntimeSensitiveData(false, false)
+			// No CleanupRuntimeSensitiveData here; see the note at the end of
+			// the loop.
 			errrs.PrintMachineError(out, err.Error())
 			continue
 		}
@@ -483,6 +536,12 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 		}
 		if multi, ok := last.(*object.MultiValue); ok && multi.IsVoid() {
 			// No-op result; keep the REPL quiet.
+		} else if withheld, ok := builtin.WithheldEcho(last); ok {
+			// The REPL echoes every line's value, so it is the shortest route
+			// from a classified record to a terminal: `record_read(r, 0, 40)`
+			// typed at the prompt printed the buffer whole.
+			io.WriteString(out, withheld)
+			io.WriteString(out, "\n")
 		} else if last != nil {
 			io.WriteString(out, last.Inspect())
 			io.WriteString(out, "\n")
@@ -500,7 +559,29 @@ func Start(in io.Reader, out io.Writer, version string, enableMacros bool, theme
 			io.WriteString(out, "\n")
 		}
 		globals = machine.GlobalStore()
-		machine.CleanupRuntimeSensitiveData(false, false)
+		// Deliberately no CleanupRuntimeSensitiveData. Its stack sweep calls
+		// clearObjectSensitiveData on every stack slot, and a REPL's stack
+		// slots alias the state the session carries to the next line: an
+		// *object.Encrypted constant has its payload zeroed and its Value set
+		// to nil, and a closure's captured cells have their values dropped.
+		// Both are shared objects, not copies -- the constant pool is threaded
+		// through compiler.NewWithState and a global holds the very
+		// *object.CompiledFunction the pool holds.
+		//
+		// The damage was invisible only because M26-TOOL-013 made a call to an
+		// earlier line's function fail before it could be noticed. With that
+		// fixed, the sweep is what broke the next two cases: a constant in a
+		// function body used on a second call read back as ENCRYPTED
+		// ("unsupported types for binary operation: INTEGER, ENCRYPTED",
+		// because DecryptObject cannot XOR an emptied payload and the caller
+		// keeps the undecrypted object), and a closure called after the line
+		// that created it dereferenced a nil cell. (M26-TOOL-014)
+		//
+		// Removing it costs nothing it was achieving. A stack slot that is not
+		// shared becomes garbage the moment this VM is dropped, and a slot that
+		// is shared is exactly the one that must not be wiped; the sweep cannot
+		// tell them apart. serve.go and webrepl/repl.go reached the same
+		// conclusion for the same reason and say so in the same place.
 	}
 }
 
@@ -543,10 +624,28 @@ func (r *interactiveLineReader) AddHistory(line string, failed bool) {
 	r.browsingHistory = false
 }
 
-func newInteractiveLineReader(in io.Reader, out io.Writer, env *object.Environment) *interactiveLineReader {
+// newInteractiveLineReader returns the readline-backed reader for a keyboard,
+// or nil when there is no keyboard -- and nil is what makes Start fall back to
+// its bufio.Scanner, which reads anything.
+//
+// symbols is the session's symbol table and not a snapshot of it: completion
+// calls GlobalNames at the moment the user asks, so a name defined a line ago
+// is offered.
+func newInteractiveLineReader(in io.Reader, out io.Writer, symbols *compiler.SymbolTable) *interactiveLineReader {
 	stdinFile, inOK := in.(*os.File)
 	stdoutFile, outOK := out.(*os.File)
 	if !inOK || !outOK || stdinFile != os.Stdin || stdoutFile != os.Stdout {
+		return nil
+	}
+
+	// Being os.Stdin is not the same as being a terminal, and only the second
+	// one readline can work with. With stdin on a pipe -- `mutant < session.txt`
+	// or a heredoc -- readline read nothing, Start saw the first scan fail and
+	// returned, and the process exited 0 having run none of the input and
+	// reported no error. Only stdin is tested: stdout may be redirected while
+	// the keyboard is still a keyboard, which is an ordinary `mutant | tee`.
+	// (M26-TOOL-023)
+	if !readline.IsTerminal(int(stdinFile.Fd())) {
 		return nil
 	}
 
@@ -554,7 +653,7 @@ func newInteractiveLineReader(in io.Reader, out io.Writer, env *object.Environme
 
 	completer := readline.NewPrefixCompleter(
 		readline.PcItemDynamic(func(line string) []string {
-			return builtin.ReplCompletionCandidatesForLine(line, builtin.ReplHelpOptions{Symbols: env.Keys()})
+			return builtin.ReplCompletionCandidatesForLine(line, builtin.ReplHelpOptions{Symbols: symbols.GlobalNames()})
 		}),
 	)
 
@@ -639,15 +738,53 @@ func (r *interactiveLineReader) renderHistoryColor(failed bool) {
 	r.rl.SetPrompt(styledPrompt())
 }
 
+// currentUser is the os/user lookup the greeting makes, indirected so that a
+// test can make it fail. Nothing but the greeting reads it.
+var currentUser = lookupCurrentUser
+
+// lookupCurrentUser is user.Current behind a named function rather than
+// assigned straight to currentUser, because policy.EnvAccessAllowlist names an
+// enclosing function and a package-level initialiser has none: the env guard
+// reports `var currentUser = user.Current` as an access at package level, which
+// the allowlist cannot describe. user.Current reads $USER and $HOME in a
+// cgo-off build, which is why it is on that list at all.
+func lookupCurrentUser() (*user.User, error) {
+	return user.Current()
+}
+
+// greetingName is the name to greet this user by, or the empty string when the
+// host cannot say.
+//
+// welcome used to panic on a user.Current error, for a greeting. A release build
+// is CGO_ENABLED=0, which uses Go's pure-Go os/user: when the uid has no passwd
+// entry -- `docker run -u 12345` -- current() falls back to $USER and the home
+// directory and returns an error if either is missing, so `mutant` with no
+// arguments died with a Go panic before printing anything. (M26-TOOL-031)
+//
+// The same fallback sets `Name: "", // ignored` (os/user/lookup_stubs.go), so on
+// the hosts where it does not fail it returns a User with no Name and the
+// greeting read "Hello !". Username is the name such a host does know, and it
+// is tried before giving up on the name entirely.
+func greetingName() string {
+	u, err := currentUser()
+	if err != nil || u == nil {
+		return ""
+	}
+	if u.Name != "" {
+		return u.Name
+	}
+	return u.Username
+}
+
 func welcome(out io.Writer, version string, enableMacros bool) {
 	fmt.Fprint(out, styledBanner(randomBanner()))
 	fmt.Fprint(out, "\n")
 
-	user, err := user.Current()
-	if err != nil {
-		panic(err)
+	greeting := "Welcome to mutant, a programming language!"
+	if name := greetingName(); name != "" {
+		greeting = fmt.Sprintf("Hello %s! Welcome to mutant, a programming language!", name)
 	}
-	fmt.Fprintf(out, "%s\n", styledWelcomeLine(fmt.Sprintf("Hello %s! Welcome to mutant, a programming language!", user.Name)))
+	fmt.Fprintf(out, "%s\n", styledWelcomeLine(greeting))
 	fmt.Fprintf(out, "%s\n", styledInfoLine(fmt.Sprintf("Running %s with Process ID: %d", version, os.Getpid())))
 	if replColorEnabled {
 		fmt.Fprintf(out, "%s\n", styledInfoLine(fmt.Sprintf("REPL theme: %s", resolvedReplThemeName)))
@@ -665,19 +802,25 @@ func welcome(out io.Writer, version string, enableMacros bool) {
 	}
 }
 
-func vanity(line string, out io.Writer, enableMacros bool, env *object.Environment) bool {
+// vanity handles the lines that are commands to the REPL rather than programs,
+// and reports whether it handled one.
+//
+// It no longer decides anything about macros. That decision needs the parsed
+// program and so belongs after the parse, which is where Start makes it; see
+// evaluator.UsesMacros. (M26-TOOL-021)
+func vanity(line string, out io.Writer, symbols *compiler.SymbolTable) bool {
 	if line == "" {
 		return true
 	}
 
 	trimmed := trimCommandLine(line)
-	if handled := handleMetaHelpCommand(trimmed, out, env); handled {
+	if handled := handleMetaHelpCommand(trimmed, out); handled {
 		return true
 	}
-	if handled := handleHelpFunctionCommand(trimmed, out, env); handled {
+	if handled := handleHelpFunctionCommand(trimmed, out); handled {
 		return true
 	}
-	if handled := handleCompleteCommand(trimmed, out, env); handled {
+	if handled := handleCompleteCommand(trimmed, out, symbols); handled {
 		return true
 	}
 
@@ -711,17 +854,14 @@ func vanity(line string, out io.Writer, enableMacros bool, env *object.Environme
 		gracefulExit()
 	}
 
-	if enableMacros {
-		return false
-	}
-
-	if macroCheck(line) {
-		io.WriteString(out, "Macros are experimental features. To enable them, please use `-em or --enableMacros` CLI arguments while running Mutant REPL.")
-		return true
-	}
-
 	return false
 }
+
+// macrosDisabledNotice is what the REPL prints for a line that uses macros
+// without --enable-macros. The text is unchanged from when vanity printed it,
+// and it is printed without a trailing newline for the same reason: Start
+// begins every iteration with two.
+const macrosDisabledNotice = "Macros are experimental features. To enable them, please use `-em or --enableMacros` CLI arguments while running Mutant REPL."
 
 func trimCommandLine(line string) string {
 	trimmed := strings.TrimSpace(line)
@@ -731,13 +871,12 @@ func trimCommandLine(line string) string {
 	return trimmed
 }
 
-func handleMetaHelpCommand(trimmed string, out io.Writer, env *object.Environment) bool {
+func handleMetaHelpCommand(trimmed string, out io.Writer) bool {
 	lower := strings.ToLower(trimmed)
 	if lower == "help" {
 		helpText := builtin.RenderReplHelp("", builtin.ReplHelpOptions{})
 		io.WriteString(out, helpText)
 		io.WriteString(out, "\n")
-		_ = env
 		return true
 	}
 
@@ -758,11 +897,10 @@ func handleMetaHelpCommand(trimmed string, out io.Writer, env *object.Environmen
 	helpText := builtin.RenderReplHelp(topic, builtin.ReplHelpOptions{Mode: mode})
 	io.WriteString(out, helpText)
 	io.WriteString(out, "\n")
-	_ = env
 	return true
 }
 
-func handleHelpFunctionCommand(trimmed string, out io.Writer, env *object.Environment) bool {
+func handleHelpFunctionCommand(trimmed string, out io.Writer) bool {
 	lower := strings.ToLower(trimmed)
 	if !strings.HasPrefix(lower, "help(") || !strings.HasSuffix(trimmed, ")") {
 		return false
@@ -777,11 +915,18 @@ func handleHelpFunctionCommand(trimmed string, out io.Writer, env *object.Enviro
 	helpText := builtin.RenderReplHelp(topic, builtin.ReplHelpOptions{Mode: mode})
 	io.WriteString(out, helpText)
 	io.WriteString(out, "\n")
-	_ = env
 	return true
 }
 
-func handleCompleteCommand(trimmed string, out io.Writer, env *object.Environment) bool {
+// handleCompleteCommand answers `:complete <prefix>`.
+//
+// symbols is the session's own symbol table. It used to be an
+// *object.Environment that Start created and nothing ever wrote to, so
+// env.Keys() was always empty and the session's own bindings were never
+// offered: `let myvariable = 3;` then `:complete myva` printed "No completion
+// candidates." The names live in the compiler's symbol table, which is what the
+// browser REPL has always read. (M26-TOOL-024)
+func handleCompleteCommand(trimmed string, out io.Writer, symbols *compiler.SymbolTable) bool {
 	lower := strings.ToLower(trimmed)
 	if !strings.HasPrefix(lower, ":complete") {
 		return false
@@ -793,7 +938,7 @@ func handleCompleteCommand(trimmed string, out io.Writer, env *object.Environmen
 		prefix = parts[1]
 	}
 
-	candidates := builtin.ReplCompletionCandidatesForLine(prefix, builtin.ReplHelpOptions{Symbols: env.Keys()})
+	candidates := builtin.ReplCompletionCandidatesForLine(prefix, builtin.ReplHelpOptions{Symbols: symbols.GlobalNames()})
 	if len(candidates) == 0 {
 		io.WriteString(out, "No completion candidates.\n")
 		return true
@@ -1052,13 +1197,6 @@ func chanceOneIn(n int) bool {
 	return replRNG.Intn(n) == 0
 }
 
-func macroCheck(line string) bool {
-	lowerLine := strings.ToLower(line)
-	return strings.Contains(lowerLine, "macro") ||
-		strings.Contains(lowerLine, "quote") ||
-		strings.Contains(lowerLine, "unquote")
-}
-
 func isExitCommand(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	for strings.HasSuffix(trimmed, ";") {
@@ -1140,6 +1278,7 @@ func randomWelcomeMessage() string {
 }
 
 func gracefulExit() {
+	builtin.ReportForgottenHandles(os.Stderr)
 	fmt.Printf("\n\n")
 	fmt.Println(colorize(exitMessages[replRNG.Intn(len(exitMessages))], activeReplTheme.Exit))
 	fmt.Printf("\n\n")

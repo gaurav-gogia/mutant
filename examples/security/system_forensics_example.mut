@@ -1,3 +1,4 @@
+// Inspect the running process and the process table with the process_* builtins.
 putln("=== System Forensics Builtins ===");
 
 let procs, err = process_list();
@@ -21,7 +22,18 @@ putln("process_threads:", threads, "err:", err);
 let modules, err = process_modules();
 putln("process_modules:", modules, "err:", err);
 
-let scan, err = process_memory_scan(phash["pid"], "malware");
-putln("process_memory_scan:", scan, "err:", err);
+// Scanning this process is refused: the pattern itself is in the memory it would scan.
+let self_scan, err = process_memory_scan(phash["pid"], "malware");
+putln("process_memory_scan(self):", self_scan, "err:", err);
+
+// Another process's memory needs access to it, so without elevation expect a refusal.
+let target = phash["pid"];
+for (proc in procs) {
+    if (proc["pid"] != phash["pid"] && proc["pid"] > 0) {
+        target = proc["pid"];
+    }
+}
+let scan, err = process_memory_scan(target, "malware");
+putln("process_memory_scan(", target, "):", scan, "err:", err);
 
 putln("process_kill is available but intentionally not called in this example.");

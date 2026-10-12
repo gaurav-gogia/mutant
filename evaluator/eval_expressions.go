@@ -7,12 +7,21 @@ import (
 	"mutant/object"
 )
 
+// evalExpressions evaluates an argument list or an array literal's elements,
+// left to right, stopping at the first signal.
+//
+// The one-element slice is how a signal is reported: both callers test
+// `len(result) == 1 && isSignal(result[0])`. That is why the stop has to happen
+// here rather than in the callers -- a Break appended to the list alongside two
+// real operands arrives as a three-element slice and reads as three values. It
+// did, and `len([if (v == 2) { break; } else { v }])` answered 1 inside a loop
+// that should have ended.
 func evalExpressions(exps []ast.Expression, env *object.Environment) []object.Object {
 	var result []object.Object
 
 	for _, e := range exps {
 		evaluated := eval(e, env)
-		if isError(evaluated) {
+		if isSignal(evaluated) {
 			return []object.Object{evaluated}
 		}
 		result = append(result, evaluated)
@@ -30,23 +39,30 @@ func evalPrefixExpression(operator string, right object.Object) object.Object {
 	case "~":
 		// object.BitwiseNot rather than a local switch: the VM calls the same
 		// function, so the complement and its error message cannot drift.
-		return object.BitwiseNot(right)
+		return raised(object.BitwiseNot(right))
 	default:
 		return newError("unknown operator: %s%s", operator, right.Type())
 	}
 }
 
+// evalBangOperatorExpression is the tree-walker's `!`, and it answers exactly what
+// the VM's execBangOperation answers, because both ask object.IsTruthy.
+//
+// It used to switch on right.Inspect() against TRUE, FALSE and NULL's renderings,
+// and a rendering is not an identity. object.Null renders as the EMPTY STRING, so
+// the NULL arm caught `""` as well -- the right answer, by accident, and the reason
+// this engine looked correct on the one value the VM got most visibly wrong. The
+// FALSE arm caught the string "false", which is a non-empty string and therefore
+// truthy, so `!"false"` was true here and false in the VM. 0 and 0.0 matched
+// nothing and fell through to false, as in the VM.
+//
+// evalInfixExpression in this file already refuses to compare renderings -- for
+// buffers, errors and enum values -- and says why. `!` was left on Inspect.
+//
+// A nil operand reached right.Inspect() and panicked; object.IsTruthy answers false
+// for it, and applyFunction no longer produces one. See M26-VM-007, M26-EVL-020.
 func evalBangOperatorExpression(right object.Object) object.Object {
-	switch right.Inspect() {
-	case TRUE.Inspect():
-		return FALSE
-	case FALSE.Inspect():
-		return TRUE
-	case NULL.Inspect():
-		return TRUE
-	default:
-		return FALSE
-	}
+	return nativeBoolToBoolObject(!object.IsTruthy(right))
 }
 
 func evalMinusPrefixOperatorExpression(right object.Object) object.Object {
@@ -67,16 +83,25 @@ func evalInfixExpression(operator string, left, right object.Object) object.Obje
 	// evalStringInfixExpression with a different sentence than the VM uses.
 	if object.IsBitwiseOperator(operator) &&
 		(left.Type() != object.INTEGER_OBJ || right.Type() != object.INTEGER_OBJ) {
-		return object.BitwiseOperandError(operator, left, right)
+		return raised(object.BitwiseOperandError(operator, left, right))
 	}
 
 	switch {
 	case object.IsNumeric(left) && object.IsNumeric(right):
 		// Numeric arithmetic/comparison is shared with the WASM REPL via
 		// object.NumericInfix so the two tree-walking interpreters can't drift.
-		return object.NumericInfix(operator, left, right)
-	// Bytes are compared before the Inspect fallback below, which would
-	// otherwise make a buffer equal to the string spelling its own hex.
+		return raised(object.NumericInfix(operator, left, right))
+	// Functions compare by identity, and so does an array, hash or struct
+	// holding one. A function renders as its source text, so under the
+	// Inspect fallback two distinct functions with the same text were equal,
+	// and so were `[f]` and `[g]`. Mirrors the VM's branch in execComparison
+	// (M26-EVL-005). Ordering falls through to the refusals below.
+	case (operator == "==" || operator == "!=") &&
+		(object.HoldsFunction(left) || object.HoldsFunction(right)):
+		return nativeBoolToBoolObject(object.ValuesEqual(left, right) == (operator == "=="))
+	// Bytes are compared before the Inspect fallback below, which made a
+	// buffer equal to the string spelling its own hex before it had a type
+	// guard. This is where two buffers are compared: by content.
 	case left.Type() == object.BYTES_OBJ || right.Type() == object.BYTES_OBJ:
 		return evalBytesInfixExpression(operator, left, right)
 	// Errors likewise: the Inspect fallback renders a position this engine
@@ -89,10 +114,27 @@ func evalInfixExpression(operator string, left, right object.Object) object.Obje
 	// equal to the variant itself. Mirrors the VM's execEnumComparison.
 	case left.Type() == object.ENUM_VALUE_OBJ || right.Type() == object.ENUM_VALUE_OBJ:
 		return evalEnumInfixExpression(operator, left, right)
+	// Structs, for the same reason: a struct renders as `P { b: 2, a: 1 }`, so
+	// under the fallback a string spelling that text was equal to the record.
+	// Mirrors the VM's execStructComparison.
+	case left.Type() == object.STRUCT_OBJ || right.Type() == object.STRUCT_OBJ:
+		return evalStructInfixExpression(operator, left, right)
+	// Two arrays, or two hashes: equal when object.ValuesEqual says so, part by
+	// part. Under the fallback below [7.9999991] was equal to [7.9999994],
+	// because Float.Inspect keeps six decimals. Mirrors the VM's
+	// execComparison.
+	case (operator == "==" || operator == "!=") && left.Type() == right.Type() &&
+		(left.Type() == object.ARRAY_OBJ || left.Type() == object.HASH_OBJ):
+		return nativeBoolToBoolObject(object.ValuesEqual(left, right) == (operator == "=="))
+	// The Inspect fallback, and only between two values of one type: a value
+	// is never equal to a value of another type. Without the type guard, null
+	// (which renders as "") was equal to "", "0" to 0, "true" to true and [1]
+	// to "[1]" (M26-VM-010). Integer against float took the numeric case at
+	// the top, so 1 == 1.0 is still true. Mirrors the VM's execComparison.
 	case operator == "==":
-		return nativeBoolToBoolObject(left.Inspect() == right.Inspect())
+		return nativeBoolToBoolObject(left.Type() == right.Type() && left.Inspect() == right.Inspect())
 	case operator == "!=":
-		return nativeBoolToBoolObject(left.Inspect() != right.Inspect())
+		return nativeBoolToBoolObject(left.Type() != right.Type() || left.Inspect() != right.Inspect())
 	case left.Type() != right.Type():
 		return newError("type mismatch: %s%s%s", left.Type(), operator, right.Type())
 	case (left.Type() == object.STRING_OBJ) && (right.Type() == object.STRING_OBJ):
@@ -131,13 +173,35 @@ func evalEnumInfixExpression(operator string, left, right object.Object) object.
 	return newError("unknown operator: %s%s%s", left.Type(), operator, right.Type())
 }
 
-// evalMatchArmBody runs one arm's body in its own scope and answers null when
+// evalStructInfixExpression handles every operator with a struct on either
+// side. Only `==` and `!=` are defined; two structs are equal when they are the
+// same type and every field holds an equal value, and a struct is never equal
+// to a value of another type. This mirrors the VM's execStructComparison.
+func evalStructInfixExpression(operator string, left, right object.Object) object.Object {
+	leftStruct, leftOK := left.(*object.Struct)
+	rightStruct, rightOK := right.(*object.Struct)
+	equal := leftOK && rightOK && leftStruct.Equals(rightStruct)
+
+	switch operator {
+	case "==":
+		return nativeBoolToBoolObject(equal)
+	case "!=":
+		return nativeBoolToBoolObject(!equal)
+	}
+	return newError("unknown operator: %s%s%s", left.Type(), operator, right.Type())
+}
+
+// evalMatchArmBody answers null when
 // the body computed nothing -- a body ending in a `let`, a `for`, or nothing at
 // all. eval of such a block returns Go nil, and a match is an expression, so
 // returning that would hand a nil object.Object to whatever consumed the match.
 // The VM reaches the same answer by emitting OpNull for the same shape of body.
+// The arm's own scope is now the block's -- evalBlockStatement opens one for
+// every block -- so this no longer encloses one itself. Enclosing twice was
+// harmless but said that an arm's scope was special, and it is not: an arm is a
+// block, which is what Go's case clauses are.
 func evalMatchArmBody(arm *ast.MatchArm, env *object.Environment) object.Object {
-	result := eval(arm.Body, object.NewEnclosedEnvironement(env))
+	result := eval(arm.Body, env)
 	if result == nil {
 		return NULL
 	}
@@ -154,7 +218,7 @@ func evalMatchArmBody(arm *ast.MatchArm, env *object.Environment) object.Object 
 // some arm had produced it.
 func evalMatchExpression(node *ast.MatchExpression, env *object.Environment) object.Object {
 	subject := eval(node.Subject, env)
-	if isError(subject) {
+	if isSignal(subject) {
 		return subject
 	}
 
@@ -169,7 +233,7 @@ func evalMatchExpression(node *ast.MatchExpression, env *object.Environment) obj
 
 		for _, pattern := range arm.Patterns {
 			value := eval(pattern, env)
-			if isError(value) {
+			if isSignal(value) {
 				return value
 			}
 
@@ -177,7 +241,7 @@ func evalMatchExpression(node *ast.MatchExpression, env *object.Environment) obj
 			if isError(matched) {
 				return matched
 			}
-			if isTruthy(matched) {
+			if object.IsTruthy(matched) {
 				return evalMatchArmBody(arm, env)
 			}
 		}
@@ -234,15 +298,21 @@ func evalBytesInfixExpression(operator string, left, right object.Object) object
 	joined := make([]byte, 0, len(leftBytes.Value)+len(rightBytes.Value))
 	joined = append(joined, leftBytes.Value...)
 	joined = append(joined, rightBytes.Value...)
-	return &object.Bytes{Value: joined}
+	// As in the VM: classified plaintext joined to anything is still
+	// classified plaintext.
+	return &object.Bytes{Value: joined,
+		Classified: object.JoinClassification(leftBytes.Classified, rightBytes.Classified)}
 }
 
 func evalIfExpression(node *ast.IfExpression, env *object.Environment) object.Object {
 	condition := eval(node.Condition, env)
-	if isError(condition) {
+	if isSignal(condition) {
+		// Before IsTruthy. A Break is truthy, so the consequence used to run:
+		// `if (if (v == 2) { break; } else { false }) { n = n + 100; }` added
+		// 100 on the iteration that was meant to leave the loop.
 		return condition
 	}
-	if isTruthy(condition) {
+	if object.IsTruthy(condition) {
 		return evalBranchValue(node.Consequence, env)
 	} else if node.Alternative != nil {
 		return evalBranchValue(node.Alternative, env)
@@ -266,23 +336,21 @@ func evalBranchValue(branch *ast.BlockStatement, env *object.Environment) object
 }
 
 func evalArrayIndexExpression(array, index object.Object) object.Object {
-	arrayObject := array.(*object.Array)
-	idx := index.(*object.Integer).Value
-	max := int64(len(arrayObject.Elements) - 1)
-	if idx < 0 || idx > max {
+	elements := array.(*object.Array).Elements
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(elements))
+	if !ok {
 		return NULL
 	}
-	return arrayObject.Elements[idx]
+	return elements[at]
 }
 
 func evalMultiValueIndexExpression(multiValue, index object.Object) object.Object {
 	multi := multiValue.(*object.MultiValue)
-	idx := index.(*object.Integer).Value
-	max := int64(len(multi.Values) - 1)
-	if idx < 0 || idx > max {
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(multi.Values))
+	if !ok {
 		return NULL
 	}
-	return multi.Values[idx]
+	return multi.Values[at]
 }
 
 func evalHashIndexExpression(hash, index object.Object) object.Object {
@@ -306,6 +374,8 @@ func evalIndexExpression(left, index object.Object) object.Object {
 		return evalMultiValueIndexExpression(left, index)
 	case left.Type() == object.BYTES_OBJ && index.Type() == object.INTEGER_OBJ:
 		return evalBytesIndexExpression(left, index)
+	case left.Type() == object.STRING_OBJ && index.Type() == object.INTEGER_OBJ:
+		return evalStringIndexExpression(left, index)
 	case left.Type() == object.HASH_OBJ:
 		return evalHashIndexExpression(left, index)
 	case left.Type() == object.ERROR_OBJ && index.Type() == object.STRING_OBJ:
@@ -329,23 +399,27 @@ func evalErrorFieldIndexExpression(errObj, index object.Object) object.Object {
 
 // evalBytesIndexExpression yields the byte at i as an INTEGER 0-255, matching
 // the VM's execBytesIndex.
-//
-// The evaluator has never indexed strings -- the VM does, and that divergence
-// predates this type. Implementing bytes indexing in both engines is what stops
-// the new type from inheriting it.
 func evalBytesIndexExpression(buf, index object.Object) object.Object {
 	data := buf.(*object.Bytes).Value
-	i := index.(*object.Integer).Value
-	max := int64(len(data) - 1)
-
-	if i > max {
+	at, ok := object.IndexOf(index.(*object.Integer).Value, len(data))
+	if !ok {
 		return NULL
 	}
-	if i < 0 {
-		if max+i+1 < 0 {
-			return NULL
-		}
-		return &object.Integer{Value: int64(data[max+i+1])}
+	return &object.Integer{Value: int64(data[at])}
+}
+
+// evalStringIndexExpression yields the rune at i as a one-rune string, matching
+// the VM's execStringIndex.
+//
+// This engine did not index strings at all until now: `s[0]` was "index operator
+// not supported: STRING" here and a value in the VM, so one of the two was wrong
+// about a program either way. It is not dead code -- this is the engine that
+// computes unquote(...) during macro expansion -- and a divergence this wide is
+// worth more than the one line it costs to close.
+func evalStringIndexExpression(str, index object.Object) object.Object {
+	char, ok := object.RuneAt(str.(*object.String).Value, index.(*object.Integer).Value)
+	if !ok {
+		return NULL
 	}
-	return &object.Integer{Value: int64(data[i])}
+	return &object.String{Value: char}
 }

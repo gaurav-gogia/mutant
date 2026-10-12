@@ -6,6 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"mutant/compiler"
+	"mutant/global"
+	"mutant/lexer"
+	"mutant/parser"
+
 	"github.com/tliron/glsp"
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -34,6 +39,11 @@ func TestInitializeAdvertisesMVPCapabilities(t *testing.T) {
 
 	if result.ServerInfo == nil || result.ServerInfo.Name != serverName {
 		t.Fatalf("server info = %#v, want name %q", result.ServerInfo, serverName)
+	}
+	// The editor is told which language release this server teaches; it used
+	// to be told 0.1.0, a version no release of anything here ever had.
+	if result.ServerInfo.Version == nil || *result.ServerInfo.Version != global.Version {
+		t.Fatalf("server info version = %v, want global.Version %q", result.ServerInfo.Version, global.Version)
 	}
 
 	syncOpts, ok := result.Capabilities.TextDocumentSync.(*lsp.TextDocumentSyncOptions)
@@ -135,6 +145,16 @@ func TestInitializeAdvertisesMVPCapabilities(t *testing.T) {
 	}
 	if onType.FirstTriggerCharacter != "}" {
 		t.Fatalf("on-type first trigger = %q, want %q", onType.FirstTriggerCharacter, "}")
+	}
+	// Enter is not a trigger: reformatting the whole document on it removed
+	// the line Enter had just made, so a body could not be typed
+	// (M26-LSP-019). ';' still is.
+	triggers := append([]string{onType.FirstTriggerCharacter}, onType.MoreTriggerCharacter...)
+	if containsString(triggers, "\n") {
+		t.Fatalf("on-type triggers = %q, want no newline among them", triggers)
+	}
+	if !containsString(onType.MoreTriggerCharacter, ";") {
+		t.Fatalf("on-type more triggers = %q, want ';' among them", onType.MoreTriggerCharacter)
 	}
 }
 
@@ -300,10 +320,72 @@ func TestDidOpenPublishesMultipleParserDiagnosticsForRecoveredStatements(t *test
 	}
 }
 
+// TestDidOpenPublishesTheCompilersRefusal is the row's own repro (M26-LSP-028).
+// The editor never compiled the document, so a refusal reached it only when
+// some lint rule happened to reproduce it, and none reproduced this one: a
+// break inside a closure inside a loop belongs to no loop, `mutant gen` refuses
+// it, and the editor published nothing at all. The compiler's first refusal is
+// now published as an Error in its own words, on the node it was compiling.
+func TestDidOpenPublishesTheCompilersRefusal(t *testing.T) {
+	s := New(false)
+	initializeServer(t, s)
+
+	const text = "for (let i = 0; i < 2; i++) {\n    let f = fn() { break; };\n    f();\n}\n"
+	want, refused := compilerRefusalOf(text)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to publish", text)
+	}
+
+	notifications := make([]capturedNotification, 0, 1)
+	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///compiler-refusal.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       text,
+			},
+		}),
+		Notify: func(method string, params any) {
+			notifications = append(notifications, capturedNotification{method: method, params: params})
+		},
+	})
+	if err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+	if !validMethod || !validParams {
+		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
+	}
+
+	diag := onlyDiagnosticsNotification(t, notifications)
+	for _, d := range diag.Diagnostics {
+		if d.Message != want {
+			continue
+		}
+		if d.Severity == nil || *d.Severity != lsp.DiagnosticSeverityError {
+			t.Fatalf("the refusal's severity = %#v, want error", d.Severity)
+		}
+		if d.Source == nil || *d.Source != "mutant-compiler" {
+			t.Fatalf("the refusal's source = %#v, want mutant-compiler", d.Source)
+		}
+		// On `break;`, the statement the compiler was compiling, and not on the
+		// loop or the closure around it.
+		if d.Range.Start != (lsp.Position{Line: 1, Character: 19}) || d.Range.End.Line != 1 || d.Range.End.Character <= 19 {
+			t.Fatalf("the refusal's range = %+v, want one starting at 1:19 and ending on that line", d.Range)
+		}
+		return
+	}
+	t.Fatalf("published %#v; want the compiler's refusal %q", diagnosticMessages(diag.Diagnostics), want)
+}
+
 func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	// Two structs of one name compile -- the second replaces the first -- so
+	// that is a lint finding about a working program, a Warning in the rule's
+	// words. Two lets of one name do not compile, and that is the second half.
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -312,7 +394,7 @@ func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T
 				URI:        "file:///lint-duplicate.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let answer = 1;\nlet answer = 2;\n",
+				Text:       "struct Answer { value };\nstruct Answer { value };\n",
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -336,18 +418,70 @@ func TestDidOpenPublishesDuplicateTopLevelDeclarationLintDiagnostic(t *testing.T
 	if diag.Diagnostics[0].Source == nil || *diag.Diagnostics[0].Source != "mutant-lint" {
 		t.Fatalf("diagnostic source = %#v, want mutant-lint", diag.Diagnostics[0].Source)
 	}
-	if diag.Diagnostics[0].Message != "duplicate top-level declaration `answer`" {
+	if diag.Diagnostics[0].Message != "duplicate top-level declaration `Answer`" {
 		t.Fatalf("diagnostic message = %q, want duplicate declaration message", diag.Diagnostics[0].Message)
+	}
+	if diag.Diagnostics[0].Range.Start.Line != 1 || diag.Diagnostics[0].Range.Start.Character != 7 {
+		t.Fatalf("diagnostic range start = %+v, want line 1 char 7", diag.Diagnostics[0].Range.Start)
+	}
+
+	// A second let of a name its scope already holds is refused by the
+	// compiler, so it is published as that refusal -- an Error, in the
+	// compiler's words -- and as nothing else. The warning it was reported as
+	// before called a failed build a matter of style (M26-LSP-029).
+	const refusedText = "let answer = 1;\nlet answer = 2;\n"
+	want, refused := compilerRefusalOf(refusedText)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to publish", refusedText)
+	}
+	notifications = notifications[:0]
+	if _, _, _, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///lint-duplicate-let.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       refusedText,
+			},
+		}),
+		Notify: func(method string, params any) {
+			notifications = append(notifications, capturedNotification{method: method, params: params})
+		},
+	}); err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+
+	diag = onlyDiagnosticsNotification(t, notifications)
+	if len(diag.Diagnostics) != 1 {
+		t.Fatalf("diagnostic count = %d, want 1: %#v", len(diag.Diagnostics), diagnosticMessages(diag.Diagnostics))
+	}
+	if diag.Diagnostics[0].Severity == nil || *diag.Diagnostics[0].Severity != lsp.DiagnosticSeverityError {
+		t.Fatalf("diagnostic severity = %#v, want error", diag.Diagnostics[0].Severity)
+	}
+	if diag.Diagnostics[0].Source == nil || *diag.Diagnostics[0].Source != "mutant-declarations" {
+		t.Fatalf("diagnostic source = %#v, want mutant-declarations", diag.Diagnostics[0].Source)
+	}
+	if diag.Diagnostics[0].Message != want {
+		t.Fatalf("diagnostic message = %q, want the compiler's %q", diag.Diagnostics[0].Message, want)
 	}
 	if diag.Diagnostics[0].Range.Start.Line != 1 || diag.Diagnostics[0].Range.Start.Character != 4 {
 		t.Fatalf("diagnostic range start = %+v, want line 1 char 4", diag.Diagnostics[0].Range.Start)
 	}
 }
 
-func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLine(t *testing.T) {
+// TestRebindingTheReadValueHalfOfAPairIsReportedAsTheCompilersRefusal was
+// TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLine,
+// and pinned a silence. The rule excused this program by a heuristic -- a
+// grouped binding that was read could be rebound alone -- but the compiler
+// refuses it: the second let declares nothing its scope does not already hold.
+// The editor was quiet where the build failed (M26-LSP-029). It now publishes
+// the compiler's refusal, and still no duplicate warning beside it.
+func TestRebindingTheReadValueHalfOfAPairIsReportedAsTheCompilersRefusal(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let abc, err = gets();\nabc;\nerr;\nlet abc = 1;\nabc;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -356,7 +490,7 @@ func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLi
 				URI:        "file:///lint-duplicate-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let abc, err = gets();\nabc;\nerr;\nlet abc = 1;\nabc;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -376,12 +510,17 @@ func TestDuplicateDeclarationSuppressedWhenMultiNameBindingUsedOnImmediateNextLi
 			t.Fatalf("unexpected duplicate diagnostic for immediate-next-line usage case: %#v", d)
 		}
 	}
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 3 || refusal.Range.Start.Character != 4 {
+		t.Fatalf("refusal range start = %+v, want line 3 char 4", refusal.Range.Start)
+	}
 }
 
 func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let abc, err = gets();\nlet abc = 1;\nabc;\nerr;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -390,7 +529,7 @@ func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testi
 				URI:        "file:///lint-duplicate-not-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let abc, err = gets();\nlet abc = 1;\nabc;\nerr;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -404,23 +543,36 @@ func TestDuplicateDeclarationNotSuppressedWithoutImmediateNextLineUsage(t *testi
 		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// The compiler refuses the second let -- abc is already declared, and the
+	// let declares nothing else -- so what is reported is that refusal, an
+	// Error in the compiler's words, and not a lint warning (M26-LSP-029).
 	diag := onlyDiagnosticsNotification(t, notifications)
-	foundDuplicate := false
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 1 || refusal.Range.Start.Character != 4 {
+		t.Fatalf("refusal range start = %+v, want line 1 char 4", refusal.Range.Start)
+	}
 	for _, d := range diag.Diagnostics {
 		if d.Message == "duplicate top-level declaration `abc`" {
-			foundDuplicate = true
-			break
+			t.Fatalf("the refusal is reported a second time, as a lint warning: %#v", d)
 		}
-	}
-	if !foundDuplicate {
-		t.Fatalf("expected duplicate diagnostic, got messages: %#v", diagnosticMessages(diag.Diagnostics))
 	}
 }
 
-func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
+// TestRebindingTheReadValueHalfOfAPairInAFunctionIsReportedAsTheCompilersRefusal
+// was TestDuplicateDeclarationSuppressionAppliesInFunctionScope, the same
+// silence one scope down: a function body is a scope of its own, and the
+// compiler refuses the rebinding there too (M26-LSP-029).
+func TestRebindingTheReadValueHalfOfAPairInAFunctionIsReportedAsTheCompilersRefusal(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let run = fn() {\n" +
+		"  let abc, err = gets();\n" +
+		"  abc;\n" +
+		"  let abc = 1;\n" +
+		"  err;\n" +
+		"};\n" +
+		"run;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -429,13 +581,7 @@ func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
 				URI:        "file:///lint-duplicate-local-suppressed.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text: "let run = fn() {\n" +
-					"  let abc, err = gets();\n" +
-					"  abc;\n" +
-					"  let abc = 1;\n" +
-					"  err;\n" +
-					"};\n" +
-					"run;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -455,12 +601,23 @@ func TestDuplicateDeclarationSuppressionAppliesInFunctionScope(t *testing.T) {
 			t.Fatalf("unexpected local duplicate diagnostic in suppression case: %#v", d)
 		}
 	}
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 3 || refusal.Range.Start.Character != 6 {
+		t.Fatalf("refusal range start = %+v, want line 3 char 6", refusal.Range.Start)
+	}
 }
 
 func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
 
+	text := "let run = fn() {\n" +
+		"  let abc, err = gets();\n" +
+		"  let abc = 1;\n" +
+		"  abc;\n" +
+		"  err;\n" +
+		"};\n" +
+		"run;\n"
 	notifications := make([]capturedNotification, 0, 1)
 	_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
@@ -469,13 +626,7 @@ func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *tes
 				URI:        "file:///lint-duplicate-local.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text: "let run = fn() {\n" +
-					"  let abc, err = gets();\n" +
-					"  let abc = 1;\n" +
-					"  abc;\n" +
-					"  err;\n" +
-					"};\n" +
-					"run;\n",
+				Text:       text,
 			},
 		}),
 		Notify: func(method string, params any) {
@@ -489,16 +640,17 @@ func TestDuplicateDeclarationReportedInFunctionScopeWithoutImmediateUsage(t *tes
 		t.Fatalf("didOpen validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// Reported as the compiler's refusal, an Error in its words, and not as
+	// the local duplicate warning it once was (M26-LSP-029).
 	diag := onlyDiagnosticsNotification(t, notifications)
-	foundDuplicate := false
+	refusal := redeclarationRefusal(t, diag.Diagnostics, text)
+	if refusal.Range.Start.Line != 2 || refusal.Range.Start.Character != 6 {
+		t.Fatalf("refusal range start = %+v, want line 2 char 6", refusal.Range.Start)
+	}
 	for _, d := range diag.Diagnostics {
 		if d.Message == "duplicate declaration `abc`" {
-			foundDuplicate = true
-			break
+			t.Fatalf("the refusal is reported a second time, as a lint warning: %#v", d)
 		}
-	}
-	if !foundDuplicate {
-		t.Fatalf("expected local duplicate diagnostic, got messages: %#v", diagnosticMessages(diag.Diagnostics))
 	}
 }
 
@@ -1238,7 +1390,7 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 				URI:        "file:///cycle-defs.mut",
 				LanguageID: "mutant",
 				Version:    1,
-				Text:       "let shared = 1;\n",
+				Text:       "struct shared { n };\n",
 			},
 		}),
 		Notify: func(string, any) {},
@@ -1247,7 +1399,11 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 		t.Fatalf("didOpen defs returned error: %v", err)
 	}
 
-	usageText := "shared;\n"
+	// A struct name is the one declaration another file names bare, so this is
+	// a cross-file reference the compiler would also make. The import is what
+	// brings cycle-defs.mut into this file's closure.
+	const preamble = "import defs \"cycle-defs.mut\";\n"
+	usageText := preamble + "shared;\n"
 	_, _, _, err = s.handler.Handle(&glsp.Context{
 		Method: string(lsp.MethodTextDocumentDidOpen),
 		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
@@ -1266,9 +1422,9 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 
 	for i := 0; i < 30; i++ {
 		if i%2 == 0 {
-			usageText = "shared;\n"
+			usageText = preamble + "shared;\n"
 		} else {
-			usageText = "shared;\nshared;\n"
+			usageText = preamble + "shared;\nshared;\n"
 		}
 
 		_, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
@@ -1296,7 +1452,7 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 			Params: mustJSON(t, lsp.HoverParams{
 				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
 					TextDocument: lsp.TextDocumentIdentifier{URI: "file:///cycle-usage.mut"},
-					Position:     lsp.Position{Line: 0, Character: 1},
+					Position:     lsp.Position{Line: 1, Character: 1},
 				},
 			}),
 		})
@@ -1323,7 +1479,7 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 			Params: mustJSON(t, lsp.DefinitionParams{
 				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
 					TextDocument: lsp.TextDocumentIdentifier{URI: "file:///cycle-usage.mut"},
-					Position:     lsp.Position{Line: 0, Character: 1},
+					Position:     lsp.Position{Line: 1, Character: 1},
 				},
 			}),
 		})
@@ -1340,8 +1496,8 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 		if location.URI != "file:///cycle-defs.mut" {
 			t.Fatalf("definition iteration %d URI = %q, want file:///cycle-defs.mut", i, location.URI)
 		}
-		if location.Range.Start.Line != 0 || location.Range.Start.Character != 4 {
-			t.Fatalf("definition iteration %d start = %+v, want line 0 char 4", i, location.Range.Start)
+		if location.Range.Start.Line != 0 || location.Range.Start.Character != 7 {
+			t.Fatalf("definition iteration %d start = %+v, want line 0 char 7", i, location.Range.Start)
 		}
 
 		referencesAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
@@ -1349,7 +1505,7 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 			Params: mustJSON(t, lsp.ReferenceParams{
 				TextDocumentPositionParams: lsp.TextDocumentPositionParams{
 					TextDocument: lsp.TextDocumentIdentifier{URI: "file:///cycle-usage.mut"},
-					Position:     lsp.Position{Line: 0, Character: 1},
+					Position:     lsp.Position{Line: 1, Character: 1},
 				},
 				Context: lsp.ReferenceContext{IncludeDeclaration: true},
 			}),
@@ -1370,7 +1526,7 @@ func TestHoverDefinitionAndReferencesRemainStableAcrossRepeatedOpenChangeCycles(
 
 		foundDeclaration := false
 		for _, loc := range locations {
-			if loc.URI == "file:///cycle-defs.mut" && loc.Range.Start.Line == 0 && loc.Range.Start.Character == 4 {
+			if loc.URI == "file:///cycle-defs.mut" && loc.Range.Start.Line == 0 && loc.Range.Start.Character == 7 {
 				foundDeclaration = true
 				break
 			}
@@ -1663,10 +1819,11 @@ func TestSignatureHelpForUserDefinedFunctionCall(t *testing.T) {
 	if len(help.Signatures) != 1 {
 		t.Fatalf("signature count = %d, want 1", len(help.Signatures))
 	}
-	// Signature help for a user function now carries the solved kinds, the same
-	// way it has carried a builtin's declared ones since the parameter contracts
-	// landed.
-	wantLabel := "add(a: STRING|INTEGER|FLOAT, b: STRING|INTEGER|FLOAT)"
+	// Signature help for a user function shows its parameter names. The kinds
+	// the solver deduces describe how the body uses a parameter, not a type a
+	// caller is held to, so they are on the function card as "used as" and not
+	// here (M26-SEM-019).
+	wantLabel := "add(a, b)"
 	if help.Signatures[0].Label != wantLabel {
 		t.Fatalf("signature label = %q, want %q", help.Signatures[0].Label, wantLabel)
 	}
@@ -1786,11 +1943,15 @@ func TestCodeActionQuickFixForDuplicateDeclaration(t *testing.T) {
 		t.Fatalf("codeAction validity flags = method:%t params:%t", validMethod, validParams)
 	}
 
+	// The compiler refuses the second let, and its sentence names the remedy:
+	// write answer = ... instead. The fix is that edit. Deleting the line, the
+	// fix this once offered, compiled and quietly kept the first value
+	// (M26-LSP-029).
 	actions, ok := actionsAny.([]lsp.CodeAction)
 	if !ok || len(actions) == 0 {
 		t.Fatalf("codeAction result = %T (len=%d), want non-empty []CodeAction", actionsAny, len(actions))
 	}
-	if actions[0].Title != "Remove duplicate top-level declaration" {
+	if actions[0].Title != "Change the let to an assignment" {
 		t.Fatalf("code action title = %q", actions[0].Title)
 	}
 	if actions[0].Edit == nil {
@@ -1801,7 +1962,62 @@ func TestCodeActionQuickFixForDuplicateDeclaration(t *testing.T) {
 		t.Fatal("expected code action text edits")
 	}
 	updated := applyTextEdits(t, text, edits)
-	want := "let answer = 1;\n"
+	want := "let answer = 1;\nanswer = 2;\n"
+	if updated != want {
+		t.Fatalf("updated text = %q, want %q", updated, want)
+	}
+	if message, refused := compilerRefusalOf(updated); refused {
+		t.Fatalf("the compiler refuses the fixed text: %s", message)
+	}
+
+	// Two structs of one name compile, so that duplicate is still a lint
+	// warning, and its fix still removes the later declaration.
+	typeText := "struct Answer { value };\nstruct Answer { value };\nputln(Answer{value: 1});\n"
+	openNotifications = openNotifications[:0]
+	if _, _, _, err := s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentDidOpen),
+		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
+			TextDocument: lsp.TextDocumentItem{
+				URI:        "file:///code-action-duplicate-type.mut",
+				LanguageID: "mutant",
+				Version:    1,
+				Text:       typeText,
+			},
+		}),
+		Notify: func(method string, params any) {
+			openNotifications = append(openNotifications, capturedNotification{method: method, params: params})
+		},
+	}); err != nil {
+		t.Fatalf("didOpen returned error: %v", err)
+	}
+
+	typeDiags := onlyDiagnosticsNotification(t, openNotifications).Diagnostics
+	if len(typeDiags) != 1 || typeDiags[0].Message != "duplicate top-level declaration `Answer`" {
+		t.Fatalf("diagnostics = %#v, want the one duplicate warning", diagnosticMessages(typeDiags))
+	}
+	actionsAny, _, _, err = s.handler.Handle(&glsp.Context{
+		Method: string(lsp.MethodTextDocumentCodeAction),
+		Params: mustJSON(t, lsp.CodeActionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: "file:///code-action-duplicate-type.mut"},
+			Range:        typeDiags[0].Range,
+			Context:      lsp.CodeActionContext{Diagnostics: typeDiags},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("codeAction returned error: %v", err)
+	}
+	actions, ok = actionsAny.([]lsp.CodeAction)
+	if !ok || len(actions) == 0 {
+		t.Fatalf("codeAction result = %T (len=%d), want non-empty []CodeAction", actionsAny, len(actions))
+	}
+	if actions[0].Title != "Remove duplicate top-level declaration" {
+		t.Fatalf("code action title = %q", actions[0].Title)
+	}
+	if actions[0].Edit == nil {
+		t.Fatal("code action edit is nil")
+	}
+	updated = applyTextEdits(t, typeText, actions[0].Edit.Changes["file:///code-action-duplicate-type.mut"])
+	want = "struct Answer { value };\nputln(Answer{value: 1});\n"
 	if updated != want {
 		t.Fatalf("updated text = %q, want %q", updated, want)
 	}
@@ -2816,13 +3032,13 @@ func TestDocumentFormattingCanonicalizesExampleAccessSpacing(t *testing.T) {
 	}
 
 	updated := applyTextEdits(t, original, edits)
-	// Canonical form: four-space indent, fully parenthesised operator
-	// expressions, hash entries kept in authored order, and no stray `;`
-	// after the brace-terminated `if`.
+	// Canonical form: four-space indent, operator expressions with only the
+	// brackets the author wrote, hash entries kept in authored order, and no
+	// stray `;` after the brace-terminated `if`.
 	want := "// excerpt from ioc_event_triage\n" +
 		"let events = parsed[\"events\"];\n" +
 		"\n" +
-		"for (let i = 0; (i < event_count); i = (i + 1)) {\n" +
+		"for (let i = 0; i < event_count; i = i + 1) {\n" +
 		"    let ev = events[i];\n" +
 		"    if (ev[\"event\"] == \"auth_fail\") {\n" +
 		"        let updated_findings, err = push(findings, {\"src\": ev[\"src\"], \"count\": ev[\"count\"]});\n" +
@@ -2892,7 +3108,7 @@ func TestDocumentFormattingCanonicalizesTimelineAccessSpacing(t *testing.T) {
 	want := "// excerpt from mini_timeline_builder\n" +
 		"let files = parsed[\"files\"];\n" +
 		"\n" +
-		"for (let i = 0; (i < timeline_file_count); i = (i + 1)) {\n" +
+		"for (let i = 0; i < timeline_file_count; i = i + 1) {\n" +
 		"    let f = files[i];\n" +
 		"    let st, err = fs_stat(f);\n" +
 		"    check(db_index_prop(db, event_node, \"mod_time\", st[\"mod_time\"]), \"db_index_prop\");\n" +
@@ -2900,7 +3116,7 @@ func TestDocumentFormattingCanonicalizesTimelineAccessSpacing(t *testing.T) {
 		"    timeline = updated_timeline;\n" +
 		"}\n" +
 		"\n" +
-		"check(db_add_edge(db, event_nodes[(i - 1)], event_nodes[i], EDGE_NEXT_EVENT), \"db_add_edge\");\n"
+		"check(db_add_edge(db, event_nodes[i - 1], event_nodes[i], EDGE_NEXT_EVENT), \"db_add_edge\");\n"
 	if updated != want {
 		t.Fatalf("formatted timeline access text = %q, want %q", updated, want)
 	}
@@ -3150,7 +3366,9 @@ func TestHoverCompletionAndDocumentSymbols(t *testing.T) {
 	assertCompletionLabel(t, completionList.Items, "for loop")
 	assertCompletionLabel(t, completionList.Items, "function declaration")
 	assertCompletionLabel(t, completionList.Items, "if guard return")
-	assertCompletionLabel(t, completionList.Items, "for loop over array")
+	assertCompletionLabel(t, completionList.Items, "for ... in loop")
+	assertCompletionLabel(t, completionList.Items, "for ... in loop, both halves")
+	assertCompletionLabel(t, completionList.Items, "while loop")
 	assertCompletionLabel(t, completionList.Items, "function declaration with docs")
 	assertCompletionLabel(t, completionList.Items, "struct value")
 	assertCompletionLabel(t, completionList.Items, "enum variant usage")
@@ -3334,13 +3552,14 @@ func TestHoverOnFunctionIdentifierIncludesSignatureAndDocComment(t *testing.T) {
 		t.Fatalf("hover contents type = %T, want MarkupContent", hover.Contents)
 	}
 	// `a + b` is the VM's binary operation, which accepts INTEGER x INTEGER,
-	// STRING x STRING, or numeric x numeric — so the solver narrows both
-	// parameters to exactly those three kinds and no further.
-	if !strings.Contains(contents.Value, "function `add(a: STRING|INTEGER|FLOAT, b: STRING|INTEGER|FLOAT)") {
-		t.Fatalf("hover contents = %q, want the solved function signature", contents.Value)
+	// STRING x STRING, BYTES x BYTES, or numeric x numeric — so the solver
+	// narrows both parameters to exactly those four kinds and no further. The
+	// card says it as a use and keeps it off the signature line (M26-SEM-019).
+	if !strings.Contains(contents.Value, "function `add(a, b)`") {
+		t.Fatalf("hover contents = %q, want the function signature", contents.Value)
 	}
-	if !strings.Contains(contents.Value, "- `a` · `STRING|INTEGER|FLOAT` _(inferred)_") {
-		t.Fatalf("hover contents = %q, want a typed parameter bullet", contents.Value)
+	if !strings.Contains(contents.Value, "- `a` _(used as STRING|BYTES|INTEGER|FLOAT)_") {
+		t.Fatalf("hover contents = %q, want a parameter bullet saying how a is used", contents.Value)
 	}
 	if !strings.Contains(contents.Value, "Adds two numbers together") {
 		t.Fatalf("hover contents = %q, want doc comment", contents.Value)
@@ -3566,141 +3785,6 @@ func TestDefinitionResolvesTopLevelAndParameterBindings(t *testing.T) {
 	}
 	if paramLocation.Range.Start.Line != 0 || paramLocation.Range.Start.Character != 16 {
 		t.Fatalf("parameter definition start = %+v, want line 0 char 16", paramLocation.Range.Start)
-	}
-}
-
-func TestDefinitionResolvesWorkspaceTopLevelBindingAcrossFiles(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///defs.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///usage.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	defAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDefinition),
-		Params: mustJSON(t, lsp.DefinitionParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///usage.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("definition returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("definition validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	location, ok := defAny.(*lsp.Location)
-	if !ok || location == nil {
-		t.Fatalf("definition result type = %T, want *Location", defAny)
-	}
-	if location.URI != "file:///defs.mut" {
-		t.Fatalf("definition URI = %q, want file:///defs.mut", location.URI)
-	}
-	if location.Range.Start.Line != 0 || location.Range.Start.Character != 4 {
-		t.Fatalf("definition start = %+v, want line 0 char 4", location.Range.Start)
-	}
-}
-
-func TestDefinitionWorkspaceFallbackSkipsAmbiguousTopLevelBindings(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///defs-a.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-a returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///defs-b.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 2;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-b returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///usage-ambiguous.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	defAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDefinition),
-		Params: mustJSON(t, lsp.DefinitionParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///usage-ambiguous.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("definition returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("definition validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	if defAny != nil {
-		t.Fatalf("definition result = %T, want nil for ambiguous workspace symbol", defAny)
 	}
 }
 
@@ -4153,172 +4237,6 @@ func TestReferencesResolveLexicalBindings(t *testing.T) {
 	assertLocationStart(t, locations, 2, 2)
 }
 
-func TestReferencesResolveWorkspaceTopLevelBindingAcrossFiles(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///refs-defs.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///refs-usage.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared + 1;\nshared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	referencesAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentReferences),
-		Params: mustJSON(t, lsp.ReferenceParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///refs-usage.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-			Context: lsp.ReferenceContext{IncludeDeclaration: true},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("references returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("references validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	locations, ok := referencesAny.([]lsp.Location)
-	if !ok {
-		t.Fatalf("references result type = %T, want []Location", referencesAny)
-	}
-	if len(locations) != 3 {
-		t.Fatalf("reference count = %d, want 3", len(locations))
-	}
-	assertLocationURIStart(t, locations, "file:///refs-defs.mut", 0, 4)
-	assertLocationURIStart(t, locations, "file:///refs-usage.mut", 0, 0)
-	assertLocationURIStart(t, locations, "file:///refs-usage.mut", 1, 0)
-
-	referencesAny, validMethod, validParams, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentReferences),
-		Params: mustJSON(t, lsp.ReferenceParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///refs-usage.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-			Context: lsp.ReferenceContext{IncludeDeclaration: false},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("references without declaration returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("references without declaration validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	locations, ok = referencesAny.([]lsp.Location)
-	if !ok {
-		t.Fatalf("references without declaration result type = %T, want []Location", referencesAny)
-	}
-	if len(locations) != 2 {
-		t.Fatalf("reference count without declaration = %d, want 2", len(locations))
-	}
-	assertLocationURIStart(t, locations, "file:///refs-usage.mut", 0, 0)
-	assertLocationURIStart(t, locations, "file:///refs-usage.mut", 1, 0)
-}
-
-func TestReferencesWorkspaceFallbackSkipsAmbiguousTopLevelBindings(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///refs-defs-a.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-a returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///refs-defs-b.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 2;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-b returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///refs-usage-ambiguous.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	referencesAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentReferences),
-		Params: mustJSON(t, lsp.ReferenceParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///refs-usage-ambiguous.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-			Context: lsp.ReferenceContext{IncludeDeclaration: true},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("references returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("references validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	if referencesAny != nil {
-		if locations, ok := referencesAny.([]lsp.Location); ok && len(locations) == 0 {
-			return
-		}
-		t.Fatalf("references result = %T, want nil/empty for ambiguous workspace symbol", referencesAny)
-	}
-}
-
 func TestPrepareRenameAndRenameWorkspaceEdit(t *testing.T) {
 	s := New(false)
 	initializeServer(t, s)
@@ -4394,286 +4312,6 @@ func TestPrepareRenameAndRenameWorkspaceEdit(t *testing.T) {
 	}
 	assertTextEdit(t, changes, 1, 6, "value")
 	assertTextEdit(t, changes, 2, 2, "value")
-}
-
-func TestPrepareRenameResolvesWorkspaceTopLevelBindingAcrossFiles(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///prepare-defs.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///prepare-usage.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	prepareAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentPrepareRename),
-		Params: mustJSON(t, lsp.PrepareRenameParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///prepare-usage.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("prepareRename returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("prepareRename validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	rangeWithPlaceholder, ok := prepareAny.(*lsp.RangeWithPlaceholder)
-	if !ok || rangeWithPlaceholder == nil {
-		t.Fatalf("prepareRename result type = %T, want *RangeWithPlaceholder", prepareAny)
-	}
-	if rangeWithPlaceholder.Placeholder != "shared" {
-		t.Fatalf("prepareRename placeholder = %q, want shared", rangeWithPlaceholder.Placeholder)
-	}
-	if rangeWithPlaceholder.Range.Start.Line != 0 || rangeWithPlaceholder.Range.Start.Character != 0 {
-		t.Fatalf("prepareRename start = %+v, want line 0 char 0", rangeWithPlaceholder.Range.Start)
-	}
-}
-
-func TestPrepareRenameWorkspaceFallbackSkipsAmbiguousTopLevelBindings(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///prepare-defs-a.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-a returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///prepare-defs-b.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 2;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-b returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///prepare-usage-ambiguous.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	prepareAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentPrepareRename),
-		Params: mustJSON(t, lsp.PrepareRenameParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///prepare-usage-ambiguous.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-		}),
-	})
-	if err != nil {
-		t.Fatalf("prepareRename returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("prepareRename validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	if prepareAny != nil {
-		t.Fatalf("prepareRename result = %T, want nil for ambiguous workspace symbol", prepareAny)
-	}
-}
-
-func TestRenameResolvesWorkspaceTopLevelBindingAcrossFiles(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///rename-defs.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///rename-usage.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared + 1;\nshared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	renameAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentRename),
-		Params: mustJSON(t, lsp.RenameParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///rename-usage.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-			NewName: "value",
-		}),
-	})
-	if err != nil {
-		t.Fatalf("rename returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("rename validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	edit, ok := renameAny.(*lsp.WorkspaceEdit)
-	if !ok || edit == nil {
-		t.Fatalf("rename result type = %T, want *WorkspaceEdit", renameAny)
-	}
-	defsChanges := edit.Changes["file:///rename-defs.mut"]
-	usageChanges := edit.Changes["file:///rename-usage.mut"]
-	if len(defsChanges) != 1 {
-		t.Fatalf("defs rename edit count = %d, want 1", len(defsChanges))
-	}
-	if len(usageChanges) != 2 {
-		t.Fatalf("usage rename edit count = %d, want 2", len(usageChanges))
-	}
-	assertTextEdit(t, defsChanges, 0, 4, "value")
-	assertTextEdit(t, usageChanges, 0, 0, "value")
-	assertTextEdit(t, usageChanges, 1, 0, "value")
-}
-
-func TestRenameWorkspaceFallbackSkipsAmbiguousTopLevelBindings(t *testing.T) {
-	s := New(false)
-	initializeServer(t, s)
-
-	_, _, _, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///rename-defs-a.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 1;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-a returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///rename-defs-b.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "let shared = 2;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen defs-b returned error: %v", err)
-	}
-
-	_, _, _, err = s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentDidOpen),
-		Params: mustJSON(t, lsp.DidOpenTextDocumentParams{
-			TextDocument: lsp.TextDocumentItem{
-				URI:        "file:///rename-usage-ambiguous.mut",
-				LanguageID: "mutant",
-				Version:    1,
-				Text:       "shared;\n",
-			},
-		}),
-		Notify: func(string, any) {},
-	})
-	if err != nil {
-		t.Fatalf("didOpen usage returned error: %v", err)
-	}
-
-	renameAny, validMethod, validParams, err := s.handler.Handle(&glsp.Context{
-		Method: string(lsp.MethodTextDocumentRename),
-		Params: mustJSON(t, lsp.RenameParams{
-			TextDocumentPositionParams: lsp.TextDocumentPositionParams{
-				TextDocument: lsp.TextDocumentIdentifier{URI: "file:///rename-usage-ambiguous.mut"},
-				Position:     lsp.Position{Line: 0, Character: 1},
-			},
-			NewName: "value",
-		}),
-	})
-	if err != nil {
-		t.Fatalf("rename returned error: %v", err)
-	}
-	if !validMethod || !validParams {
-		t.Fatalf("rename validity flags = method:%t params:%t", validMethod, validParams)
-	}
-	if renameAny != nil {
-		if edit, ok := renameAny.(*lsp.WorkspaceEdit); ok && edit == nil {
-			return
-		}
-		t.Fatalf("rename result = %T, want nil/empty for ambiguous workspace symbol", renameAny)
-	}
 }
 
 func TestPrepareRenameRejectsNonIdentifierPosition(t *testing.T) {
@@ -6120,6 +5758,43 @@ func diagnosticMessages(diagnostics []lsp.Diagnostic) []string {
 		messages = append(messages, diagnostic.Message)
 	}
 	return messages
+}
+
+// compilerRefusalOf compiles src as `mutant gen` compiles a file with no
+// imports and no macros, and returns the first line of what the compiler
+// refused, if it refused anything. A test that says the build refuses a
+// program decides it here, by compiling, rather than by assertion.
+func compilerRefusalOf(src string) (string, bool) {
+	err := compiler.New().Compile(parser.New(lexer.New(src)).ParseProgram())
+	if err == nil {
+		return "", false
+	}
+	return strings.SplitN(err.Error(), "\n", 2)[0], true
+}
+
+// redeclarationRefusal returns the refusal of a redeclaring let that was
+// published for text. It must be an Error from mutant-declarations, in exactly
+// the words the compiler refuses text with.
+func redeclarationRefusal(t *testing.T, published []lsp.Diagnostic, text string) lsp.Diagnostic {
+	t.Helper()
+	want, refused := compilerRefusalOf(text)
+	if !refused {
+		t.Fatalf("the compiler accepts %q, so there is no refusal to report", text)
+	}
+	for _, diagnostic := range published {
+		if diagnostic.Source == nil || *diagnostic.Source != "mutant-declarations" {
+			continue
+		}
+		if diagnostic.Message != want {
+			t.Fatalf("the refusal reads %q, want the compiler's %q", diagnostic.Message, want)
+		}
+		if diagnostic.Severity == nil || *diagnostic.Severity != lsp.DiagnosticSeverityError {
+			t.Fatalf("the refusal's severity = %#v, want error", diagnostic.Severity)
+		}
+		return diagnostic
+	}
+	t.Fatalf("no mutant-declarations refusal was published for %q; published %#v", text, diagnosticMessages(published))
+	return lsp.Diagnostic{}
 }
 
 type decodedSemanticToken struct {

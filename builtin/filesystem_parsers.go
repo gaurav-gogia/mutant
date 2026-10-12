@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	libext "github.com/aoiflux/libext"
 	libfat "github.com/aoiflux/libfat"
@@ -31,6 +32,58 @@ type ntfsListEntry struct {
 	Deleted       bool
 	Size          uint64
 	AllocatedSize uint64
+	SizeSource    string
+}
+
+// Where a listed size came from, which on NTFS is not one answer. The
+// directory index keeps its own copy of each entry's length and NTFS updates
+// it lazily, so the copy is routinely stale and routinely zero; the $DATA
+// attribute is where the length actually lives. A caller that cannot tell the
+// two apart cannot tell a 0-byte file from one whose index entry was never
+// caught up.
+const (
+	// ntfsSizeFromData: read from the unnamed $DATA attribute. Authoritative.
+	ntfsSizeFromData = "data_attribute"
+	// ntfsSizeNoData: the path addresses no $DATA at all, so its length is
+	// zero and that is the whole truth. A directory, or a file holding its
+	// content only in named streams.
+	ntfsSizeNoData = "no_data_attribute"
+	// ntfsSizeFromIndex: the $FILE_NAME copy, used only when the $DATA could
+	// not be reached. It may be stale. A deleted entry is the ordinary case,
+	// because it no longer opens by path.
+	ntfsSizeFromIndex = "index_record"
+)
+
+// ntfsResolveEntrySize reads one listed entry's length from its $DATA
+// attribute instead of from the $FILE_NAME copy ReadDir hands back.
+//
+// The copy is stale often enough to matter: on a stock 1 GiB volume four live
+// files hold 4,259,940 bytes between them while the index records 0 for every
+// one, and $MFT records 16,384 against an actual 2,097,152. M26-FS2-002 fixed
+// the same trap on the recovery path, where it truncated recovered files; this
+// is the live listing, which published it as the size.
+//
+// The length comes from the unnamed stream rather than from File.Size(),
+// because Size() follows whichever $DATA attribute libntfs selected and on a
+// path with no unnamed stream that is an alternate one -- it reports 264472 for
+// $Secure, the length of its $SDS stream. See ntfsNamedOnlyStreams.
+//
+// The index values are passed in so that a path which cannot be opened keeps
+// the only length that exists for it, labelled as that rather than as a
+// resolved one.
+func ntfsResolveEntrySize(volume *libntfs.Volume, entryPath string, indexSize, indexAllocated uint64) (size, allocated uint64, source string) {
+	f, err := volume.OpenPath(normalizeFSPath(entryPath))
+	if err != nil || f == nil {
+		return indexSize, indexAllocated, ntfsSizeFromIndex
+	}
+
+	for _, info := range f.Streams() {
+		if !info.IsAlternate() {
+			return info.Size, info.AllocatedSize, ntfsSizeFromData
+		}
+	}
+
+	return 0, 0, ntfsSizeNoData
 }
 
 type ntfsMetadata struct {
@@ -56,23 +109,45 @@ type ntfsMetadata struct {
 type ntfsSession interface {
 	ListFiles(dirPath string) ([]ntfsListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (ntfsMetadata, error)
+	ScanDeleted() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	ScanUSNJournal() (fsJournalScan, error)
+	ScanLogRecords() (fsJournalScan, error)
+	ScanLogTransactions() (fsJournalScan, error)
+	Slack(filePath string) (fsSlackScan, error)
+	Streams(filePath string) (fsStreamScan, error)
+	OpenStream(filePath, streamName string) (fsFileReader, error)
+	Security(filePath string) (fsSecurityScan, error)
+	SecurityIndex() (fsSecurityIndex, error)
+	Reparse(filePath string) (fsReparseScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type ntfsBackend interface {
-	Open(volumePath string) (ntfsSession, error)
+	Open(volumePath string, region fsRegion) (ntfsSession, error)
 }
 
 type realNTFSBackend struct{}
 
 type realNTFSSession struct {
 	img    *os.File
+	reader io.ReaderAt
 	volume *libntfs.Volume
+
+	// recovery remembers the entries of the last deleted scan on this
+	// handle, which is what ntfs_recover_file names one from. See
+	// filesystem_recover.go.
+	recovery fsRecoveryCache
 }
 
 type ntfsHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    ntfsSession
 }
 
@@ -117,23 +192,37 @@ type fatMetadata struct {
 type fatSession interface {
 	ListFiles(dirPath string) ([]fatListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (fatMetadata, error)
+	ScanDeleted() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	Slack(filePath string) (fsSlackScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type fatBackend interface {
-	Open(volumePath string) (fatSession, error)
+	Open(volumePath string, region fsRegion) (fatSession, error)
 }
 
 type realFATBackend struct{}
 
 type realFATSession struct {
 	img    *os.File
+	reader io.ReaderAt
 	volume *libfat.Volume
+
+	// recovery also keeps libfat's own directory entries: the contiguity
+	// hypothesis is derived by the library from the entry, never by
+	// arithmetic here. See filesystem_recover.go.
+	recovery fatRecoveryCache
 }
 
 type fatHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    fatSession
 }
 
@@ -150,7 +239,7 @@ type xfatTimes struct {
 }
 
 func xfatTimesFromEntry(entry libxfat.Entry) xfatTimes {
-	ts := entry.GetTimestamps()
+	ts := entry.Timestamps()
 	return xfatTimes{
 		CreatedAt:           formatTime(ts.Created),
 		ModifiedAt:          formatTime(ts.Modified),
@@ -209,28 +298,41 @@ type xfatMetadata struct {
 type xfatSession interface {
 	ListFiles(dirPath string) ([]xfatListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (xfatMetadata, error)
+	ScanDeleted() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	Slack(filePath string) (fsSlackScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type xfatBackend interface {
-	Open(volumePath string) (xfatSession, error)
+	Open(volumePath string, region fsRegion) (xfatSession, error)
 }
 
 type realXFATBackend struct{}
 
 type realXFATSession struct {
-	img   *os.File
-	fs    *libxfat.ExFAT
-	cache map[string]libxfat.Entry
+	img    *os.File
+	reader io.ReaderAt
+	fs     *libxfat.ExFAT
+	cache  map[string]libxfat.Entry
 	// mu guards path resolution (the cache map + volume reads within it). XFAT
 	// handles can be shared across concurrent serve goroutines, and an
 	// unsynchronized map write is a fatal "concurrent map writes" crash.
 	mu sync.Mutex
+
+	// recovery carries its own lock and is not guarded by mu; the two
+	// protect different things and a recovery does no path resolution.
+	recovery xfatRecoveryCache
 }
 
 type xfatHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    xfatSession
 }
 
@@ -269,23 +371,47 @@ type extMetadata struct {
 type extSession interface {
 	ListFiles(dirPath string) ([]extListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (extMetadata, error)
+	ScanDeleted() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	ScanJournal() (fsJournalScan, error)
+	JournalBlockCopies(fsBlock int64) (fsJournalScan, error)
+	JournalInodeVersions(inode int64) (fsJournalScan, error)
+	RecoverJournalledFile(inode, version int64) (fsRecovery, error)
+	Slack(filePath string) (fsSlackScan, error)
+	DirSlack(dirPath string) (fsDirSlackScan, error)
+	Xattrs(filePath string) (fsXattrScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type extBackend interface {
-	Open(volumePath string) (extSession, error)
+	Open(volumePath string, region fsRegion) (extSession, error)
 }
 
 type realEXTBackend struct{}
 
 type realEXTSession struct {
-	img *os.File
-	fs  *libext.FS
+	img    *os.File
+	reader io.ReaderAt
+	fs     *libext.FS
+
+	// volume and options are what fs was opened over and with, kept so that
+	// ext_verify can open the volume a second time with checksum mismatches
+	// made fatal -- the one way libext answers whether an inode's checksum
+	// holds.
+	volume  io.ReaderAt
+	options libext.Options
+
+	recovery fsRecoveryCache
 }
 
 type extHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    extSession
 }
 
@@ -328,12 +454,22 @@ type hfsMetadata struct {
 type hfsSession interface {
 	ListFiles(dirPath string) ([]hfsListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (hfsMetadata, error)
+	ScanDeleted() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	Slack(filePath string) (fsSlackScan, error)
+	Unallocated() (fsFreeSpaceScan, error)
+	Xattrs(filePath string) (fsXattrScan, error)
+	ResourceFork(filePath string) (fsForkScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type hfsBackend interface {
-	Open(volumePath string) (hfsSession, error)
+	Open(volumePath string, region fsRegion) (hfsSession, error)
 }
 
 type realHFSBackend struct{}
@@ -341,10 +477,15 @@ type realHFSBackend struct{}
 type realHFSSession struct {
 	img    *os.File
 	volume *libhfs.Volume
+
+	// recovery keeps libhfs's own DeletedRecord values: OpenDeleted takes
+	// the record, and a CNID is not enough to find it again.
+	recovery hfsRecoveryCache
 }
 
 type hfsHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    hfsSession
 }
 
@@ -382,22 +523,37 @@ type xfsMetadata struct {
 type xfsSession interface {
 	ListFiles(dirPath string) ([]xfsListEntry, error)
 	ReadFile(filePath string) ([]byte, error)
+	OpenReader(filePath string) (fsFileReader, error)
 	Metadata(filePath string) (xfsMetadata, error)
+	ScanDeletedDirectory(dirPath string) (fsDeletedScan, error)
+	UnlinkedInodes() (fsDeletedScan, error)
+	RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error)
+	ScanLogRecords() (fsJournalScan, error)
+	ScanLogTransactions() (fsJournalScan, error)
+	Slack(filePath string) (fsSlackScan, error)
+	Xattrs(filePath string) (fsXattrScan, error)
+	Capabilities() (fsCapabilitySet, error)
+	Report() (fsReport, error)
+	Verify() (fsVerifyResult, error)
 	Close() error
 }
 
 type xfsBackend interface {
-	Open(volumePath string) (xfsSession, error)
+	Open(volumePath string, region fsRegion) (xfsSession, error)
 }
 
 type realXFSBackend struct{}
 
 type realXFSSession struct {
+	img    *os.File
 	volume *libxfs.Volume
+
+	recovery fsRecoveryCache
 }
 
 type xfsHandleState struct {
 	VolumePath string
+	Region     fsRegion
 	Session    xfsSession
 }
 
@@ -462,20 +618,16 @@ var xfsStore = struct {
 }
 
 func NtfsOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `ntfs_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameNtfsOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	ntfsStore.RLock()
 	backend := ntfsStore.backend
 	ntfsStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("ntfs_open: %s", err.Error()))
 	}
@@ -485,18 +637,15 @@ func NtfsOpen(args ...object.Object) object.Object {
 
 	ntfsStore.Lock()
 	ntfsStore.handles[handle] = ntfsHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	ntfsStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameNtfsOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameNtfsOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func NtfsListFiles(args ...object.Object) object.Object {
@@ -537,6 +686,7 @@ func NtfsListFiles(args ...object.Object) object.Object {
 			"deleted":        boolObj(entry.Deleted),
 			"size":           intObj(int64(entry.Size)),
 			"allocated_size": intObj(int64(entry.AllocatedSize)),
+			"size_source":    stringObj(entry.SizeSource),
 		}))
 	}
 
@@ -657,20 +807,16 @@ func NtfsClose(args ...object.Object) object.Object {
 }
 
 func FatOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `fat_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameFatOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	fatStore.RLock()
 	backend := fatStore.backend
 	fatStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("fat_open: %s", err.Error()))
 	}
@@ -680,18 +826,15 @@ func FatOpen(args ...object.Object) object.Object {
 
 	fatStore.Lock()
 	fatStore.handles[handle] = fatHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	fatStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameFatOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameFatOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func FatListFiles(args ...object.Object) object.Object {
@@ -852,20 +995,16 @@ func FatClose(args ...object.Object) object.Object {
 }
 
 func XFATOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `xfat_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameXfatOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	xfatStore.RLock()
 	backend := xfatStore.backend
 	xfatStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("xfat_open: %s", err.Error()))
 	}
@@ -875,18 +1014,15 @@ func XFATOpen(args ...object.Object) object.Object {
 
 	xfatStore.Lock()
 	xfatStore.handles[handle] = xfatHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	xfatStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameXfatOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameXfatOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func XFATListFiles(args ...object.Object) object.Object {
@@ -1046,20 +1182,16 @@ func XFATClose(args ...object.Object) object.Object {
 }
 
 func ExtOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `ext_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameExtOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	extStore.RLock()
 	backend := extStore.backend
 	extStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("ext_open: %s", err.Error()))
 	}
@@ -1069,18 +1201,15 @@ func ExtOpen(args ...object.Object) object.Object {
 
 	extStore.Lock()
 	extStore.handles[handle] = extHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	extStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameExtOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameExtOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func ExtListFiles(args ...object.Object) object.Object {
@@ -1233,20 +1362,16 @@ func ExtClose(args ...object.Object) object.Object {
 }
 
 func HFSOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `hfs_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameHfsOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	hfsStore.RLock()
 	backend := hfsStore.backend
 	hfsStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("hfs_open: %s", err.Error()))
 	}
@@ -1256,18 +1381,15 @@ func HFSOpen(args ...object.Object) object.Object {
 
 	hfsStore.Lock()
 	hfsStore.handles[handle] = hfsHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	hfsStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameHfsOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameHfsOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func HFSListFiles(args ...object.Object) object.Object {
@@ -1422,20 +1544,16 @@ func HFSClose(args ...object.Object) object.Object {
 }
 
 func XFSOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
-	}
-
-	volumePathObj, ok := args[0].(*object.String)
-	if !ok {
-		return resultAndError(nil, newError("argument 1 to `xfs_open` must be STRING, got %s", args[0].Type()))
+	volumePath, region, errObj := parseFSOpenArgs(BuiltinNameXfsOpen, args)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	xfsStore.RLock()
 	backend := xfsStore.backend
 	xfsStore.RUnlock()
 
-	session, err := backend.Open(volumePathObj.Value)
+	session, err := backend.Open(volumePath, region)
 	if err != nil {
 		return resultAndError(nil, newError("xfs_open: %s", err.Error()))
 	}
@@ -1445,18 +1563,15 @@ func XFSOpen(args ...object.Object) object.Object {
 
 	xfsStore.Lock()
 	xfsStore.handles[handle] = xfsHandleState{
-		VolumePath: volumePathObj.Value,
+		VolumePath: volumePath,
+		Region:     region,
 		Session:    session,
 	}
 	xfsStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameXfsOpen, handle, volumePathObj.Value)
+	custodyRecordOpenAt(BuiltinNameXfsOpen, handle, region, volumePath)
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"handle": stringObj(handle),
-		"path":   stringObj(volumePathObj.Value),
-		"status": stringObj("ok"),
-	}), nil)
+	return resultAndError(makeHashObject(fsOpenResult(handle, volumePath, region)), nil)
 }
 
 func XFSListFiles(args ...object.Object) object.Object {
@@ -1714,38 +1829,47 @@ func resolveXFSHandle(arg object.Object, op string) (xfsHandleState, *object.Err
 	return state, nil
 }
 
-func (realNTFSBackend) Open(volumePath string) (ntfsSession, error) {
-	img, err := os.Open(volumePath)
+func (realNTFSBackend) Open(volumePath string, region fsRegion) (ntfsSession, error) {
+	img, reader, _, err := openVolumeRegion(volumePath, region)
 	if err != nil {
 		return nil, err
 	}
 
-	volume, err := libntfs.Open(img)
-	if err != nil {
-		_ = img.Close()
-		return nil, err
-	}
-
-	return &realNTFSSession{img: img, volume: volume}, nil
-}
-
-func (realFATBackend) Open(volumePath string) (fatSession, error) {
-	img, err := os.Open(volumePath)
-	if err != nil {
-		return nil, err
-	}
-
-	volume, err := libfat.Open(img)
+	// OpenReadOnly's setting rather than Open's default. libntfs promotes any
+	// reader that also implements io.WriterAt to a writable volume, and *os.File
+	// implements it whatever mode the file was opened in, so evidence opened the
+	// plain way reports IsWritable. The OS would refuse the write; the point is
+	// that the library should never be in a position to attempt one, which is
+	// what its own documentation says about opening evidence.
+	volume, err := libntfs.OpenWithOptions(reader, libntfs.Options{
+		ReadOnly:   true,
+		BaseOffset: region.Offset,
+	})
 	if err != nil {
 		_ = img.Close()
 		return nil, err
 	}
 
-	return &realFATSession{img: img, volume: volume}, nil
+	return &realNTFSSession{img: img, reader: reader, volume: volume}, nil
 }
 
-func (realXFATBackend) Open(volumePath string) (xfatSession, error) {
-	img, err := os.Open(volumePath)
+func (realFATBackend) Open(volumePath string, region fsRegion) (fatSession, error) {
+	img, reader, _, err := openVolumeRegion(volumePath, region)
+	if err != nil {
+		return nil, err
+	}
+
+	volume, err := libfat.OpenWithOptions(reader, libfat.OpenOptions{BaseOffset: region.Offset})
+	if err != nil {
+		_ = img.Close()
+		return nil, err
+	}
+
+	return &realFATSession{img: img, reader: reader, volume: volume}, nil
+}
+
+func (realXFATBackend) Open(volumePath string, region fsRegion) (xfatSession, error) {
+	img, reader, size, err := openVolumeRegion(volumePath, region)
 	if err != nil {
 		return nil, err
 	}
@@ -1753,45 +1877,106 @@ func (realXFATBackend) Open(volumePath string) (xfatSession, error) {
 	// Open is the constructor libxfat directs callers to; New is retained for
 	// compatibility. Size enables bounds checking (a malformed image yields a
 	// clean io.ErrUnexpectedEOF instead of an out-of-range read), and Strict is
-	// the library's recommended setting for evidence processing — it turns on
+	// the library's recommended setting for evidence processing -- it turns on
 	// the partition cross-check and file-name checksum verification.
-	info, err := img.Stat()
+	//
+	// Base is what gives that cross-check its second operand, and it only has
+	// one when the caller said where the volume sits. exFAT records in its own
+	// boot record the sector it believes its partition began at; region.Offset
+	// is the byte we opened it at inside this file. Those are different
+	// quantities -- one a position on the original media, the other a position
+	// in an image -- and they are comparable only when the image is the whole
+	// disk. A caller passing a partition hash or an explicit offset asserted
+	// exactly that, so the comparison is real and a disagreement still refuses:
+	// a volume found somewhere other than where it says it belongs is not read
+	// as though nothing were unusual.
+	//
+	// A caller passing no offset asserted nothing. region.Offset is zero because
+	// the volume IS the file, which is what imaging a partition produces, and it
+	// says nothing about where that partition began -- 1 MiB alignment makes 2048
+	// the commonest recorded value there is. Comparing against zero there refuses
+	// a sound volume over an assumption nobody made, and did: until M26-FS1-020
+	// every xfat_* builtin was unreachable for a partition-level exFAT image,
+	// because this file passed neither option the library's own error names.
+	// exFAT section 3.1.3 makes PartitionOffset informational and lets an
+	// implementation ignore it, which is what exfatprogs does, so the check is
+	// skipped and the two numbers are reported instead: Report carries base and
+	// partition_offset and warns when they disagree.
+	//
+	// Strict stays on either way. The file-name checksum verification and the
+	// rest of strict mode are the library's recommended posture for evidence,
+	// and are not what refused here.
+	fs, err := libxfat.Open(libxfat.Source{
+		Reader:                reader,
+		Size:                  size,
+		Base:                  region.Offset,
+		Strict:                true,
+		IgnorePartitionOffset: region.Offset == 0,
+	})
 	if err != nil {
 		_ = img.Close()
 		return nil, err
 	}
 
-	fs, err := libxfat.Open(libxfat.Source{Reader: img, Size: info.Size(), Strict: true})
-	if err != nil {
-		_ = img.Close()
-		return nil, err
-	}
-
-	return &realXFATSession{img: img, fs: fs}, nil
+	return &realXFATSession{img: img, reader: reader, fs: fs}, nil
 }
 
-func (realEXTBackend) Open(volumePath string) (extSession, error) {
-	img, err := os.Open(volumePath)
+func (realEXTBackend) Open(volumePath string, region fsRegion) (extSession, error) {
+	img, reader, size, err := openVolumeRegion(volumePath, region)
 	if err != nil {
 		return nil, err
 	}
 
-	fs, err := libext.Open(img)
+	// libext is the one library of the six that reads relative to the reader it
+	// is handed: its BaseOffset is added to the offsets it reports and to
+	// nothing it reads (libext options.go). So it is handed a reader that starts
+	// at the volume and ends where the region or the image does, and BaseOffset
+	// keeps what it reports image-absolute. Handed the image from byte zero, it
+	// looked for the superblock at image byte 1024 instead of the volume's, and
+	// every ext volume inside a disk image was refused as a corrupt superblock
+	// (M26-FS1-001).
+	//
+	// reader stays the image from byte zero: the session's own reads, of the
+	// runs a recovery locates, are at the image-absolute offsets libext
+	// reports.
+	//
+	// ImageSize is passed rather than left to libext's probe of the reader. The
+	// probe would find the right answer, but an explicit bound cannot be lost
+	// to a future reader type that answers neither Size nor Stat, and an
+	// unbounded libext performs no range checks at all.
+	volumeSize := size - region.Offset
+	volume := io.NewSectionReader(img, region.Offset, volumeSize)
+	options := libext.Options{
+		ImageSize:  uint64(volumeSize),
+		BaseOffset: region.Offset,
+	}
+	fs, err := libext.OpenWithOptions(volume, options)
 	if err != nil {
 		_ = img.Close()
 		return nil, err
 	}
 
-	return &realEXTSession{img: img, fs: fs}, nil
+	return &realEXTSession{img: img, reader: reader, fs: fs, volume: volume, options: options}, nil
 }
 
-func (realHFSBackend) Open(volumePath string) (hfsSession, error) {
-	img, err := os.Open(volumePath)
+func (realHFSBackend) Open(volumePath string, region fsRegion) (hfsSession, error) {
+	img, reader, _, err := openVolumeRegion(volumePath, region)
 	if err != nil {
 		return nil, err
 	}
 
-	volume, err := libhfs.Open(img)
+	// DefaultConfig is documented as the configuration Open uses, so only the
+	// offset differs from what this did before.
+	//
+	// libhfs composes this offset with one it discovers rather than replacing
+	// it: for an HFS wrapper around an embedded HFS+ volume, Config.BaseOffset
+	// is where the wrapper begins and Volume.BaseOffset reports that plus the
+	// embedded volume's own start. Two different quantities with nearly the same
+	// name; the region Mutant reports is the one it was given.
+	cfg := libhfs.DefaultConfig()
+	cfg.BaseOffset = region.Offset
+
+	volume, err := libhfs.OpenWithConfig(reader, cfg)
 	if err != nil {
 		_ = img.Close()
 		return nil, err
@@ -1800,15 +1985,23 @@ func (realHFSBackend) Open(volumePath string) (hfsSession, error) {
 	return &realHFSSession{img: img, volume: volume}, nil
 }
 
-func (realXFSBackend) Open(volumePath string) (xfsSession, error) {
-	volume, err := libxfs.OpenVolumeFromPath(volumePath)
+func (realXFSBackend) Open(volumePath string, region fsRegion) (xfsSession, error) {
+	img, reader, _, err := openVolumeRegion(volumePath, region)
 	if err != nil {
 		return nil, err
 	}
 
-	return &realXFSSession{volume: volume}, nil
-}
+	// OpenWithOptions rather than OpenVolumeFromPath, which opens the path
+	// itself and so cannot be handed a reader bounded to one partition. The file
+	// belongs to the session now, as it already did in the other five.
+	volume, err := libxfs.OpenWithOptions(reader, libxfs.Options{BaseOffset: region.Offset})
+	if err != nil {
+		_ = img.Close()
+		return nil, err
+	}
 
+	return &realXFSSession{img: img, volume: volume}, nil
+}
 func (s *realNTFSSession) ListFiles(dirPath string) ([]ntfsListEntry, error) {
 	cleanPath := normalizeFSPath(dirPath)
 
@@ -1827,16 +2020,27 @@ func (s *realNTFSSession) ListFiles(dirPath string) ([]ntfsListEntry, error) {
 
 	out := make([]ntfsListEntry, 0, len(entries))
 	for _, entry := range entries {
-		out = append(out, ntfsListEntry{
-			Name:          entry.Name,
-			Path:          joinFSPath(cleanPath, entry.Name),
-			EntryNum:      entry.EntryNum,
-			SequenceNum:   entry.SequenceNum,
-			IsDirectory:   entry.IsDirectory,
-			Deleted:       entry.Deleted,
-			Size:          entry.Size,
-			AllocatedSize: entry.AllocatedSize,
-		})
+		row := ntfsListEntry{
+			Name:        entry.Name,
+			Path:        joinFSPath(cleanPath, entry.Name),
+			EntryNum:    entry.EntryNum,
+			SequenceNum: entry.SequenceNum,
+			IsDirectory: entry.IsDirectory,
+			Deleted:     entry.Deleted,
+		}
+
+		// A directory has no $DATA attribute, so there is nothing to resolve
+		// and nothing to open for. The index records 0 for both lengths on
+		// every directory of a stock volume, which is what this reports.
+		if entry.IsDirectory {
+			row.SizeSource = ntfsSizeNoData
+			out = append(out, row)
+			continue
+		}
+
+		row.Size, row.AllocatedSize, row.SizeSource = ntfsResolveEntrySize(
+			s.volume, row.Path, entry.Size, entry.AllocatedSize)
+		out = append(out, row)
 	}
 
 	return out, nil
@@ -1891,25 +2095,28 @@ func (s *realXFATSession) ListFiles(dirPath string) ([]xfatListEntry, error) {
 
 	out := make([]xfatListEntry, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.GetName()
+		name := entry.Name()
 		// A nameless entry gets a stable placeholder path rather than a unique
 		// one, so repeated runs over the same image agree.
 		if entry.HasNoName() {
 			name = unnamedEntryPlaceholder
 		}
 		out = append(out, xfatListEntry{
-			Name:          name,
-			Path:          joinFSPath(cleanPath, name),
-			EntryCluster:  entry.GetEntryCluster(),
-			Size:          entry.GetSize(),
-			IsDirectory:   entry.IsDir(),
-			Deleted:       entry.IsDeleted(),
-			Special:       entry.IsSpecialFile(),
-			Virtual:       entry.IsVirtualEntry(),
-			Indexed:       entry.IsIndexed(),
-			HasFATChain:   entry.HasFatChain(),
-			Attributes:    entry.GetAttributes(),
-			ValidDataSize: entry.GetValidDataSize(),
+			Name:         name,
+			Path:         joinFSPath(cleanPath, name),
+			EntryCluster: entry.FirstCluster(),
+			Size:         entry.Size(),
+			IsDirectory:  entry.IsDir(),
+			Deleted:      entry.IsDeleted(),
+			Special:      entry.IsSpecialFile(),
+			Virtual:      entry.IsVirtualEntry(),
+			Indexed:      entry.IsInUse(),
+			// IsContiguous is the old DoesNotHaveFatChain, so the old
+			// HasFatChain is its negation. The script-visible key keeps its
+			// name and its meaning.
+			HasFATChain:   !entry.IsContiguous(),
+			Attributes:    entry.Attributes(),
+			ValidDataSize: entry.ValidDataSize(),
 			Times:         xfatTimesFromEntry(entry),
 		})
 	}
@@ -1917,10 +2124,45 @@ func (s *realXFATSession) ListFiles(dirPath string) ([]xfatListEntry, error) {
 	return out, nil
 }
 
-func (s *realEXTSession) ListFiles(dirPath string) ([]extListEntry, error) {
-	cleanPath := normalizeFSPath(dirPath)
+// openPath resolves a path one name at a time and byte for byte, the way
+// libext's own OpenPath walks, without the normalisation it applies first:
+// libext trims the path and rewrites every backslash as a slash, so on a
+// volume where "a\b" is one file's name, OpenPath("/a\b") opened "/a/b"
+// (M26-FS1-008).
+func (s *realEXTSession) openPath(cleanPath string) (*libext.File, error) {
+	current, err := s.fs.GetRootDirectory()
+	if err != nil || cleanPath == "/" {
+		return current, err
+	}
+	for _, part := range strings.Split(strings.Trim(cleanPath, "/"), "/") {
+		if !current.IsDirectory() {
+			return nil, libext.ErrNotDirectory
+		}
+		entries, err := current.ReadDir()
+		if err != nil {
+			return nil, err
+		}
+		matched := false
+		for _, e := range entries {
+			if e.Name == part {
+				if current, err = s.fs.Open(e.Inode); err != nil {
+					return nil, err
+				}
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("%w: %s", libext.ErrPathNotFound, cleanPath)
+		}
+	}
+	return current, nil
+}
 
-	dir, err := s.fs.OpenPath(cleanPath)
+func (s *realEXTSession) ListFiles(dirPath string) ([]extListEntry, error) {
+	cleanPath := normalizePOSIXFSPath(dirPath)
+
+	dir, err := s.openPath(cleanPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1958,7 +2200,10 @@ func (s *realEXTSession) ListFiles(dirPath string) ([]extListEntry, error) {
 }
 
 func (s *realHFSSession) ListFiles(dirPath string) ([]hfsListEntry, error) {
-	cleanPath := normalizeFSPath(dirPath)
+	cleanPath := normalizePOSIXFSPath(dirPath)
+	if err := hfsPathAddressable(cleanPath); err != nil {
+		return nil, err
+	}
 
 	entries, err := s.volume.ReadDir(cleanPath)
 	if err != nil {
@@ -1983,7 +2228,7 @@ func (s *realHFSSession) ListFiles(dirPath string) ([]hfsListEntry, error) {
 }
 
 func (s *realXFSSession) ListFiles(dirPath string) ([]xfsListEntry, error) {
-	cleanPath := normalizeFSPath(dirPath)
+	cleanPath := normalizePOSIXFSPath(dirPath)
 
 	dirInode, err := s.volume.ResolveInodeByPath(cleanPath)
 	if err != nil {
@@ -2031,6 +2276,73 @@ func (s *realXFSSession) ListFiles(dirPath string) ([]xfsListEntry, error) {
 	return out, nil
 }
 
+// ntfsNamedOnlyStreams names the $DATA streams of a path that addresses no
+// content of its own: one that has $DATA attributes where every one of them is
+// named.
+//
+// libntfs chooses the attribute a whole-file read serves in
+// FindPrimaryDataAttribute, which prefers the unnamed $DATA but falls back to
+// the first named one when the entry has none -- its body ends
+// `return dataAttrs[0]`. Nothing downstream can see that it fell back: Size,
+// HasData and the resident/sparse/compressed flags then all describe an
+// alternate stream, so a whole-file read returns that stream's bytes and a
+// digest taken over them is that stream's digest published under the file's
+// name, with every field that exists to report an incomplete read saying the
+// read was whole. $Secure is in this state on a stock Windows volume; the case
+// that matters is a file whose content was moved into an alternate stream so
+// that a whole-file read would not show it.
+//
+// Two states are deliberately not this, and both return nil:
+//
+//   - an entry with no $DATA attribute at all. It addresses nothing and reads
+//     as empty, which is the true answer for it rather than a refusal.
+//     /$Extend/$ObjId, /$Extend/$Quota and /$Extend/$Reparse are the three on
+//     a stock volume, and they read as zero bytes.
+//   - a directory. It never has an unnamed $DATA and can still carry named
+//     streams, so testing only for the missing unnamed stream would refuse
+//     every directory for the wrong reason. The readers already refuse one for
+//     being a directory, and Metadata has to keep describing it.
+func ntfsNamedOnlyStreams(f *libntfs.File) []string {
+	if f.IsDirectory() {
+		return nil
+	}
+
+	streams := f.Streams()
+	if len(streams) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(streams))
+	for _, info := range streams {
+		if !info.IsAlternate() {
+			return nil
+		}
+		names = append(names, info.Name)
+	}
+
+	return names
+}
+
+// ntfsNoUnnamedStreamRefusal is shared by the whole-file readers and the
+// metadata reader so the four cannot drift into describing one volume
+// differently. ntfs_streams reports the same state as a warning rather than an
+// error, because listing the streams is how a caller finds out what to ask for.
+func ntfsNoUnnamedStreamRefusal(names []string) error {
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		quoted = append(quoted, fmt.Sprintf("%q", name))
+	}
+
+	subject := "the alternate stream " + quoted[0]
+	if len(quoted) > 1 {
+		subject = "the alternate streams " + strings.Join(quoted, ", ")
+	}
+
+	return fmt.Errorf("the path has no unnamed $DATA attribute, so it names no content of its "+
+		"own: what it holds is in %s, which ntfs_read_stream reads by name and ntfs_streams "+
+		"lists", subject)
+}
+
 func (s *realNTFSSession) ReadFile(filePath string) ([]byte, error) {
 	cleanPath := normalizeFSPath(filePath)
 
@@ -2040,6 +2352,11 @@ func (s *realNTFSSession) ReadFile(filePath string) ([]byte, error) {
 	}
 	if f.IsDirectory() {
 		return nil, errors.New("target path is a directory")
+	}
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		// ReadAll follows the attribute libntfs selected, which here is one of
+		// these rather than any content the path itself names.
+		return nil, ntfsNoUnnamedStreamRefusal(named)
 	}
 
 	return f.ReadAll()
@@ -2069,33 +2386,43 @@ func (s *realXFATSession) ReadFile(filePath string) ([]byte, error) {
 		return nil, errors.New("target path is a directory")
 	}
 
-	// libxfat only extracts to a path, so the content has to round-trip through
-	// a temp file. Refuse oversized entries up front rather than writing them to
-	// disk and then pulling the whole thing into memory — the same 32 MiB ceiling
-	// the *_read_at builtins apply.
-	if size := entry.GetSize(); size > maxInMemoryReadBytes {
+	// Refuse oversized entries up front — the same 32 MiB ceiling the
+	// *_read_at builtins apply.
+	if size := entry.Size(); size > maxInMemoryReadBytes {
 		return nil, fmt.Errorf("entry is %d bytes, larger than the %d byte read limit", size, maxInMemoryReadBytes)
 	}
 
-	tmpFile, err := os.CreateTemp("", "mutant-xfat-read-*.bin")
+	// libxfat v1.3.0 added a reading API, so this no longer round-trips the
+	// content through a temp file. The old route wrote the bytes of an
+	// evidence file into the OS temp directory purely to read them straight
+	// back out, which is a side effect a forensics tool is better without.
+	file, err := s.fs.OpenEntry(entry)
 	if err != nil {
 		return nil, err
 	}
-	tmpPath := tmpFile.Name()
-	_ = tmpFile.Close()
-	defer func() { _ = os.Remove(tmpPath) }()
 
-	if err := s.fs.ExtractEntryContent(entry, tmpPath); err != nil {
+	data, err := file.ReadAll()
+	if err != nil {
 		return nil, err
 	}
 
-	return os.ReadFile(tmpPath)
+	// A chain that runs out before the entry's recorded length is reported,
+	// not returned as a silently shorter file. ExtractEntryContent made this
+	// check itself and ReadEntry does not, which is why neither is called
+	// here: the error behaviour is the one this builtin already had, and it
+	// wraps libxfat's own sentinel so a caller can still match on it.
+	if located, locErr := file.Located(); locErr == nil && located < file.Size() {
+		return nil, fmt.Errorf("%w: %d of %d bytes recoverable for %q",
+			libxfat.ErrTruncatedChain, located, file.Size(), cleanPath)
+	}
+
+	return data, nil
 }
 
 func (s *realEXTSession) ReadFile(filePath string) ([]byte, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
 
-	f, err := s.fs.OpenPath(cleanPath)
+	f, err := s.openPath(cleanPath)
 	if err != nil {
 		return nil, err
 	}
@@ -2107,7 +2434,10 @@ func (s *realEXTSession) ReadFile(filePath string) ([]byte, error) {
 }
 
 func (s *realHFSSession) ReadFile(filePath string) ([]byte, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
+	if err := hfsPathAddressable(cleanPath); err != nil {
+		return nil, err
+	}
 
 	f, err := s.volume.OpenFileByPath(cleanPath)
 	if err != nil {
@@ -2118,8 +2448,164 @@ func (s *realHFSSession) ReadFile(filePath string) ([]byte, error) {
 }
 
 func (s *realXFSSession) ReadFile(filePath string) ([]byte, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
 	return s.volume.ReadFileDataByPath(cleanPath)
+}
+
+// OpenReader opens one file for streaming rather than for reading whole.
+//
+// Where ReadFile allocates for the file's recorded length before it has read a
+// byte, this returns random access to it and the two lengths that describe it,
+// so a file larger than memory is reachable and a file whose chain is short
+// says so instead of erroring. See fsFileReader for what Size and Located mean
+// and why the difference is not cosmetic.
+func (s *realNTFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizeFSPath(filePath)
+
+	f, err := s.volume.OpenPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	if f.IsDirectory() {
+		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	// Before ReadSupport, because support describes the attribute libntfs
+	// selected and that attribute is the thing in question here.
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		return fsFileReader{}, ntfsNoUnnamedStreamRefusal(named)
+	}
+
+	// ReadSupport names what blocks a stream before the first byte is asked
+	// for. An encrypted $DATA otherwise fails on the read itself, which during
+	// an extraction is after the destination file has already been created.
+	if support := f.ReadSupport(); !support.Readable && support.BlockingError != nil {
+		return fsFileReader{}, support.BlockingError
+	}
+
+	size := f.Size()
+	return fsFileReader{ReaderAt: f, Size: size, Located: size}, nil
+}
+
+func (s *realFATSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizeFSPath(filePath)
+
+	f, err := s.volume.OpenPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	if f.IsDirectory() {
+		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	// ReaderAt resolves the cluster chain once and keeps no cursor of its own.
+	// The run total it carries is how far the chain actually reached, which
+	// falls short of the directory entry's size when a deleted file's clusters
+	// were handed to something else.
+	reader, err := f.ReaderAt()
+	if err != nil {
+		return fsFileReader{}, err
+	}
+
+	size := f.Size()
+	return fsFileReader{ReaderAt: reader, Size: size, Located: locatedSize(reader, size)}, nil
+}
+
+func (s *realXFATSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizeFSPath(filePath)
+
+	entry, err := s.findEntryByPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	if entry.IsDir() {
+		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	file, err := s.fs.OpenEntry(entry)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	reader, err := file.ReaderAt()
+	if err != nil {
+		return fsFileReader{}, err
+	}
+
+	// libxfat states how much it located, so this is the one family that does
+	// not have to ask the reader.
+	located, err := file.Located()
+	if err != nil {
+		return fsFileReader{}, err
+	}
+
+	size := file.Size()
+	if located > size {
+		located = size
+	}
+	return fsFileReader{ReaderAt: reader, Size: size, Located: located}, nil
+}
+
+func (s *realEXTSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizePOSIXFSPath(filePath)
+
+	f, err := s.openPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	if f.IsDirectory() {
+		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	// libext's File caches its block map on first read and carries a cursor,
+	// so it is documented as unsafe to share. Every read through this seam is
+	// serial, which is what that requires.
+	size := f.Size()
+	return fsFileReader{ReaderAt: f, Size: size, Located: size}, nil
+}
+
+func (s *realHFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizePOSIXFSPath(filePath)
+	if err := hfsPathAddressable(cleanPath); err != nil {
+		return fsFileReader{}, err
+	}
+
+	// OpenFileByPath refuses a record that is not a file, and hands back a
+	// compressed file already decompressed -- so the size here is the size of
+	// what will be read, not of what is stored.
+	f, err := s.volume.OpenFileByPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+
+	size := f.Size()
+	return fsFileReader{ReaderAt: f, Size: size, Located: size}, nil
+}
+
+func (s *realXFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	cleanPath := normalizePOSIXFSPath(filePath)
+
+	inodeNumber, err := s.volume.ResolveInodeByPath(cleanPath)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	inode, err := s.volume.OpenInode(inodeNumber)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+	if inode.IsDirectory() {
+		// OpenInodeReader does not refuse one, and a directory streamed as a
+		// file hands back its raw directory blocks as though they were content.
+		return fsFileReader{}, errors.New("target path is a directory")
+	}
+
+	reader, err := s.volume.OpenInodeReader(inodeNumber)
+	if err != nil {
+		return fsFileReader{}, err
+	}
+
+	// Holes and unwritten extents read back as zeros, which is what they are.
+	size := int64(inode.Size)
+	return fsFileReader{ReaderAt: reader, Size: size, Located: size}, nil
 }
 
 func (s *realNTFSSession) Metadata(filePath string) (ntfsMetadata, error) {
@@ -2131,12 +2617,27 @@ func (s *realNTFSSession) Metadata(filePath string) (ntfsMetadata, error) {
 	}
 
 	support := f.ReadSupport()
+	size := f.Size()
+
+	// Metadata describes a path rather than reading one, so it answers where
+	// the readers refuse -- but it has to answer about the path. Everything
+	// support carries would otherwise describe the alternate stream libntfs
+	// selected: the size, has_data, and the resident/sparse/compressed flags.
+	// The path names no content, so that is what these report, and
+	// blocking_error says why. The entry's own facts stay, including the four
+	// $STANDARD_INFORMATION times read below, which belong to the entry rather
+	// than to any stream.
+	if named := ntfsNamedOnlyStreams(f); len(named) > 0 {
+		support = libntfs.FileReadSupport{BlockingError: ntfsNoUnnamedStreamRefusal(named)}
+		size = 0
+	}
+
 	md := ntfsMetadata{
 		Path:          cleanPath,
 		Name:          f.Name(),
 		EntryNum:      f.EntryNumber(),
 		IsDirectory:   f.IsDirectory(),
-		Size:          f.Size(),
+		Size:          size,
 		HasData:       support.HasData,
 		Resident:      support.Resident,
 		NonResident:   support.NonResident,
@@ -2198,34 +2699,39 @@ func (s *realXFATSession) Metadata(filePath string) (xfatMetadata, error) {
 		return xfatMetadata{}, err
 	}
 
-	name := entry.GetName()
+	name := entry.Name()
 	if entry.HasNoName() {
 		name = unnamedEntryPlaceholder
+	}
+
+	label, err := s.fs.VolumeLabel()
+	if err != nil {
+		return xfatMetadata{}, err
 	}
 
 	return xfatMetadata{
 		Path:          cleanPath,
 		Name:          name,
-		EntryCluster:  entry.GetEntryCluster(),
-		Size:          entry.GetSize(),
+		EntryCluster:  entry.FirstCluster(),
+		Size:          entry.Size(),
 		IsDirectory:   entry.IsDir(),
 		Deleted:       entry.IsDeleted(),
 		Special:       entry.IsSpecialFile(),
 		Virtual:       entry.IsVirtualEntry(),
-		Indexed:       entry.IsIndexed(),
-		HasFATChain:   entry.HasFatChain(),
-		VolumeLabel:   s.fs.GetVolumeLabel(),
-		ClusterSize:   s.fs.GetClusterSize(),
-		Attributes:    entry.GetAttributes(),
-		ValidDataSize: entry.GetValidDataSize(),
+		Indexed:       entry.IsInUse(),
+		HasFATChain:   !entry.IsContiguous(),
+		VolumeLabel:   label,
+		ClusterSize:   s.fs.ClusterSize(),
+		Attributes:    entry.Attributes(),
+		ValidDataSize: entry.ValidDataSize(),
 		Times:         xfatTimesFromEntry(entry),
 	}, nil
 }
 
 func (s *realEXTSession) Metadata(filePath string) (extMetadata, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
 
-	f, err := s.fs.OpenPath(cleanPath)
+	f, err := s.openPath(cleanPath)
 	if err != nil {
 		return extMetadata{}, err
 	}
@@ -2236,7 +2742,7 @@ func (s *realEXTSession) Metadata(filePath string) (extMetadata, error) {
 
 	md := extMetadata{
 		Path:        cleanPath,
-		Name:        f.Name(),
+		Name:        extPathName(f, cleanPath),
 		Inode:       f.InodeNumber(),
 		IsDirectory: f.IsDirectory(),
 		Size:        f.Size(),
@@ -2256,8 +2762,20 @@ func (s *realEXTSession) Metadata(filePath string) (extMetadata, error) {
 	return md, nil
 }
 
+// extPathName is the name a resolved path ends in. A file libext opens by
+// inode carries no name of its own; the root keeps the one libext gives it.
+func extPathName(f *libext.File, cleanPath string) string {
+	if cleanPath == "/" {
+		return f.Name()
+	}
+	return path.Base(cleanPath)
+}
+
 func (s *realHFSSession) Metadata(filePath string) (hfsMetadata, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
+	if err := hfsPathAddressable(cleanPath); err != nil {
+		return hfsMetadata{}, err
+	}
 
 	rec, err := s.volume.OpenPath(cleanPath)
 	if err != nil {
@@ -2297,7 +2815,7 @@ func (s *realHFSSession) Metadata(filePath string) (hfsMetadata, error) {
 }
 
 func (s *realXFSSession) Metadata(filePath string) (xfsMetadata, error) {
-	cleanPath := normalizeFSPath(filePath)
+	cleanPath := normalizePOSIXFSPath(filePath)
 
 	// Resolve first and open by number: xfs_metadata reports the inode number,
 	// and libxfs.Inode does not carry its own, so OpenInodeByPath would mean a
@@ -2331,10 +2849,10 @@ func (s *realXFSSession) Metadata(filePath string) (xfsMetadata, error) {
 		// NeedsRepair means the filesystem was left inconsistent and its
 		// metadata should be treated with suspicion.
 		NeedsRepair: sb.NeedsRepair(),
-		CreatedAt:   formatTime(inode.CreationTime()),
-		ModifiedAt:  formatTime(inode.ModificationTime()),
-		AccessedAt:  formatTime(inode.AccessTime()),
-		ChangedAt:   formatTime(inode.InodeChangeTime()),
+		CreatedAt:   xfsTime(inode.CreationTimeNS),
+		ModifiedAt:  xfsTime(inode.ModificationTimeNS),
+		AccessedAt:  xfsTime(inode.AccessTimeNS),
+		ChangedAt:   xfsTime(inode.InodeChangeTimeNS),
 	}, nil
 }
 
@@ -2406,10 +2924,11 @@ func (s *realXFSSession) Close() error {
 	if s == nil {
 		return nil
 	}
+	var volErr error
 	if s.volume != nil {
-		return s.volume.Close()
+		volErr = s.volume.Close()
 	}
-	return nil
+	return closeImage(volErr, s.img)
 }
 
 func (s *realXFATSession) readDirAtPath(dirPath string) ([]libxfat.Entry, error) {
@@ -2447,9 +2966,12 @@ func (s *realXFATSession) findEntryByPath(targetPath string) (libxfat.Entry, err
 	}
 
 	for i, part := range parts {
-		match, found := xfatFindEntryByName(currentEntries, part)
-		if !found {
+		match, err := xfatFindEntryByName(currentEntries, part)
+		if errors.Is(err, errXFATNoSuchName) {
 			return libxfat.Entry{}, fmt.Errorf("entry not found: %s", targetPath)
+		}
+		if err != nil {
+			return libxfat.Entry{}, fmt.Errorf("%s: %w", targetPath, err)
 		}
 
 		matchedPath := "/" + strings.Join(parts[:i+1], "/")
@@ -2473,38 +2995,94 @@ func (s *realXFATSession) findEntryByPath(targetPath string) (libxfat.Entry, err
 	return libxfat.Entry{}, fmt.Errorf("entry not found: %s", targetPath)
 }
 
-func xfatFindEntryByName(entries []libxfat.Entry, name string) (libxfat.Entry, bool) {
+// xfatFindEntryByName finds the entry one path component names. exFAT
+// compares names without regard to case, and the name is compared as the
+// listing writes it, with nothing trimmed.
+//
+// A directory routinely holds a deleted entry set beside a live one of the same
+// name -- a file deleted and re-created, which is how many editors save -- and
+// libxfat returns both. Taking the first match handed a listed live path the
+// deleted entry's size, cluster and refusal to read (M26-FS1-007), so a live
+// entry always wins. A deleted entry is the answer only when no live one has
+// the name and no other deleted one does either: two deleted entries under one
+// path are two files the path cannot tell apart, and that is refused rather
+// than guessed.
+func xfatFindEntryByName(entries []libxfat.Entry, name string) (libxfat.Entry, error) {
+	var deleted libxfat.Entry
+	deletedMatches := 0
 	for _, entry := range entries {
-		entryName := strings.TrimSpace(entry.GetName())
-		if strings.EqualFold(entryName, name) {
-			return entry, true
+		if !strings.EqualFold(entry.Name(), name) {
+			continue
 		}
-		// libxfat marks recovered entries by appending its DELETED suffix to the
-		// name; take the constant from the library rather than restating it, so
-		// a change there is a compile-time concern rather than a silent miss.
-		if strings.EqualFold(strings.TrimSuffix(entryName, libxfat.DELETED), name) {
-			return entry, true
+		if !entry.IsDeleted() {
+			return entry, nil
 		}
+		if deletedMatches == 0 {
+			deleted = entry
+		}
+		deletedMatches++
 	}
-	return libxfat.Entry{}, false
+	switch deletedMatches {
+	case 0:
+		return libxfat.Entry{}, errXFATNoSuchName
+	case 1:
+		return deleted, nil
+	}
+	return libxfat.Entry{}, fmt.Errorf("%d deleted entries are named %q and no live one is, so the path "+
+		"cannot say which; xfat_deleted reports each one with its own index", deletedMatches, name)
 }
 
+// errXFATNoSuchName is a path component no entry has.
+var errXFATNoSuchName = errors.New("no entry has that name")
+
 // normalizeFSPath turns a caller-supplied path into an absolute, cleaned,
-// forward-slash path inside an image. Cleaning happens *after* rooting so that
-// "../.." collapses to "/" rather than escaping above the volume root.
+// forward-slash path inside an NTFS, FAT or exFAT image. Cleaning happens
+// *after* rooting so that "../.." collapses to "/" rather than escaping above
+// the volume root.
 //
-// This replaces six per-filesystem copies. The EXT/HFS/XFS copies cleaned before
-// rooting, which let "\.." through as the literal path "/..".
+// A backslash is read as a separator, so a Windows-style path works: none of
+// FAT's or exFAT's names can hold one, nor can a name in NTFS's Win32
+// namespace. Nothing is trimmed. A listing writes a name exactly as the volume
+// holds it, and a name may begin or end with a space; a path that trimmed it
+// would name a different entry, or none.
 func normalizeFSPath(p string) string {
-	v := strings.TrimSpace(p)
-	if v == "" {
+	if p == "" {
 		return "/"
 	}
-	v = strings.ReplaceAll(v, "\\", "/")
+	v := strings.ReplaceAll(p, "\\", "/")
 	if !strings.HasPrefix(v, "/") {
 		v = "/" + v
 	}
 	return path.Clean(v)
+}
+
+// normalizePOSIXFSPath is normalizeFSPath for ext, XFS and HFS+, whose names
+// may hold a backslash as an ordinary byte -- systemd writes one into every
+// escaped unit name, mnt-data\x2dbackup.mount -- so it is left alone. Reading
+// it as a separator sent the listed path "/a\b" to the different file "/a/b"
+// (M26-FS1-008). A backslash cannot escape the root here: "\.." is a name, and
+// only "/" separates the ".." that path.Clean collapses.
+func normalizePOSIXFSPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	v := p
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
+	}
+	return path.Clean(v)
+}
+
+// hfsPathAddressable refuses a path libhfs cannot address exactly. libhfs trims
+// whitespace from the ends of a path before it splits it, so a name ending in a
+// space -- legal on HFS+ -- would be looked up without it, and could find a
+// different file of the shorter name.
+func hfsPathAddressable(cleanPath string) error {
+	if strings.TrimRightFunc(cleanPath, unicode.IsSpace) != cleanPath {
+		return fmt.Errorf("%q ends in whitespace, which libhfs trims from a path before looking it up, "+
+			"so the name cannot be addressed by path", cleanPath)
+	}
+	return nil
 }
 
 // joinFSPath appends a directory entry name to its parent path. A nameless entry

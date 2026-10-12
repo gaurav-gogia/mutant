@@ -196,7 +196,7 @@ fixed** by the declaration order below, so do not reorder them.
 | 8  | `OpFalse`          | —                               | `→ false`                | Push the singleton `False` object                                |
 | 9  | `OpEqual`          | —                               | `b, a → bool`            | `a == b`                                                         |
 | 10 | `OpUnEqual`        | —                               | `b, a → bool`            | `a != b`                                                         |
-| 11 | `OpGreater`        | —                               | `b, a → bool`            | `a > b` (also used for `<` by swapping operands at compile time) |
+| 11 | `OpGreater`        | —                               | `b, a → bool`            | `a > b`                                                          |
 | 12 | `OpMinus`          | —                               | `a → -a`                 | Unary negation                                                   |
 | 13 | `OpBang`           | —                               | `a → !a`                 | Unary logical NOT                                                |
 | 14 | `OpJumpFalse`      | `target` (2)                    | `cond →`                 | Pop condition; if falsy jump to `target`                         |
@@ -227,7 +227,7 @@ fixed** by the declaration order below, so do not reorder them.
 | 39 | `OpGetField`       | `nameIdx` (2)                   | `struct → val`           | Pop struct; push `struct.Fields[constants[nameIdx]]`             |
 | 40 | `OpSetField`       | `nameIdx` (2)                   | `val, struct → struct`   | Pop value then struct; set field; push struct back               |
 | 41 | `OpEnumValue`      | `typeIdx` (2), `tagIdx` (2)     | `→ EnumValue`            | Create `EnumValue{TypeName, Tag, ordinal}`                       |
-| 42 | `OpGreaterEqual`   | —                               | `b, a → bool`            | `a >= b` (also used for `<=` by swapping operands)               |
+| 42 | `OpGreaterEqual`   | —                               | `b, a → bool`            | `a >= b`                                                         |
 | 43 | `OpSetIndex`       | —                               | `val, idx, obj → obj`    | Mutate `obj[idx]` in place; push the container back              |
 | 44 | `OpBitAnd`         | —                               | `b, a → a&b`             | Bitwise AND; both operands must be `INTEGER`                     |
 | 45 | `OpBitOr`          | —                               | `b, a → a\|b`            | Bitwise OR; both operands must be `INTEGER`                      |
@@ -244,6 +244,8 @@ fixed** by the declaration order below, so do not reorder them.
 | 56 | `OpIterInit`       | —                               | `iterable → iter`        | Pop a collection; push a cursor over it (hash keys in `Inspect` order) |
 | 57 | `OpIterNext`       | `target` (2), `binds` (1)       | `iter → iter[, key], val` | Advance the cursor: push `binds` values on top of it, or jump to `target` when spent |
 | 58 | `OpMatchFail`      | —                               | `subject → (error)`      | Pop the unmatched subject and raise, naming the value that fell through |
+| 59 | `OpLess`           | —                               | `b, a → bool`            | `a < b`                                                          |
+| 60 | `OpLessEqual`      | —                               | `b, a → bool`            | `a <= b`                                                         |
 
 ### 3.2 Stack Notation
 
@@ -255,17 +257,27 @@ The "Stack effect" column uses the convention:
 - `(caller frame)` means the caller's frame is restored — no net stack value in
   the new frame's context.
 
-### 3.3 The `<` Operator Trick
+### 3.3 Comparison Operands Run In Source Order
 
-There is no `OpLess` opcode. When the compiler sees `a < b` it compiles:
+`<` and `<=` have opcodes of their own. Like every other binary operator they
+compile the left operand first, so the operands' side effects run in the order
+they are written:
 
 ```
-[compile b]         ← right operand first
-[compile a]         ← left operand second  (reversed!)
-OpGreater
+[compile a]         ← left operand first
+[compile b]         ← right operand second
+OpLess
 ```
 
-This reuses `OpGreater` without a dedicated less-than opcode.
+There used to be no `OpLess`: the compiler emitted `a < b` as `b > a`, pushing
+the right operand first and reusing `OpGreater`. That saved two opcodes and
+cost the source-order guarantee — `next() < next()` called the right-hand
+`next` first, while every other operator, and the tree-walking evaluator macro
+expansion computes an `unquote` with, called the left-hand one first. The same
+expression then answered differently inline and inside a macro. `OpLess` and
+`OpLessEqual` were appended to the instruction set and the swap removed;
+`OpGreater` and `OpGreaterEqual` keep the values and the meanings they always
+had, so bytecode compiled before the change still runs.
 
 ---
 
@@ -300,7 +312,7 @@ core compiler. See `builtin/lua.go` for context.
 
 | Version | Emitted by | `OpGetBuiltin` operand |
 | --- | --- | --- |
-| absent (decodes to 0, normalised to 1) | up to v2.4.0 | an ordinal into the global `builtin.Builtins` registry |
+| absent (decodes to 0, normalised to 1) | up to v2.4.0 | an ordinal into the global `builtin.Builtins` registry of the release that compiled it |
 | 2 | v2.5.0 onward | `0x8000 \| i`, where `i` indexes this program's own `BuiltinNames` |
 
 Version 1 made the registry append-only forever. An ordinal baked into an
@@ -315,12 +327,44 @@ single instruction runs, and reports a name this runtime does not have rather
 than failing at whichever call site happens to be reached. Only referenced
 builtins are listed, so retiring an unrelated one cannot stop a program loading.
 
-Version 1 artifacts still run. Their operands resolve through
+Version 1 artifacts from v2.3.0 to v2.4.x still run. Their operands resolve through
 `builtin/legacy_ordinals.go`, a frozen snapshot of the registry as it stood at
 v2.4.0 — frozen because those indices are baked into files that cannot be
 recompiled. A builtin that is renamed adds an entry to `builtin.Aliases`, which
 keeps the old name resolvable for old bytecode without keeping it callable from
 new source.
+
+One ordinal meant two builtins before v2.5.0. `help` was appended to the
+registry at init, after every other entry, so it sat at whatever the end was:
+398 in v2.3.x, and 408 in v2.4.x, whose ten new builtins put `pmap` at 398.
+`legacy_ordinals.go` therefore also records v2.3.x's registry, as the v2.4.x
+snapshot with `help` at 398: v2.3.x's 399 entries are its first 399, and
+v2.2.x's 211 entries are the first 211 of both tables. Neither v2.3.x nor v2.4.x
+wrote `Version`, so the runner reads which table a version 1 artifact needs
+from the container itself: gob writes `ByteCode`'s type, naming every exported
+field, ahead of the value, and only v2.4.0 and later declare `OpcodeMap` there
+(`compiler.LegacyRegistryOf`). A stream whose type cannot be read that way is
+refused rather than guessed at.
+
+Registries before v2.2.0 ordered their entries differently, and neither table
+describes them. A v2.2.x artifact that calls a builtin does not run correctly
+either, although its registry matches: v2.3.0 widened `OpGetBuiltin`'s operand
+from one byte to two, so this runtime reads a v2.2.x builtin call's operand
+with the next instruction's first byte in it, binds whichever builtin the two
+bytes number (or stops when they number none), and reads every instruction
+after it out of step. v2.2.x wrote the same `ByteCode` type as v2.3.x, so
+nothing in the container tells such an artifact apart, and it is not refused.
+
+Two development commits between the v2.3.0 and v2.4.0 tags, `821bece` and
+`31182f3`, had v2.4.0's registry but no `OpcodeMap`. Their artifacts read as
+v2.3.x, so a `pmap` call in one reaches `help`; the builtins v2.4.0 added after
+`pmap` still resolve, because the v2.3.x table keeps the snapshot's entries
+past 398.
+
+Both stay for the whole 2.x line: retiring version 1, or the `net_syn_scan`
+alias of `net_connect_scan`, stops artifacts that already exist from running,
+which only a major release may do. 3.0 is the first release that may remove
+either, and its changelog will say so if it does.
 
 The `0x8000` tag on version 2 operands (`code.BuiltinNameTableFlag`) is for the
 one case the version field cannot cover. A pre-v2.5 runtime does not know to
@@ -383,6 +427,20 @@ the user wrote; `MacroTable` gives the macro's definition. Both are needed: when
 generated code is wrong, the call site contains none of the logic that failed.
 The parser's `ast.Program.MacroExpansions` side-table carries this from
 expansion to compilation.
+
+**An entry whose line is 0 is a reset.** A lookup answers with the last entry at
+or before an offset, so "populated only over instructions a macro produced"
+needs an entry recording where an expansion stops as much as one recording where
+it starts -- without it the last macro in a program is reported as the origin of
+every instruction compiled after it. `MacroTable` and `EndTable` therefore carry
+entries whose accumulated line is 0, which mean the previous entry's coverage
+ends here: offsets from there on have no macro origin and no recorded end, and a
+reporter falls back to a caret rather than underlining a span it would be taking
+from another construct. `LineTable` never carries one -- an instruction with no
+position of its own belongs to the construct it was emitted for and inherits its
+line, which is what writing no entry achieves. The entry encoding does not
+change, so a decoder that knows nothing about resets reads line 0, and every
+consumer of a position already treats a zero line as no position at all.
 
 **Versioning.** These fields needed no `Version` bump, unlike `BuiltinNames`.
 gob omits zero values and ignores fields it does not know, so a new runtime
@@ -473,8 +531,14 @@ type CompilationScope struct {
     instructions    code.Instructions    // byte buffer being built
     lastInstruction EmittedInstruction   // most recently emitted instruction
     prevInstruction EmittedInstruction   // the one before last (for pop-removal)
+
+    unresolvedJumps map[int]unresolvedJump  // forward jumps awaiting a target
 }
 ```
+
+`unresolvedJumps` is per scope and not per compiler because a jump position is
+an offset into one stream and means something else in any other. The three
+position tables the scope also builds are omitted above; see section 11.
 
 The main program compiles into `scopes[0]`. Each function literal pushes a new
 scope via `enterScope()` and pops it with `leaveScope()`.
@@ -490,17 +554,54 @@ jumps can be back-patched:
 
 ```go
 // Emit jump with placeholder target
-jumpPos := c.emit(code.OpJumpFalse, 9999)
+jumpPos := c.emitPlaceholder(code.OpJumpFalse)
 
 // ... compile consequence ...
 
-// Back-patch: replace the 9999 target with the real destination
+// Back-patch: replace the placeholder with the real destination
 c.changeOperand(jumpPos, realTarget)
 ```
 
 `changeOperand` calls `replaceInstruction` which overwrites the bytes at `pos`
 in the current instruction buffer. This works because `Make` produces the same
-byte length regardless of the operand value.
+byte length regardless of the operand value. Operands after the first are read
+back and re-emitted unchanged, so a wider instruction — `OpIterNext` carries a
+binding count after its target — keeps its tail instead of having it fall off
+the end of a shorter rebuilt instruction.
+
+#### The placeholder is owed a target
+
+`emitPlaceholder` emits operand 0 as `placeholderTarget` (9999) and records the
+position in the current scope's `unresolvedJumps`; `changeOperand` removes it.
+Nothing else writes to that map, so between them it is exactly the set of jumps
+the compiler still owes a target.
+
+`assertJumpsResolved` requires the set to be empty before a stream is finished,
+and there are two such moments: `leaveScope`, after which a function's stream
+becomes a constant in the pool and nobody holds offsets into it any more, and
+the end of the `*ast.Program` arm, which is the only ending the main stream has.
+Reaching either with an entry left is reported as an internal compiler error
+naming the opcode, the offset and the line it was emitted from — no program can
+ask for an unpatched jump, so it is a defect in the compiler rather than in the
+source.
+
+The check is there because what an unpatched jump does instead is decided by
+the length of the program it is in, and all three outcomes were measured:
+
+| the stream | what runs |
+| --- | --- |
+| shorter than 9999 bytes | jumps past the end; the run is treated as finished and the program answers whatever was last popped — a boolean, for a program whose value is an integer |
+| longer, byte 9999 mid-instruction | decodes that byte as an opcode: *"unknown opcode 225: the bytecode may be damaged or decrypted with the wrong key, or it may have been built by a newer version of mutant"*, none of which is true |
+| longer, byte 9999 on a boundary | resumes in unrelated code and does not terminate |
+
+`assertJumpsResolved` takes a mark — only jumps emitted at or after it are
+counted — because a program is not always the outermost thing being compiled,
+and an enclosing construct may legitimately be holding a forward jump of its
+own while everything inside it is compiled.
+
+A backward jump does not go through `emitPlaceholder`: a loop's head is a
+position already known, so `emit` is given the real target and there is nothing
+to owe.
 
 ### 6.4 Pop-Removal Optimisation
 
@@ -1133,12 +1234,21 @@ or post simply emits nothing for those phases.
 type LoopContext struct {
     breakPositions    []int   // byte offsets of OpJump instructions from break
     continuePositions []int   // byte offsets of OpJump instructions from continue
+    pendingAtEntry    int     // operands the enclosing expressions held at entry
 }
 ```
 
 When `break` or `continue` is encountered:
 
-- Emit `OpJump 9999` (placeholder).
+- Emit one `OpPop` for every operand the enclosing expressions have pushed
+  since the loop was entered — `c.pendingOperands - ctx.pendingAtEntry` of
+  them. Each target a break or a continue can reach reads the stack at the
+  depth the loop was entered with, so a jump out of the middle of an
+  expression has to drop that expression's operands on the way out. Without
+  the pops, `let t = [0, if (c) { break; } else { 1 }];` leaves the array's
+  first element behind and the `OpPop` meant for a for-in's cursor takes it
+  instead.
+- Emit `OpJump 9999` (placeholder), after those pops.
 - Append the emitted position to `ctx.breakPositions` / `ctx.continuePositions`.
 
 After the loop body and post-increment are fully compiled:
@@ -1204,6 +1314,7 @@ two-binding loop bind one.
 
 ### 13.5 Match Expressions
 
+<!-- mutant:fragment -->
 ```mutant
 match (subject) { p1 | p2 => a, p3 => b, _ => c }
 ```
@@ -1616,10 +1727,17 @@ type Hashable interface {
 type HashKey struct {
     Type  ObjectType
     Value uint64
+    Text  string
 }
 ```
 
-Implemented by `Integer`, `Boolean`, and `String`.
+Implemented by `Integer`, `Float`, `Boolean`, `String` and `Bytes`. Two keys are
+one entry only when every field is equal, and every field is exact: a boolean,
+an integer or a float's bits sit in `Value`, a string sits whole in `Text`, and
+a buffer's SHA-256 sits in `Text` -- never the buffer, which may be classified
+plaintext and would otherwise be copied into a string nothing can zero. Before
+2.6.0 a string or a buffer was keyed by its FNV-1a-64 digest alone, so two
+values with one digest were one entry.
 
 ### 17.4 `CompiledFunction`
 

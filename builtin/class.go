@@ -1,0 +1,292 @@
+package builtin
+
+// Classification labels.
+//
+// A classification is a name and a tag. The name is what an examiner writes in
+// a report; the tag is what a record segment carries, and it is an HMAC keyed
+// to the case key, so two investigations that both declare "restricted"
+// produce different tags and nobody holding both records can link them.
+//
+// # Why labels are declared before they are used
+//
+// `class_define` exists so that `record_classify_range` can refuse a label
+// nobody declared. Without it a typo is not an error, it is a new
+// classification with no name anybody recognises and no row in the manifest --
+// which is the failure mode this whole family is built to prevent. Declaring
+// first turns a silent new secret class into an error at the line that made it.
+//
+// # Where the set lives, and what that costs
+//
+// On the case session, sealed into the manifest, which is signed. Not in the
+// key file: the key is the thing an examiner keeps away from the handover, and
+// a scheme written into it would either travel with the key or not travel at
+// all. And in the case's ledger once the case is attached to one with
+// `case_attach`: class_define writes each definition there before the run
+// holds it, and a later attach reads back the ones made under the open key
+// (see case_lifecycle.go).
+//
+// The cost is stated plainly in docs/DISCLOSURE_POLICY.md and repeated here
+// because it is the kind of thing a reader should meet twice. A `.mrec`
+// separated from its case manifest holds tags whose meaning is not recoverable
+// from anything its holder has. The binding is cryptographic; the naming is
+// documentary. That is deliberate -- the manifest is the case document and it
+// is signed -- but it means a record without its case is evidentially mute
+// even when it is cryptographically openable.
+
+import (
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
+
+	"mutant/object"
+	"mutant/security"
+)
+
+// classDefineOptions is the whole option surface. A description is prose for
+// the manifest and is never part of the tag.
+var classDefineOptions = []string{"description"}
+
+// maxClassLabel is a display limit rather than a cryptographic one. HMAC takes
+// any length; a label nobody can read in a table is the actual failure.
+const maxClassLabel = 64
+
+// ClassDefine declares one classification label and returns its tag.
+func ClassDefine(args ...object.Object) object.Object {
+	if len(args) < 1 || len(args) > 2 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
+	}
+	opts, errObj := secretOptionsArg(BuiltinNameClassDefine, args, 2, classDefineOptions...)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	label, errObj := requireStringArg(BuiltinNameClassDefine, args[0], 1)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	description, errObj := opts.str("description", "")
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	canonical, errObj := canonicalClassLabel(BuiltinNameClassDefine, label)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+
+	custodyStore.Lock()
+	defer custodyStore.Unlock()
+
+	session, errObj := openSessionLocked(BuiltinNameClassDefine)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	if session.classTagKey == nil {
+		return resultAndError(nil, newError("%s: no case key is open; call `case_key_open(path)` "+
+			"first, because a class label is tagged under the case key",
+			BuiltinNameClassDefine))
+	}
+	for _, existing := range session.classes {
+		if existing.Canonical != canonical {
+			continue
+		}
+		// A class case_attach read back is the same class declared again by
+		// the same script in a later run, and that is not a mistake.
+		if existing.FromLedger && (description == "" || description == existing.Description) {
+			return resultAndError(classDefineResult(existing, true), nil)
+		}
+		if existing.FromLedger {
+			return resultAndError(nil, newError("%s: the case's ledger defines %q with the description %q, "+
+				"and a definition there is written once", BuiltinNameClassDefine, existing.Label,
+				existing.Description))
+		}
+		return resultAndError(nil, newError("%s: %q is already defined as %q. Two labels that "+
+			"differ only in case or spacing would carry the same tag and mean two different "+
+			"things in the same report",
+			BuiltinNameClassDefine, label, existing.Label))
+	}
+	if errObj := session.stateRefusalLocked(BuiltinNameClassDefine, caseActDefine); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	ledger, errObj := session.attachedLedgerLocked(BuiltinNameClassDefine)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+
+	tag, err := security.TagForClass(session.classTagKey, canonical)
+	if err != nil {
+		return resultAndError(nil, newError("%s: %s", BuiltinNameClassDefine, err.Error()))
+	}
+	class := caseClass{
+		Label:       label,
+		Canonical:   canonical,
+		Description: description,
+		Tag:         hex.EncodeToString(tag[:]),
+		Index:       len(session.classes),
+		DefinedAt:   custodyNow(),
+	}
+	// Written through to the ledger of an attached case before it is in the
+	// run, so the run never holds a definition its ledger does not.
+	if ledger != nil {
+		if err := session.recordClassLocked(ledger, class); err != nil {
+			return resultAndError(nil, newError("%s: recording the class in the case's ledger: %s",
+				BuiltinNameClassDefine, err.Error()))
+		}
+		class.InLedger = true
+	}
+	session.classes = append(session.classes, class)
+
+	// Recorded under the lock this function already holds, which is why it
+	// appends directly rather than calling custodyRecordArtifact -- that takes
+	// the same lock and would deadlock.
+	now := class.DefinedAt
+	session.appendEvent(now, BuiltinNameClassDefine, fmt.Sprintf("classification %q declared", label), map[string]any{
+		"label":     label,
+		"canonical": canonical,
+		"tag":       class.Tag,
+		"index":     int64(class.Index),
+		"in_ledger": class.InLedger,
+	})
+
+	return resultAndError(classDefineResult(class, false), nil)
+}
+
+// classDefineResult is class_define's answer, for a class declared now or
+// one the case's ledger already defined.
+func classDefineResult(class caseClass, already bool) object.Object {
+	return makeHashObject(map[string]object.Object{
+		"label":           stringObj(class.Label),
+		"canonical":       stringObj(class.Canonical),
+		"description":     stringObj(class.Description),
+		"index":           intObj(int64(class.Index)),
+		"tag":             stringObj(class.Tag),
+		"in_ledger":       boolObj(class.InLedger),
+		"already_defined": boolObj(already),
+		"status":          stringObj("ok"),
+	})
+}
+
+// ClassList reports the scheme in force.
+//
+// It answers with the same keys whether or not a case is open, because a
+// program that branches on "is there a scheme" should read a field rather than
+// an error. `open` says a case is open; `tagged` says a key is open, which is
+// what makes a tag possible at all.
+func ClassList(args ...object.Object) object.Object {
+	if len(args) != 0 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=0", len(args)))
+	}
+
+	custodyStore.RLock()
+	defer custodyStore.RUnlock()
+
+	session := custodyStore.session
+	if session == nil || session.Closed {
+		return resultAndError(makeHashObject(map[string]object.Object{
+			"classes": &object.Array{Elements: []object.Object{}},
+			"count":   intObj(0),
+			"case_id": stringObj(""),
+			"open":    boolObj(false),
+			"tagged":  boolObj(false),
+		}), nil)
+	}
+
+	classes := make([]object.Object, 0, len(session.classes))
+	for _, class := range session.classes {
+		classes = append(classes, makeHashObject(map[string]object.Object{
+			"label":       stringObj(class.Label),
+			"canonical":   stringObj(class.Canonical),
+			"description": stringObj(class.Description),
+			"index":       intObj(int64(class.Index)),
+			"tag":         stringObj(class.Tag),
+			"source":      stringObj(definitionSource(class.FromLedger)),
+			"in_ledger":   boolObj(class.InLedger),
+		}))
+	}
+	return resultAndError(makeHashObject(map[string]object.Object{
+		"classes": &object.Array{Elements: classes},
+		"count":   intObj(int64(len(classes))),
+		"case_id": stringObj(session.ID),
+		"open":    boolObj(true),
+		"tagged":  boolObj(session.classTagKey != nil),
+	}), nil)
+}
+
+// canonicalClassLabel is what the tag is computed over.
+//
+// NFC, trim, collapse internal spaces, lower, then NFC again. The order
+// matters in both directions. Lowering before normalising would make two
+// labels that normalise together lower apart; normalising only before lowering
+// leaves the result not normalised at all, because lowering a decomposed
+// capital can produce a letter that does have a precomposed form. The tag is
+// over
+// the canonical form so that "Restricted", "restricted" and " restricted "
+// are one class rather than three, which is the mistake an examiner actually
+// makes at two in the morning.
+//
+// The limit of this, stated where the code is rather than only in the policy:
+// two labels differing by a homoglyph, a zero-width joiner or a bidi control
+// character are two classes with two tags and no warning. Control and format
+// characters are refused outright, which removes the worst of it; the rest is
+// mitigated by a class table being short and an examiner reading it. That is a
+// human mitigation and it is the only one available -- a tool cannot decide
+// that Cyrillic "с" was meant to be Latin "c".
+func canonicalClassLabel(op, label string) (string, *object.Error) {
+	return canonicalLabel(op, "classification label", label)
+}
+
+// canonicalLabel is the rule above with the noun as a parameter, so that a view
+// name and a classification label are the same name under two headings rather
+// than two normalisations that drift.
+//
+// They must not drift. A view names the classes it grants, so `view_define`
+// resolves its arguments through exactly the rule `class_define` tagged them
+// under; a second normalisation that trimmed differently or folded a different
+// pair would make a view silently grant nothing, and "granted nothing" is the
+// one failure this family must never produce quietly. Parameterising the noun
+// is the whole change -- every check below is the classification rule, applied
+// unchanged.
+func canonicalLabel(op, kind, label string) (string, *object.Error) {
+	// Checked before anything normalises it: norm.NFC passes invalid bytes
+	// through unchanged, so a label that is not valid UTF-8 reaches TagForClass
+	// intact and is HMAC'd over bytes no JSON document can carry back.
+	if errObj := custodyDocumentName(op, kind, label); errObj != nil {
+		return "", errObj
+	}
+	trimmed := strings.TrimSpace(norm.NFC.String(label))
+	if trimmed == "" {
+		return "", newError("%s: a %s must not be empty", op, kind)
+	}
+	if len([]rune(trimmed)) > maxClassLabel {
+		return "", newError("%s: %q is longer than %d characters. A label is read in a table and "+
+			"quoted in a report", op, label, maxClassLabel)
+	}
+	for _, r := range trimmed {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return "", newError("%s: %q contains a control or formatting character. Two labels "+
+				"that look identical and tag differently would be two names nobody could tell "+
+				"apart in a report", op, label)
+		}
+	}
+	// Internal whitespace is collapsed so that "top secret" and "top  secret"
+	// are one label. strings.Fields splits on any Unicode space.
+	//
+	// Normalised a second time, after lowering, because lowering can undo the
+	// first pass. Capital J followed by a combining caron is already NFC --
+	// there is no precomposed capital J-with-caron to compose it into -- but
+	// its lowercase is precomposed, U+01F0, so lower(NFC(x)) is not NFC. One
+	// label written in two cases would canonicalise to two different strings,
+	// carry two different tags, and be refused as a duplicate neither time,
+	// which is the failure this function exists to prevent. The second pass is
+	// idempotent on everything else.
+	//
+	// What it does not do: ToLower is case lowering and not Unicode case
+	// folding, so "Restricted" and "restricted" become one label while the few
+	// pairs only full folding unifies -- German sharp s against "ss" is the one
+	// anybody meets -- stay two. That is deliberate. Those two do not look
+	// alike in a report, which is the standard the rest of this function is
+	// held to, and folding would also map Turkish dotted capital I onto a
+	// sequence no examiner typed.
+	return norm.NFC.String(strings.ToLower(strings.Join(strings.Fields(trimmed), " "))), nil
+}

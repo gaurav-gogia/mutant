@@ -1,0 +1,421 @@
+// Seal an exhibit carved off a disk image by class, disclose two parts to two recipients, and verify a package.
+// mutant:sweep needs-input -- case_key_create asks for a passphrase at the terminal; TestTheRecordDisclosureExampleRunsEndToEnd supplies one
+
+putln("=== record_disclosure ===");
+
+let check_err = fn(err, op) {
+    if (err) {
+        putln("[error]", op, ":", err);
+        return true;
+    }
+    return false;
+};
+
+// No null literal: a bare return yields null.
+let no_root = fn() {
+    return;
+};
+
+let image_path = "examples/data/usb_stick.img";
+let output_directory = "example_output/record_disclosure";
+let exhibit_path = output_directory + "/PHISH.EML";
+let key_path = output_directory + "/case.key";
+let record_path = output_directory + "/phish.mrec";
+let ledger_path = output_directory + "/ledger";
+let counsel_dir = output_directory + "/to_counsel";
+let desk_dir = output_directory + "/to_malware_desk";
+
+let run = fn() {
+    let exists, err = fs_exists(output_directory);
+    if (check_err(err, "fs_exists")) {
+        return false;
+    }
+    if (exists) {
+        putln(output_directory, "already exists. A key, a record and a package are each");
+        putln("refused rather than written over; delete the directory to run this again.");
+        return false;
+    }
+    let _, err = fs_mkdir(output_directory);
+    if (check_err(err, "fs_mkdir")) {
+        return false;
+    }
+
+    let _, err = case_open("IR-2026-0413", "example examiner", {"hash": "sha256"});
+    if (check_err(err, "case_open")) {
+        return false;
+    }
+
+    let device, err = table_open(image_path);
+    if (check_err(err, "table_open")) {
+        return false;
+    }
+    let rows, err = table_list_partitions(device["handle"]);
+    if (check_err(err, "table_list_partitions")) {
+        return false;
+    }
+    // The listing also maps the partition table and the gaps: only an allocated row is a volume.
+    let volumes = filter(rows, fn(row) {
+        return row["allocated"];
+    });
+    if (len(volumes) != 1) {
+        putln("[error] expected one volume on the device, found", len(volumes));
+        return false;
+    }
+    let volume = first(volumes);
+    putln("device:", device["table_type"], "table,", len(rows), "rows, one volume:", volume["type_name"], "at byte", volume["start_byte"], "+", volume["length_byte"]);
+    let _, err = table_close(device["handle"]);
+    if (check_err(err, "table_close")) {
+        return false;
+    }
+
+    let fs, err = fat_open(image_path, volume);
+    if (check_err(err, "fat_open")) {
+        return false;
+    }
+    let fat = fs["handle"];
+
+    let checked_fs, err = fat_verify(fat);
+    if (check_err(err, "fat_verify")) {
+        return false;
+    }
+    putln("volume verified:", checked_fs["verified"], " checks passed:", checked_fs["checks_passed"], "of", checked_fs["checks_run"]);
+    for (c in checked_fs["checks"]) {
+        putln("   ", c["name"], " checked:", c["checked"], " passed:", c["passed"]);
+    }
+
+    let carved, err = fat_extract_file(fat, "/INBOX/PHISH.EML", exhibit_path);
+    if (check_err(err, "fat_extract_file")) {
+        return false;
+    }
+    putln("extracted", carved["path"], ":", carved["bytes_written"], "bytes  sha256:", carved["digest"]);
+    let _, err = fat_close(fat);
+    if (check_err(err, "fat_close")) {
+        return false;
+    }
+
+    let registered, err = case_evidence(exhibit_path);
+    if (check_err(err, "case_evidence")) {
+        return false;
+    }
+    if (registered["hash"] != carved["digest"]) {
+        putln("[error] the carved copy is not what came off the device");
+        return false;
+    }
+
+    let key, err = case_key_create(key_path);
+    if (check_err(err, "case_key_create")) {
+        return false;
+    }
+    putln("case key:", key["fingerprint"], " generation:", key["generation"]);
+    let _, err = case_key_open(key_path);
+    if (check_err(err, "case_key_open")) {
+        return false;
+    }
+
+    let _, err = class_define("open");
+    if (check_err(err, "class_define open")) {
+        return false;
+    }
+    let _, err = class_define("pii", {"description": "a natural person's contact details"});
+    if (check_err(err, "class_define pii")) {
+        return false;
+    }
+    let _, err = class_define("restricted", {"description": "live malicious code"});
+    if (check_err(err, "class_define restricted")) {
+        return false;
+    }
+
+    let text, err = fs_read(exhibit_path);
+    if (check_err(err, "fs_read")) {
+        return false;
+    }
+    let victim = "finance@example.org";
+    let victim_at = text_index(text, victim);
+    // TVqQ is base64 for a PE's MZ header; the attachment ends at the blank line before the closing boundary.
+    let payload_at = text_index(text, "TVqQ");
+    let closing_at = text_index(text, "--b0undary42--");
+    if (victim_at < 0 || payload_at < 0 || closing_at < 0) {
+        putln("[error] the exhibit is not the sample this example was written against");
+        return false;
+    }
+
+    let pii, err = record_classify_range(victim_at, len(victim), "pii");
+    if (check_err(err, "record_classify_range pii")) {
+        return false;
+    }
+    let malware, err = record_classify_range(payload_at, closing_at - 2 - payload_at, "restricted");
+    if (check_err(err, "record_classify_range restricted")) {
+        return false;
+    }
+
+    let sealed, err = record_seal(exhibit_path, record_path, [pii, malware], {"default": "open"});
+    if (check_err(err, "record_seal")) {
+        return false;
+    }
+    putln("sealed:", sealed["path"], " ", sealed["plaintext_length"], "bytes in", sealed["segments"], "segments  record:", sealed["record_uid"]);
+
+    let checked, err = record_verify(record_path);
+    if (check_err(err, "record_verify")) {
+        return false;
+    }
+    putln("verified without a key:", checked["verified_without_key"], " signed:", checked["signed"], " signature valid:", checked["signature_valid"]);
+
+    let opened, err = record_open(record_path);
+    if (check_err(err, "record_open")) {
+        return false;
+    }
+    let record = opened["handle"];
+
+    // Plaintext read from a classified record is refused by every sink until record_release lets it out.
+    let address, err = record_read(record, victim_at, len(victim));
+    if (check_err(err, "record_read")) {
+        return false;
+    }
+    let _, err = fs_write(output_directory + "/address.txt", address);
+    putln("writing the address out:", err);
+
+    let released, err = record_release(address, "the complainant's own address, for their statement");
+    if (check_err(err, "record_release")) {
+        return false;
+    }
+    let _, err = fs_write(output_directory + "/address.txt", released);
+    if (check_err(err, "fs_write")) {
+        return false;
+    }
+    putln("released", len(released), "bytes; the case timeline says who and why");
+
+    let _, err = view_define("counsel", ["open", "pii"]);
+    if (check_err(err, "view_define counsel")) {
+        return false;
+    }
+    let _, err = view_define("malware-desk", ["open", "restricted"]);
+    if (check_err(err, "view_define malware-desk")) {
+        return false;
+    }
+
+    for (view in ["counsel", "malware-desk"]) {
+        let preview, err = view_preview(record, view);
+        if (check_err(err, "view_preview")) {
+            return false;
+        }
+        putln("view", view, ":", preview["granted_bytes"], "bytes released,", preview["withheld_bytes"], "withheld");
+        putln("   withheld:");
+        for (r in preview["withheld_runs"]) {
+            putln("      bytes", r["offset"], "+", r["length"], " class:", r["label"]);
+        }
+    }
+
+    for (view in ["counsel", "malware-desk"]) {
+        let found, err = record_search(record, "example.org", {"view": view});
+        if (check_err(err, "record_search " + view)) {
+            return false;
+        }
+        putln("search under", view + ":", found["count"], "found in", found["searched_segments"], "of", found["segments"], "segments  complete:", found["complete"]);
+        for (hit in found["hits"]) {
+            putln("   at", hit["offset"], " class:", hit["classes"][0]["label"]);
+        }
+    }
+
+    // A hit's context is classified plaintext too, and is refused the same way.
+    let by_name, err = record_search(record, "finance", {"view": "counsel", "context": 12});
+    if (check_err(err, "record_search finance")) {
+        return false;
+    }
+    let around = by_name["hits"][0]["context"];
+    let _, err = fs_write(output_directory + "/hit.txt", around);
+    putln("writing a hit's context out:", err);
+
+    let _, err = role_define("legal", ["counsel"]);
+    if (check_err(err, "role_define legal")) {
+        return false;
+    }
+    let _, err = role_define("external_partner", ["malware-desk"]);
+    if (check_err(err, "role_define external_partner")) {
+        return false;
+    }
+
+    let info, err = ledger_open(ledger_path, "example examiner");
+    if (check_err(err, "ledger_open")) {
+        return false;
+    }
+    let ledger = info["handle"];
+
+    let counsel = "outside counsel for the complainant";
+    let desk = "CERT malware desk";
+    let _, err = role_assign(ledger, counsel, "legal", "instructed by the complainant");
+    if (check_err(err, "role_assign counsel")) {
+        return false;
+    }
+    let _, err = role_assign(ledger, desk, "external_partner", "the case's malware analysis partner");
+    if (check_err(err, "role_assign malware desk")) {
+        return false;
+    }
+
+    let to_counsel, err = disclose_to_passphrase(ledger, record, "counsel", counsel);
+    if (check_err(err, "disclose_to_passphrase counsel")) {
+        return false;
+    }
+    let to_desk, err = disclose_to_passphrase(ledger, record, "malware-desk", desk);
+    if (check_err(err, "disclose_to_passphrase malware-desk")) {
+        return false;
+    }
+    putln("to counsel (" + to_counsel["recipient_role"] + "):", to_counsel["granted_segments"], "of", to_counsel["segments"], "segments, in a sealed grant file of", to_counsel["grant_bytes"], "bytes");
+    putln("to the malware desk (" + to_desk["recipient_role"] + "):", to_desk["granted_segments"], "of", to_desk["segments"], "segments, in a sealed grant file of", to_desk["grant_bytes"], "bytes");
+
+    // A package's proof resolves against a snapshot, so compact first; the root is sent separately.
+    let _, err = ledger_compact(ledger);
+    if (check_err(err, "ledger_compact")) {
+        return false;
+    }
+    let counsel_pkg, err = disclose_bundle(ledger, to_counsel["disclosure_uid"], counsel_dir);
+    if (check_err(err, "disclose_bundle counsel")) {
+        return false;
+    }
+    let desk_pkg, err = disclose_bundle(ledger, to_desk["disclosure_uid"], desk_dir);
+    if (check_err(err, "disclose_bundle malware-desk")) {
+        return false;
+    }
+    let root = counsel_pkg["snapshot_root"];
+    putln("packages:", counsel_pkg["dir"], "and", desk_pkg["dir"]);
+    putln("snapshot root, to send separately:", root);
+
+    let verdict, err = disclose_verify(counsel_dir, root);
+    if (check_err(err, "disclose_verify")) {
+        return false;
+    }
+    putln("counsel's package verified:", verdict["verified"], " checks passed:", verdict["checks_passed"], "of", verdict["checks_run"]);
+
+    let unanchored, err = disclose_verify(counsel_dir, no_root());
+    if (check_err(err, "disclose_verify with no root")) {
+        return false;
+    }
+    putln("verified with no root:", unanchored["verified"]);
+    for (finding in unanchored["findings"]) {
+        putln("   finding:", finding);
+    }
+
+    let as_counsel, err = record_open(counsel_dir + "/record.mrec", {"grant": counsel_dir + "/grant.json"});
+    if (check_err(err, "record_open with the grant")) {
+        return false;
+    }
+    let whole, err = record_read_partial(as_counsel["handle"], 0, as_counsel["plaintext_length"]);
+    if (check_err(err, "record_read_partial")) {
+        return false;
+    }
+    putln("counsel reads the record with", whole["withheld"], "of", whole["length"], "bytes withheld:");
+    for (hole in whole["holes"]) {
+        putln("   hole at", hole["offset"], "+", hole["length"], " ", hole["reason"]);
+    }
+    let _, err = record_close(as_counsel["handle"]);
+    if (check_err(err, "record_close")) {
+        return false;
+    }
+
+    let history, err = disclose_history(ledger);
+    if (check_err(err, "disclose_history")) {
+        return false;
+    }
+    for (d in history["disclosures"]) {
+        putln("ledger:", d["recipient"], " as", d["recipient_role"], " view:", d["view"], " segments:", d["granted_runs"], " bytes recoverable:", d["bytes_recoverable"]);
+    }
+
+    let versions, err = redaction_versions(ledger, sealed["record_uid"]);
+    if (check_err(err, "redaction_versions")) {
+        return false;
+    }
+    for (v in versions["versions"]) {
+        putln("redaction:", v["view"], "version", v["version"], " released:", v["granted"], " in force:", v["in_force"]);
+    }
+    putln("stale disclosures:", versions["stale"]);
+
+    let add_finding = fn(name, note) {
+        let written, err = ledger_add_node(ledger, {"finding": name, "note": note}, 1);
+        if (check_err(err, "ledger_add_node " + name)) {
+            return 0;
+        }
+        return written["id"];
+    };
+    let lure_found = add_finding("lure", "an overdue-invoice pretext from a lookalike domain");
+    let victim_found = add_finding("victim", "the complainant's mailbox, in the To: header");
+    let payload_found = add_finding("payload", "the attachment: a dropper, base64 in the body");
+    let hunch_found = add_finding("hunch", "the same sender as an earlier case, not yet shown");
+    let _, err = ledger_add_edge(ledger, lure_found, victim_found, {"relation": "targets"}, 1);
+    if (check_err(err, "ledger_add_edge targets")) {
+        return false;
+    }
+    let _, err = ledger_add_edge(ledger, lure_found, payload_found, {"relation": "carries"}, 1);
+    if (check_err(err, "ledger_add_edge carries")) {
+        return false;
+    }
+    let _, err = ledger_classify(ledger, lure_found, "open", "the pretext anyone on the case may read");
+    if (check_err(err, "ledger_classify lure")) {
+        return false;
+    }
+    let classified, err = ledger_classify(ledger, victim_found, "pii", "it names the complainant");
+    if (check_err(err, "ledger_classify victim")) {
+        return false;
+    }
+    putln("the victim finding is shown under:", str_join(classified["shown_under"], ", "));
+    let _, err = ledger_classify(ledger, payload_found, "restricted", "it describes live malicious code");
+    if (check_err(err, "ledger_classify payload")) {
+        return false;
+    }
+
+    // Each view shows only the findings classified into it, so the unclassified hunch shows under none.
+    for (view in ["counsel", "malware-desk"]) {
+        let under, err = ledger_under_view(ledger, view);
+        if (check_err(err, "ledger_under_view " + view)) {
+            continue;
+        }
+        let shown, err = ledger_query_nodes(under["handle"], {"types": [1]});
+        if (check_err(err, "ledger_query_nodes under " + view)) {
+            continue;
+        }
+        let names = map(shown["ids"], fn(id) {
+            let node, err = ledger_node(under["handle"], id);
+            if (check_err(err, "ledger_node")) {
+                return "";
+            }
+            let name, err = bytes_to_string(node["properties"]["finding"], "utf8");
+            if (check_err(err, "bytes_to_string")) {
+                return "";
+            }
+            return name;
+        });
+        putln("under", view + ":", shown["count"], "of 4 findings shown:", str_join(names, ", "));
+        let _, hidden = ledger_node(under["handle"], hunch_found);
+        if (hidden) {
+            putln("   the hunch nobody classified is not shown");
+        }
+        let _, err = ledger_close(under["handle"]);
+        check_err(err, "ledger_close under " + view);
+    }
+
+    let _, err = record_close(record);
+    if (check_err(err, "record_close")) {
+        return false;
+    }
+    let _, err = ledger_close(ledger);
+    if (check_err(err, "ledger_close")) {
+        return false;
+    }
+
+    let drift, err = case_verify();
+    if (check_err(err, "case_verify")) {
+        return false;
+    }
+    putln("custody re-measured", drift["checked"], "sources:", drift["unchanged"], "unchanged,", drift["changed"], "changed,", drift["missing"], "missing");
+
+    let written, err = case_write(output_directory + "/manifest.json");
+    if (check_err(err, "case_write")) {
+        return false;
+    }
+    putln("manifest:", written["path"], " signed:", written["signed"]);
+    let _, err = case_close();
+    if (check_err(err, "case_close")) {
+        return false;
+    }
+    return true;
+};
+
+run();

@@ -21,16 +21,20 @@ package analyzer
 // It says nothing about `exec_string(command)` where the whole string arrives
 // as one value. That is a real hazard too, but it is a question about where the
 // value came from rather than about what this line does with it, and answering
-// it needs the taint tracking pathTraversal carries. Nor does it consult the
-// capability policy that guards these builtins at run time (§1): the lint says
-// what the code does, the policy decides what the program may do.
+// it needs the taint tracking pathTraversal carries.
+//
+// And nothing else guards these builtins: there is no runtime capability policy
+// for them, and none is planned -- SEC-017 in docs/SECURITY_LLD_TRACEABILITY.md
+// records that decision --
+// so this warning is the only thing between a spliced value and a shell, which
+// is a reason to keep it quiet enough to stay switched on.
 
 import (
 	"fmt"
+	"strings"
 
 	mast "mutant/ast"
 	"mutant/builtin"
-	localprotocol "mutant/lsp/internal/protocol"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -79,6 +83,37 @@ var commandSinks = map[string]commandSink{
 	builtin.BuiltinNameLuaRunString: {index: 0, interpreter: "the Lua interpreter"},
 }
 
+// commandArgvSinks are the builtins that hand a program its arguments directly
+// rather than handing a whole string to a shell, and so need the other half of
+// this rule: the one that reports a spliced element only where something will
+// parse it.
+var commandArgvSinks = map[string]string{
+	// exec_argv(argv)
+	builtin.BuiltinNameExecArgv: "a shell",
+}
+
+// commandIntroducingFlags are the argv elements after which the next element is
+// a command for an interpreter to read, rather than an argument for a program
+// to receive.
+//
+// The list is short deliberately, and every entry is a flag a shell documents:
+// -c for the POSIX shells and fish, its clustered forms for a login or
+// interactive one, /C and /K for cmd.exe, and -Command for PowerShell. A flag
+// that is not here is read as an ordinary argument, which is the direction
+// every rule in this family errs in. `-xvzc` ending in a c does not make tar's
+// next argument a command, and reporting it would teach the reader to ignore
+// the rule.
+var commandIntroducingFlags = map[string]struct{}{
+	"-c":       {},
+	"-lc":      {},
+	"-ic":      {},
+	"-ec":      {},
+	"-lic":     {},
+	"-command": {},
+	"/c":       {},
+	"/k":       {},
+}
+
 func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagnostic {
 	if snapshot == nil || snapshot.Program == nil || snapshot.Program.NodePositions == nil {
 		return nil
@@ -95,6 +130,14 @@ func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 	shadowed := namesBoundAnywhere(snapshot.Program.Statements)
 	forEachBuiltinCall(snapshot.Program.Statements, shadowed,
 		func(name string, _ mast.Node, call *mast.CallExpression, bindings map[string]mast.Expression) {
+			if interpreter, isArgvSink := commandArgvSinks[name]; isArgvSink {
+				if diagnostic, found := argvInjectionDiagnostic(
+					snapshot, call, bindings, shadowed, name, interpreter, severity, &source); found {
+					result = append(result, diagnostic)
+				}
+				return
+			}
+
 			sink, isSink := commandSinks[name]
 			if !isSink {
 				return
@@ -104,7 +147,7 @@ func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 				return
 			}
 
-			spliced, how, found := splicedValue(resolveOneHop(argument, bindings))
+			spliced, how, found := splicedValue(resolveOneHop(argument, bindings), bindings)
 			if !found {
 				return
 			}
@@ -118,7 +161,7 @@ func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 			}
 
 			result = append(result, lsp.Diagnostic{
-				Range:    localprotocol.ToLSPRange(rng),
+				Range:    snapshot.Range(rng),
 				Severity: severity,
 				Source:   &source,
 				Message: fmt.Sprintf(
@@ -130,13 +173,97 @@ func lintCommandInjection(snapshot *Snapshot, lintConfig LintConfig) []lsp.Diagn
 	return result
 }
 
+// argvInjectionDiagnostic reports a value spliced into an argv element that an
+// interpreter is going to parse, and reports nothing else.
+//
+// exec_argv hands a program its arguments directly, so an element is one
+// argument whatever it holds, and a value spliced into one is ordinarily
+// nothing to report -- that is the reason the builtin exists. It stops being
+// nothing when an earlier element is a flag telling the program to read a
+// command from the next one, because from there the element is syntax again.
+//
+// So this looks at the flags and not at argv[0]. exec_string gives any bare
+// name the command with -c now, so there is no closed set of shells left to
+// recognise, and a program nobody here has heard of, given -c, parses its
+// argument exactly as bash does.
+func argvInjectionDiagnostic(
+	snapshot *Snapshot,
+	call *mast.CallExpression,
+	bindings map[string]mast.Expression,
+	shadowed map[string]struct{},
+	name string,
+	interpreter string,
+	severity *lsp.DiagnosticSeverity,
+	source *string,
+) (lsp.Diagnostic, bool) {
+	argument := argumentAt(call, 0)
+	if argument == nil {
+		return lsp.Diagnostic{}, false
+	}
+	array, isArray := resolveOneHop(argument, bindings).(*mast.ArrayLiteral)
+	if !isArray || array == nil {
+		return lsp.Diagnostic{}, false
+	}
+
+	flag := ""
+	for _, element := range array.Elements {
+		if element == nil {
+			continue
+		}
+		resolved := resolveOneHop(element, bindings)
+
+		if flag == "" {
+			text, fixed := literalString(resolved)
+			if !fixed {
+				continue
+			}
+			if _, introduces := commandIntroducingFlags[strings.ToLower(strings.TrimSpace(text))]; introduces {
+				flag = strings.TrimSpace(text)
+			}
+			continue
+		}
+
+		spliced, how, found := splicedValue(resolved, bindings)
+		if !found || isSanitized(spliced, bindings, shadowed) {
+			continue
+		}
+		rng, hasRange := snapshot.Program.RangeOf(spliced)
+		if !hasRange {
+			continue
+		}
+
+		return lsp.Diagnostic{
+			Range:    snapshot.Range(rng),
+			Severity: severity,
+			Source:   source,
+			Message: fmt.Sprintf(
+				"This value is %s a command `%s` gives to %s, because an earlier element of the argv is `%s`, which tells it to read a command from the next one. From there the value is syntax and not an argument: a space adds a word, and `;`, `|`, `&&` or `$(...)` start a command of their own. Give the value its own argv element so the program receives it as one argument, and if it genuinely has to reach a command, check it against a list of the values you allow first.",
+				how, name, interpreter, flag),
+		}, true
+	}
+
+	return lsp.Diagnostic{}, false
+}
+
 // splicedValue finds the first piece of a command string that is not fixed
 // text, and says how it got there.
 //
 // A template whose every hole is a string literal, or a concatenation of
 // literals, is a constant that happens to be written in pieces: there is
 // nothing in it the author did not put there, so there is nothing to report.
-func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, found bool) {
+//
+// Each piece is resolved one hop through the scope's bindings before being
+// asked whether it is fixed, which is the same depth the caller already used on
+// the argument as a whole. `let flags = "-la"; exec_string("ls " + flags);` is
+// the constant this paragraph describes -- singleBindings knows `flags` is a
+// literal, and a name bound twice is absent from that map, so a value that
+// could be two things is still reported. Reading only the written piece made
+// the rule warn on a fixed command and push the author to inline the literal or
+// switch the rule off.
+func splicedValue(
+	expr mast.Expression,
+	bindings map[string]mast.Expression,
+) (spliced mast.Expression, how string, found bool) {
 	switch node := expr.(type) {
 	case *mast.TemplateLiteral:
 		if node == nil {
@@ -146,7 +273,7 @@ func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, fo
 			if part == nil {
 				continue
 			}
-			if _, fixed := literalString(part); fixed {
+			if _, fixed := literalString(resolveOneHop(part, bindings)); fixed {
 				continue
 			}
 			return part, "interpolated into", true
@@ -160,12 +287,12 @@ func splicedValue(expr mast.Expression) (spliced mast.Expression, how string, fo
 			if side == nil {
 				continue
 			}
-			if _, fixed := literalString(side); fixed {
+			if _, fixed := literalString(resolveOneHop(side, bindings)); fixed {
 				continue
 			}
 			// A nested `+` is the rest of the same chain; anything else is
 			// the spliced value itself.
-			if inner, innerHow, ok := splicedValue(side); ok {
+			if inner, innerHow, ok := splicedValue(side, bindings); ok {
 				return inner, innerHow, true
 			}
 			if nested, isInfix := side.(*mast.InfixExpression); isInfix && nested != nil && nested.Operator == "+" {

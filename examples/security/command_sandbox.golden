@@ -1,0 +1,6 @@
+=== command_sandbox ===
+policy ALLOWS: whoami
+  exec ok: true exit_code: 0 timed_out: false printed a name: true
+policy DENIES: rm -rf / (not executed)
+built a command via cmd_builder (guarded by the same policy at run time)
+true

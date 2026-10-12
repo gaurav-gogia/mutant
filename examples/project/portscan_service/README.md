@@ -14,8 +14,8 @@ portscan_service/
 
 ## How it fits together
 
-Mutant does not have an `import` statement; instead, a program composes other
-`.mut` files at runtime through builtins that take a file path. `net_serve` is the
+Besides `import` (see [examples/modules](../../modules/)), a program can compose
+other `.mut` files at runtime through builtins that take a file path. `net_serve` is the
 key one here:
 
 - **`main.mut`** opens a listener with `net_listen`, then calls
@@ -38,9 +38,10 @@ services entirely in Mutant (see [docs/SECURE_NETWORKING.md](../../../docs/SECUR
 From the repository root (so the relative handler path resolves):
 
 ```
-# Compile then run the entry point (choose any password):
-mutant run examples/project/portscan_service/main.mut -pwd mypass
-mutant     examples/project/portscan_service/main.mu   -pwd mypass
+# Compile, then run the entry point. Each command prompts for a password;
+# give both the same one (or pass --password-file <path> to both):
+mutant gen --src examples/project/portscan_service/main.mut
+mutant examples/project/portscan_service/main.mu
 ```
 
 The service listens on `127.0.0.1:8085`. In another terminal:

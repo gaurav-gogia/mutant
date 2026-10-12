@@ -216,7 +216,9 @@ func TestReportMarkdownDoesNotPromoteAFindingIntoStructure(t *testing.T) {
 
 	for _, want := range []string{
 		`\# not a heading`,
-		`\4. exe deleted`,
+		// The backslash goes before the "." because a backslash escapes only
+		// punctuation; "\4." would print its backslash.
+		`4\. exe deleted`,
 		`\- not a bullet`,
 		// ">" only changes anything at the start of a line, which the block
 		// starters below cover; escaping it mid-sentence would be noise.
@@ -239,6 +241,197 @@ func TestReportMarkdownKeepsTheShapeOfAParagraph(t *testing.T) {
 	document := renderTestReport(t, report, "markdown", nil)
 	if !strings.Contains(document, "first\\\nsecond") {
 		t.Fatalf("a line break inside a paragraph must survive as a hard break, got:\n%s", document)
+	}
+}
+
+// reportMarkdownCodeOpeners returns the rendered lines that CommonMark would
+// read as the start of a code block: a "~~~" or "```" fence after at most three
+// spaces, or any line with text whose indent reaches column 4 (a tab advancing
+// to the next multiple of 4). A report renders neither from evidence text.
+// Lines end where CommonMark ends them, at "\r\n", "\r" or "\n".
+func reportMarkdownCodeOpeners(document string) []string {
+	var openers []string
+	for _, line := range reportMarkdownLines(document) {
+		column, i := 0, 0
+		for ; i < len(line); i++ {
+			if line[i] == ' ' {
+				column++
+			} else if line[i] == '\t' {
+				column += 4 - column%4
+			} else {
+				break
+			}
+		}
+		rest := line[i:]
+		switch {
+		case rest == "":
+		case column >= 4:
+			openers = append(openers, line)
+		case strings.HasPrefix(rest, "~~~"), strings.HasPrefix(rest, "```"):
+			openers = append(openers, line)
+		}
+	}
+	return openers
+}
+
+func TestReportMarkdownTildeFenceStaysEvidenceText(t *testing.T) {
+	report := newTestReport(t, "Fence\n~~~ in a title", nil)
+	report = reportCall(t, ReportText, report, stringObj("~~~"))
+	report = reportCall(t, ReportText, report, stringObj("  ~~~~ python"))
+	report = reportCall(t, ReportText, report, stringObj("before\n~~~\nafter"))
+	report = reportCall(t, ReportSection, report, stringObj("Conclusion"))
+	report = reportCall(t, ReportText, report, stringObj("the host beaconed"))
+
+	document := renderTestReport(t, report, "markdown", nil)
+
+	if openers := reportMarkdownCodeOpeners(document); len(openers) != 0 {
+		t.Fatalf("evidence text opened a code block at %q; the rest of the report falls inside it:\n%s", openers, document)
+	}
+	for _, want := range []string{"\n\\~~~\n", "\n  \\~~~~ python\n", "before\\\n\\~~~\\\nafter", "\n## Conclusion\n"} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("expected %q in the markdown, got:\n%s", want, document)
+		}
+	}
+}
+
+func TestReportMarkdownIndentStaysEvidenceText(t *testing.T) {
+	report := newTestReport(t, "Indent", map[string]object.Object{"subtitle": stringObj("lead\n\n    pasted log line")})
+	report = reportCall(t, ReportText, report, stringObj("    # indented"))
+	report = reportCall(t, ReportText, report, stringObj("\tC:\\Windows"))
+	report = reportCall(t, ReportText, report, stringObj("  \t- tab after spaces"))
+	report = reportCall(t, ReportText, report, stringObj("    \nafter a line of spaces"))
+	report = reportCall(t, ReportSection, report, stringObj("Conclusion"))
+	report = reportCall(t, ReportText, report, stringObj("the host beaconed"))
+
+	document := renderTestReport(t, report, "markdown", nil)
+
+	if openers := reportMarkdownCodeOpeners(document); len(openers) != 0 {
+		t.Fatalf("an indent opened a code block at %q, where every escape prints as a backslash:\n%s", openers, document)
+	}
+	for _, want := range []string{
+		"\n&#32;   pasted log line\n",
+		"\n&#32;   \\# indented\n",
+		"\n&#9;C:\\\\Windows\n",
+		"\n&#32; \t\\- tab after spaces\n",
+		"\n&#32;   \\\nafter a line of spaces\n",
+		"\n## Conclusion\n",
+	} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("expected %q in the markdown, got:\n%s", want, document)
+		}
+	}
+}
+
+// reportMarkdownLines splits a rendered document at every line ending
+// CommonMark recognises.
+func reportMarkdownLines(document string) []string {
+	return strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(document), "\n")
+}
+
+func TestReportMarkdownBareCarriageReturnStaysEvidenceText(t *testing.T) {
+	report := newTestReport(t, "Fence\r~~~ in a title", nil)
+	report = reportCall(t, ReportText, report, stringObj("note\r~~~"))
+	report = reportCall(t, ReportText, report, stringObj("old mac\r    # indented"))
+	report = reportCall(t, ReportText, report, stringObj("windows\r\n~~~"))
+	report = reportCall(t, ReportSection, report, stringObj("Conclusion"))
+	report = reportCall(t, ReportText, report, stringObj("the host beaconed"))
+
+	document := renderTestReport(t, report, "markdown", nil)
+
+	if openers := reportMarkdownCodeOpeners(document); len(openers) != 0 {
+		t.Fatalf("a line after a lone carriage return opened a code block at %q; the rest of the report falls inside it:\n%q", openers, document)
+	}
+	if strings.Contains(document, "\r") {
+		t.Fatalf("a carriage return reached the markdown, where it ends a line the escaping never saw:\n%q", document)
+	}
+	for _, want := range []string{
+		"# Fence\n\\~~~ in a title\n",
+		"\nnote\\\n\\~~~\n",
+		"\nold mac\\\n&#32;   \\# indented\n",
+		"\nwindows\\\n\\~~~\n",
+		"\n## Conclusion\n",
+	} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("expected %q in the markdown, got:\n%q", want, document)
+		}
+	}
+}
+
+// reportMarkdownListItemOpeners returns the rendered list lines whose item text
+// CommonMark would parse as a block other than a paragraph: an indented code
+// block (five or more columns of whitespace after the marker), a fence, or a
+// heading, quote, list or rule nested in the item.
+func reportMarkdownListItemOpeners(document string) []string {
+	var openers []string
+	for _, line := range reportMarkdownLines(document) {
+		marker := 0
+		switch {
+		case strings.HasPrefix(line, "- "):
+			marker = 1
+		default:
+			for marker < len(line) && line[marker] >= '0' && line[marker] <= '9' {
+				marker++
+			}
+			if marker == 0 || !strings.HasPrefix(line[marker:], ". ") {
+				continue
+			}
+			marker++
+		}
+		column, i := marker, marker
+		for ; i < len(line); i++ {
+			if line[i] == ' ' {
+				column++
+			} else if line[i] == '\t' {
+				column += 4 - column%4
+			} else {
+				break
+			}
+		}
+		rest := line[i:]
+		switch {
+		case rest == "":
+		case column-marker >= 5:
+			openers = append(openers, line)
+		case strings.HasPrefix(rest, "~~~"), strings.HasPrefix(rest, "```"),
+			strings.ContainsRune("#>-+", rune(rest[0])), markdownOrderedPrefix(rest):
+			openers = append(openers, line)
+		}
+	}
+	return openers
+}
+
+func TestReportMarkdownListItemStaysEvidenceText(t *testing.T) {
+	report := newTestReport(t, "Items", nil)
+	report = reportCall(t, ReportList, report, &object.Array{Elements: []object.Object{
+		stringObj("~~~ python"), stringObj("    four spaces"), stringObj("# heading"),
+		stringObj("4. step"), stringObj("\tC:\\Windows"), stringObj("plain"),
+	}})
+	report = reportCall(t, ReportList, report, &object.Array{Elements: []object.Object{
+		stringObj("~~~"), stringObj(" \tafter a space"), stringObj("> quoted"),
+	}}, optsObj(map[string]object.Object{"ordered": boolObj(true)}))
+	report = reportCall(t, ReportSection, report, stringObj("Conclusion"))
+	report = reportCall(t, ReportText, report, stringObj("the host beaconed"))
+
+	document := renderTestReport(t, report, "markdown", nil)
+
+	if openers := reportMarkdownListItemOpeners(document); len(openers) != 0 {
+		t.Fatalf("a list item's text opened a block at %q, and the item's evidence text no longer reads as text:\n%s", openers, document)
+	}
+	for _, want := range []string{
+		"\n- \\~~~ python\n",
+		"\n- &#32;   four spaces\n",
+		"\n- \\# heading\n",
+		"\n- 4\\. step\n",
+		"\n- &#9;C:\\\\Windows\n",
+		"\n- plain\n",
+		"\n1. \\~~~\n",
+		"\n2. &#32;\tafter a space\n",
+		"\n3. \\> quoted\n",
+		"\n## Conclusion\n",
+	} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("expected %q in the markdown, got:\n%s", want, document)
+		}
 	}
 }
 
@@ -577,5 +770,23 @@ func TestReportMdIsMarkdown(t *testing.T) {
 	report := newTestReport(t, "Case", map[string]object.Object{"generated": stringObj("2026-01-31T09:00:00Z")})
 	if renderTestReport(t, report, "md", nil) != renderTestReport(t, report, "MarkDown", nil) {
 		t.Fatal("md and markdown must be the same renderer, and the format name is case-insensitive")
+	}
+}
+
+func TestReportMarkdownTrailingLineEndPrintsNoBackslash(t *testing.T) {
+	report := newTestReport(t, "Line ends", nil)
+	for _, text := range []string{"old mac note\r", "unix note\n", "dos note\r\n", "spaced note\r   ", "blank note\r\r  "} {
+		report = reportCall(t, ReportText, report, stringObj(text))
+	}
+
+	document := renderTestReport(t, report, "markdown", nil)
+
+	for _, name := range []string{"old mac", "unix", "dos", "spaced", "blank"} {
+		if !strings.Contains(document, "\n"+name+" note\n") {
+			t.Fatalf("expected the line %q to end without a hard break, got:\n%s", name+" note", document)
+		}
+	}
+	if strings.Contains(document, "\\\n\n") {
+		t.Fatalf("a hard break before a blank line prints its backslash:\n%s", document)
 	}
 }

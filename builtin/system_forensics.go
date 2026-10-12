@@ -1,9 +1,11 @@
 package builtin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -11,10 +13,27 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/shirou/gopsutil/v3/common"
 	"github.com/shirou/gopsutil/v3/process"
 
 	"mutant/object"
 )
+
+// sfContext is the context every gopsutil call is made with. Without one,
+// gopsutil builds each path it reads on Linux from HOST_PROC (and the other
+// HOST_* variables), and decides that a pid exists by signalling it when that
+// directory is not a mount, so the environment chose what the process_*
+// builtins reported (M26-NET-025). It names every directory gopsutil would
+// otherwise look up, as the one gopsutil falls back to.
+var sfContext = context.WithValue(context.Background(), common.EnvKey, common.EnvMap{
+	common.HostProcEnvKey: "/proc",
+	common.HostSysEnvKey:  "/sys",
+	common.HostEtcEnvKey:  "/etc",
+	common.HostVarEnvKey:  "/var",
+	common.HostRunEnvKey:  "/run",
+	common.HostDevEnvKey:  "/dev",
+	common.HostRootEnvKey: "/",
+})
 
 type sfProcess struct {
 	pid  int
@@ -54,14 +73,63 @@ func ProcessTree(args ...object.Object) object.Object {
 		if !ok {
 			return resultAndError(nil, newError("argument 1 to `process_tree` must be INTEGER, got %s", args[0].Type()))
 		}
-		rootPID = int(pidObj.Value)
+		validated, errObj := sfValidateReadPID(BuiltinNameProcessTree, pidObj.Value)
+		if errObj != nil {
+			return resultAndError(nil, errObj)
+		}
+		rootPID = validated
 	}
 
 	procs, err := sfListProcesses()
 	if err != nil {
 		return resultAndError(nil, newError("process_tree: %s", err.Error()))
 	}
+	if !sfPIDInTable(procs, rootPID) {
+		return resultAndError(nil, newError(
+			"process_tree: no process with pid %d; the table holds %d process(es)",
+			rootPID, len(procs)))
+	}
 
+	return resultAndError(makeHashObject(map[string]object.Object{
+		"root_pid":    intObj(int64(rootPID)),
+		"descendants": &object.Array{Elements: sfDescendants(procs, rootPID)},
+	}), nil)
+}
+
+// sfDescendants is the breadth-first walk from rootPID down, with each pid
+// emitted at most once.
+//
+// It takes the process slice rather than reading the live process table so that
+// the walk can be tested against a table no host has to be holding at the time.
+// That matters here, because the two inputs that broke it are a self-parented
+// pid and a ppid cycle, and neither can be arranged on a real machine on
+// demand.
+//
+// The seen set is the fix for M26-NET-003. Without it, a process that is its own
+// parent appeared in byParent[its own pid], so dequeuing it appended it again,
+// and the queue and the output both grew until the process died -- 2 MiB to over
+// 1 GiB in under five seconds. On Windows pid 0, the System Idle Process,
+// reports ppid 0, and process_list returns it first, so a script that called
+// process_tree for each pid in process_list met it on the first one. A ppid
+// cycle from pid reuse did the same thing from an ordinary pid. Nothing
+// panicked, so the recover() around a builtin never saw any of it.
+//
+// A pid is marked when it is ENQUEUED rather than when it is emitted, so each
+// pid enters the queue at most once. Marking at emit time would terminate just
+// as surely -- a pid could then sit in the queue once per parent that claims
+// it, which is still bounded by len(procs), because every parent link is
+// consumed at most once -- so the stronger invariant is not what makes this
+// correct. It is kept because it is the one a reader can check at a glance.
+//
+// rootPID starts out marked, and that is what stops a process being reported as
+// its own descendant: the one symptom of the old walk that was not simply "it
+// never came back".
+//
+// No count cap is added on top of this. The seen set makes termination a
+// property of the walk rather than something a limit rescues, and a cap would be
+// one more named limit for Stage F to carry, guarding a case that can no longer
+// arise.
+func sfDescendants(procs []sfProcess, rootPID int) []object.Object {
 	byParent := map[int][]sfProcess{}
 	for _, p := range procs {
 		byParent[p.ppid] = append(byParent[p.ppid], p)
@@ -72,7 +140,20 @@ func ProcessTree(args ...object.Object) object.Object {
 	}
 
 	desc := make([]object.Object, 0)
-	queue := append([]sfProcess{}, byParent[rootPID]...)
+	seen := map[int]bool{rootPID: true}
+	queue := make([]sfProcess, 0, len(procs))
+
+	enqueue := func(children []sfProcess) {
+		for _, c := range children {
+			if seen[c.pid] {
+				continue
+			}
+			seen[c.pid] = true
+			queue = append(queue, c)
+		}
+	}
+
+	enqueue(byParent[rootPID])
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -81,13 +162,10 @@ func ProcessTree(args ...object.Object) object.Object {
 			"ppid": intObj(int64(cur.ppid)),
 			"name": stringObj(cur.name),
 		}))
-		queue = append(queue, byParent[cur.pid]...)
+		enqueue(byParent[cur.pid])
 	}
 
-	return resultAndError(makeHashObject(map[string]object.Object{
-		"root_pid":    intObj(int64(rootPID)),
-		"descendants": &object.Array{Elements: desc},
-	}), nil)
+	return desc
 }
 
 func ProcessOpenFiles(args ...object.Object) object.Object {
@@ -96,12 +174,12 @@ func ProcessOpenFiles(args ...object.Object) object.Object {
 		return resultAndError(nil, errObj)
 	}
 
-	proc, err := process.NewProcess(int32(pid))
+	proc, err := process.NewProcessWithContext(sfContext, int32(pid))
 	if err != nil {
 		return resultAndError(nil, newError("process_open_files: %s", err.Error()))
 	}
 
-	files, err := proc.OpenFiles()
+	files, err := proc.OpenFilesWithContext(sfContext)
 	if err != nil {
 		return resultAndError(nil, newError("process_open_files: %s", err.Error()))
 	}
@@ -128,7 +206,7 @@ func ProcessThreads(args ...object.Object) object.Object {
 		return resultAndError(nil, errObj)
 	}
 
-	proc, err := process.NewProcess(int32(pid))
+	proc, err := process.NewProcessWithContext(sfContext, int32(pid))
 	if err != nil {
 		return resultAndError(nil, newError("process_threads: %s", err.Error()))
 	}
@@ -136,8 +214,8 @@ func ProcessThreads(args ...object.Object) object.Object {
 	// NumThreads (the count) is available on every supported OS; the per-thread
 	// IDs are only exposed on some (e.g. Linux). Surface the count always and the
 	// TIDs where the platform provides them, rather than hard-failing off Linux.
-	count, countErr := proc.NumThreads()
-	threads, threadsErr := proc.Threads()
+	count, countErr := proc.NumThreadsWithContext(sfContext)
+	threads, threadsErr := proc.ThreadsWithContext(sfContext)
 	if countErr != nil && threadsErr != nil {
 		return resultAndError(nil, newError("process_threads: %s", countErr.Error()))
 	}
@@ -225,14 +303,30 @@ func ProcessMemoryScan(args ...object.Object) object.Object {
 	if patternObj.Value == "" {
 		return resultAndError(nil, newError("process_memory_scan: pattern must be non-empty"))
 	}
-	// Cross-process scanning needs elevated privileges and per-OS handle work;
-	// for now only the self process is supported (honest error otherwise).
-	if int(pidObj.Value) != os.Getpid() {
-		return resultAndError(nil, newError("process_memory_scan currently supports the self process only (pid %d, self is %d)", pidObj.Value, os.Getpid()))
+	pid, errObj := sfValidateReadPID(BuiltinNameProcessMemoryScan, pidObj.Value)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	// This process is the one process whose scan cannot answer the question it
+	// was asked, so it is the one pid refused.
+	//
+	// The pattern argument, the copy of it handed to the scanner, and whatever
+	// the program built it from all sit in the memory being scanned, in
+	// allocations this package does not own and cannot find. So a pattern that
+	// exists nowhere else on the machine still matches -- a freshly generated
+	// random string matched twice when this was measured and six times when it
+	// was first reported -- and there is no way to tell those copies from a
+	// finding. "Is this indicator resident in memory?" could only ever come back
+	// yes, which is worse than no answer, because a count is quoted in a report.
+	//
+	// Another process does not hold the query, so that scan means what it says,
+	// and it is what this builtin now does.
+	if pid == os.Getpid() {
+		return resultAndError(nil, newError("process_memory_scan cannot scan the calling process (pid %d): the pattern is itself in the memory being scanned, so every pattern matches; name another process", pid))
 	}
 
 	const maxMatches = 10000
-	addresses, truncated, err := sfScanSelfMemory([]byte(patternObj.Value), maxMatches)
+	addresses, truncated, err := sfScanProcessMemory(pid, []byte(patternObj.Value), maxMatches)
 	if err != nil {
 		return resultAndError(nil, newError("process_memory_scan: %s", err.Error()))
 	}
@@ -261,11 +355,11 @@ func ProcessEnv(args ...object.Object) object.Object {
 	if pid == os.Getpid() {
 		envLines = os.Environ()
 	} else {
-		proc, err := process.NewProcess(int32(pid))
+		proc, err := process.NewProcessWithContext(sfContext, int32(pid))
 		if err != nil {
 			return resultAndError(nil, newError("process_env: %s", err.Error()))
 		}
-		envLines, err = proc.Environ()
+		envLines, err = proc.EnvironWithContext(sfContext)
 		if err != nil {
 			return resultAndError(nil, newError("process_env: %s", err.Error()))
 		}
@@ -273,17 +367,52 @@ func ProcessEnv(args ...object.Object) object.Object {
 
 	pairs := make(map[string]object.Object, len(envLines))
 	for _, line := range envLines {
-		if line == "" {
+		key, value, ok := sfSplitEnvLine(line)
+		if !ok {
 			continue
 		}
-		idx := strings.Index(line, "=")
-		if idx < 0 {
-			continue
+		pairs[key] = stringObj(value)
+	}
+
+	// An empty answer about another process is the one result here that cannot
+	// be taken at face value, so it is the one that gets asked about. See
+	// sfProcessEnvUnreadable: the Windows reader returns no variables and no
+	// error when the read was refused, and 189 of the 391 other processes on the
+	// machine this was measured on came back that way.
+	if len(pairs) == 0 && pid != os.Getpid() {
+		if err := sfProcessEnvUnreadable(pid); err != nil {
+			return resultAndError(nil, newError(
+				"process_env: cannot read the environment of pid %d: %s", pid, err.Error()))
 		}
-		pairs[line[:idx]] = stringObj(line[idx+1:])
 	}
 
 	return resultAndError(makeHashObject(pairs), nil)
+}
+
+// sfSplitEnvLine splits one environment line into its name and its value.
+//
+// A Windows environment carries hidden per-drive entries whose NAME begins with
+// the separator: "=C:=C:\dir" records the working directory on C:, and
+// "=ExitCode=00000000" the last exit status. Splitting at the first "=" gives
+// every one of them the empty name, and since they all get the same name each
+// overwrites the last -- three such entries collapsed into a single variable
+// called "" holding a garbled value, and the per-drive working directories they
+// carry, which are useful live-response context, were gone. A leading separator
+// is part of the name, so the split is at the first "=" after it.
+func sfSplitEnvLine(line string) (string, string, bool) {
+	if line == "" {
+		return "", "", false
+	}
+	from := 0
+	if line[0] == '=' {
+		from = 1
+	}
+	idx := strings.Index(line[from:], "=")
+	if idx < 0 {
+		return "", "", false
+	}
+	idx += from
+	return line[:idx], line[idx+1:], true
 }
 
 func ProcessKill(args ...object.Object) object.Object {
@@ -295,8 +424,6 @@ func ProcessKill(args ...object.Object) object.Object {
 	if !ok {
 		return resultAndError(nil, newError("argument 1 to `process_kill` must be INTEGER, got %s", args[0].Type()))
 	}
-	pid := int(pidObj.Value)
-
 	sig := syscall.SIGKILL
 	if len(args) == 2 {
 		sigObj, ok := args[1].(*object.Integer)
@@ -306,8 +433,43 @@ func ProcessKill(args ...object.Object) object.Object {
 		sig = syscall.Signal(sigObj.Value)
 	}
 
+	// Validated here rather than where the pid is read, so that a bad second
+	// argument is still reported as the second argument: process_kill(0, "nine")
+	// should say what is wrong with "nine".
+	pid, errObj := sfValidateKillPID(BuiltinNameProcessKill, pidObj.Value)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+
 	if pid == os.Getpid() {
 		return resultAndError(nil, newError("process_kill refuses to kill current process"))
+	}
+
+	// The guard above compares the argument with the pid and nothing else, and
+	// a thread id of this process is not that number. process_threads() reports
+	// one per OS thread, each positive and well inside int32, so neither that
+	// comparison nor the pid range check M26-NET-005 adds sees it. On Linux a
+	// signal addressed to a non-leader thread id is delivered to the whole
+	// thread group, so process_kill(process_threads()["tids"][0]) ended the run
+	// through a documented pair of builtins while the guard that exists to
+	// refuse exactly that reported nothing (M26-NET-029). Nothing is truncated
+	// on that path -- the number reaches the process it names -- which is why it
+	// is a different defect from M26-NET-005 and needs a different check.
+	//
+	// Asked here rather than folded into that range check: a range narrows a
+	// number, and this is not a range. It is a question about which process the
+	// number names, answered against procfs at the moment of the kill.
+	//
+	// Both bits of the answer are read, so that the two cases this does NOT
+	// refuse are written down rather than inferred. Answered and not a thread:
+	// procfs answered and the id is not one of ours. Not answered: this host has
+	// no procfs thread directory for this process, and so hands a script no
+	// thread id either -- see sfIsThreadOfThisProcess.
+	isThread, answered := sfIsThreadOfThisProcess(pid)
+	if answered && isThread {
+		return resultAndError(nil, newError("process_kill refuses %d: that is not another "+
+			"process, it is a thread of this one (pid %d), and a signal sent to a thread is "+
+			"delivered to the whole thread group -- it would end this run", pid, os.Getpid()))
 	}
 
 	if runtime.GOOS == "windows" {
@@ -345,33 +507,132 @@ func sfParsePIDArg(opName string, args []object.Object) (int, *object.Error) {
 	if !ok {
 		return 0, newError("argument 1 to `%s` must be INTEGER, got %s", opName, args[0].Type())
 	}
-	return int(pidObj.Value), nil
+	return sfValidateReadPID(opName, pidObj.Value)
+}
+
+// sfValidateReadPID is sfValidatePID plus the refusal of an id that names a
+// thread rather than a process, for the builtins that ask a question about a
+// pid rather than send it a signal.
+//
+// It is one function because the alternative is the same check written at six
+// call sites, and a check that has to be remembered six times is a check that
+// will be missing from one of them. process_kill does not come through here:
+// a signal to a thread of THIS process is refused by its own guard, and a
+// signal to a thread of another process is a question about where the signal
+// lands rather than about what the answer is labelled with, which this does not
+// settle.
+func sfValidateReadPID(opName string, pid int64) (int, *object.Error) {
+	validated, errObj := sfValidatePID(opName, pid)
+	if errObj != nil {
+		return 0, errObj
+	}
+	if errObj := sfRefuseThreadID(opName, validated); errObj != nil {
+		return 0, errObj
+	}
+	return validated, nil
+}
+
+// sfPIDInTable reports whether pid is one of the processes the table holds.
+//
+// process_tree never asked, so it answered {root_pid: N, descendants: []} for
+// any number in range -- "that process exists and has nothing under it" about a
+// process that does not exist, and about a Windows thread id, which is how this
+// was found. It is the one builtin here that needs the question asked, because
+// it walks a snapshot of the table instead of opening the pid; the five that
+// open it get the backend's own "process does not exist" for nothing.
+func sfPIDInTable(procs []sfProcess, pid int) bool {
+	for _, p := range procs {
+		if p.pid == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// sfValidatePID narrows a pid argument to the range the backends under this
+// file can actually represent, and is the only place a pid enters them.
+//
+// A script's integer is 64 bits and a pid is not. gopsutil's process.NewProcess
+// takes an int32 on every platform, and os.FindProcess on Windows takes a
+// DWORD, so a value past math.MaxInt32 was never a pid this package could ask
+// about -- it was a pid that got truncated into a different, live process.
+// process_hash(2^32 + pid) answered about one process while labelling the
+// answer with another, and process_kill(getpid() + 2^32) compared unequal to
+// os.Getpid(), walked past the refuse-self guard, and then killed the run with
+// the low 32 bits.
+//
+// Zero is accepted, and that is deliberate. On Windows process_list() returns
+// the System Idle Process as pid 0 -- first, because the list is sorted
+// ascending -- and syslog_parse writes 0 for any line with no procid, so a
+// script that loops over what Mutant handed it reaches 0 without ever naming
+// it. Those builtins answer for 0 today and go on doing so. The one that
+// answered WRONGLY for 0 -- process_modules on Windows, where Toolhelp32 reads
+// a process id of 0 as the calling process -- refuses it at that API instead
+// (M26-NET-019), which is why this range was not narrowed: refusing 0 here
+// would have replaced one wrong answer with several missing ones, and
+// process_threads(0) and process_tree(0) are both right on Windows. Negative
+// values are refused because no platform has one.
+//
+// The one builtin that sends a signal rather than asking a question needs a
+// floor of 1, and asks for it separately: see sfValidateKillPID.
+func sfValidatePID(opName string, pid int64) (int, *object.Error) {
+	if pid < 0 || pid > math.MaxInt32 {
+		return 0, newError("argument 1 to `%s` must be a pid between 0 and %d, got %d", opName, int64(math.MaxInt32), pid)
+	}
+	return int(pid), nil
+}
+
+// sfValidateKillPID is sfValidatePID with the floor raised to 1, for
+// process_kill. 0 and negative values are not pids to kill(2): it reads them as
+// process GROUPS, so a signal sent to "pid" 0 goes to every process in the
+// caller's group -- which includes the shell the examiner is sitting in -- and
+// a negative one addresses the group by id. On Windows 0 is the idle process.
+//
+// This narrows a number, and a number is not the only way to name this process.
+// A thread id from process_threads is in range and is not equal to os.Getpid(),
+// and on Linux a signal sent to a non-leader tid is delivered to the whole
+// thread group, so process_kill(process_threads()["tids"][0]) once ended the
+// run. Nothing here makes the refuse-self guard hold against that, and nothing
+// here needs to: ProcessKill asks sfIsThreadOfThisProcess, which is where
+// M26-NET-029 was fixed, because it needs no truncation and is a different
+// check from a range.
+//
+// A thread of ANOTHER process is not refused here either, and that is not an
+// omission. M26-NET-033 refuses a thread id at the builtins that answer a
+// question about a pid, through sfValidateReadPID, because what is wrong there
+// is the label on an answer. A signal has no label: where it lands is the whole
+// of it, and that is a question this row did not settle.
+func sfValidateKillPID(opName string, pid int64) (int, *object.Error) {
+	if pid < 1 {
+		return 0, newError("argument 1 to `%s` must be a pid of 1 or more, got %d", opName, pid)
+	}
+	return sfValidatePID(opName, pid)
 }
 
 func sfExecutableForPID(pid int) (string, error) {
 	if pid == os.Getpid() {
 		return os.Executable()
 	}
-	proc, err := process.NewProcess(int32(pid))
+	proc, err := process.NewProcessWithContext(sfContext, int32(pid))
 	if err != nil {
 		return "", err
 	}
-	return proc.Exe()
+	return proc.ExeWithContext(sfContext)
 }
 
 // sfListProcesses enumerates running processes natively across Windows, Linux,
 // and macOS via gopsutil (no external `tasklist`/`ps` shell-outs), including a
 // real parent PID on every platform.
 func sfListProcesses() ([]sfProcess, error) {
-	procs, err := process.Processes()
+	procs, err := process.ProcessesWithContext(sfContext)
 	if err != nil {
 		return nil, err
 	}
 
 	out := make([]sfProcess, 0, len(procs))
 	for _, p := range procs {
-		ppid, _ := p.Ppid()
-		name, _ := p.Name()
+		ppid, _ := p.PpidWithContext(sfContext)
+		name, _ := p.NameWithContext(sfContext)
 		if name == "" {
 			name = "pid-" + strconv.Itoa(int(p.Pid))
 		}

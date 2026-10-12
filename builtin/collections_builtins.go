@@ -2,30 +2,22 @@ package builtin
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 
 	"mutant/object"
 )
 
-// objectsEqual compares two objects by value for scalars, falling back to
-// Inspect() for composite types.
+// objectsEqual is how `contains` and `index_of` decide that an element is the
+// one being looked for.
+//
+// It is object.ValuesEqual, the same definition `==` is built on, so a search
+// cannot answer differently from the comparison a caller would have written by
+// hand. It used to be a second copy of that switch, and the copy had no struct
+// case: `contains(records, r)` was a coin toss for as long as comparing two
+// structs was.
 func objectsEqual(a, b object.Object) bool {
-	if a.Type() != b.Type() {
-		return false
-	}
-	switch av := a.(type) {
-	case *object.Integer:
-		return av.Value == b.(*object.Integer).Value
-	case *object.Float:
-		return av.Value == b.(*object.Float).Value
-	case *object.String:
-		return av.Value == b.(*object.String).Value
-	case *object.Boolean:
-		return av.Value == b.(*object.Boolean).Value
-	case *object.Null:
-		return true
-	default:
-		return a.Inspect() == b.Inspect()
-	}
+	return object.ValuesEqual(a, b)
 }
 
 func requireArrayArg(op string, arg object.Object, pos int) (*object.Array, *object.Error) {
@@ -73,7 +65,12 @@ func Sort(args ...object.Object) object.Object {
 	}
 	switch {
 	case allNumeric:
-		sort.SliceStable(out, func(i, j int) bool { return numericValue(out[i]) < numericValue(out[j]) })
+		// numericLess compares exactly. numericValue, which this called, read
+		// every element as a float64, so a run of FILETIMEs a microsecond
+		// apart all compared equal and sort.SliceStable left them in the order
+		// they arrived -- a timeline that reports itself as sorted and is not
+		// (M26-BLT-004).
+		sort.SliceStable(out, func(i, j int) bool { return numericLess(out[i], out[j]) })
 	case allString:
 		sort.SliceStable(out, func(i, j int) bool {
 			return out[i].(*object.String).Value < out[j].(*object.String).Value
@@ -82,17 +79,6 @@ func Sort(args ...object.Object) object.Object {
 		return newError("sort: array must be all numbers or all strings")
 	}
 	return &object.Array{Elements: out}
-}
-
-func numericValue(o object.Object) float64 {
-	switch v := o.(type) {
-	case *object.Integer:
-		return float64(v.Value)
-	case *object.Float:
-		return v.Value
-	default:
-		return 0
-	}
 }
 
 func ReverseArray(args ...object.Object) object.Object {
@@ -220,8 +206,22 @@ func Unique(args ...object.Object) object.Object {
 	}
 	seen := make(map[string]struct{}, len(arr.Elements))
 	out := make([]object.Object, 0, len(arr.Elements))
+	var functions []object.Object
 	for _, el := range arr.Elements {
-		key := string(el.Type()) + "\x00" + el.Inspect()
+		// A function has no render that identifies it: a closure renders an
+		// address that changes every time the VM copies it, and an evaluator
+		// function renders source text two distinct functions can share. It
+		// is a duplicate only of the same function value, and an array, hash
+		// or struct holding one is a duplicate only of a value equal to it
+		// (M26-EVL-005).
+		if object.HoldsFunction(el) {
+			if !uniqueHoldsEqual(functions, el) {
+				functions = append(functions, el)
+				out = append(out, el)
+			}
+			continue
+		}
+		key := uniqueKey(el)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -229,6 +229,98 @@ func Unique(args ...object.Object) object.Object {
 		out = append(out, el)
 	}
 	return &object.Array{Elements: out}
+}
+
+// uniqueHoldsEqual reports whether kept already holds a value equal to el.
+func uniqueHoldsEqual(kept []object.Object, el object.Object) bool {
+	for _, k := range kept {
+		if objectsEqual(k, el) {
+			return true
+		}
+	}
+	return false
+}
+
+// uniqueKey is what `unique` files an element under: two elements are one
+// element when their keys match.
+//
+// It used to be the element's type and its Inspect, and a render is a display
+// form rather than an identity. Float.Inspect keeps six decimals, so 7.9999991
+// and 7.9999994 were one element, and a string inside an array renders without
+// its quotes, so ["1"] and [1] were one element too. The key spells a float
+// with as many digits as it takes to tell it from every other float, and spells
+// every part with a type tag and a length, so two different values cannot run
+// together into one key.
+//
+// Nothing else about the answer moves: -0.0 and 0.0 stay two elements and every
+// NaN is one, as their renders made them, and a value with no case below is
+// still keyed by its type and its render.
+func uniqueKey(obj object.Object) string {
+	var key strings.Builder
+	writeUniqueKey(&key, obj)
+	return key.String()
+}
+
+func writeUniqueKey(key *strings.Builder, obj object.Object) {
+	switch v := obj.(type) {
+	case nil:
+		key.WriteByte('z')
+	case *object.Float:
+		writeUniqueKeyPart(key, 'f', strconv.FormatFloat(v.Value, 'g', -1, 64))
+	case *object.Integer:
+		writeUniqueKeyPart(key, 'i', strconv.FormatInt(v.Value, 10))
+	case *object.String:
+		writeUniqueKeyPart(key, 's', v.Value)
+	case *object.Array:
+		writeUniqueKeyCount(key, 'a', len(v.Elements))
+		for _, el := range v.Elements {
+			writeUniqueKey(key, el)
+		}
+	case *object.Hash:
+		// Each pair's key followed by its value, sorted, so the order the map
+		// hands the pairs over in takes no part. Every part is self-delimiting,
+		// so the sorted pairs still read back as exactly one set of pairs.
+		pairs := make([]string, 0, len(v.Pairs))
+		for _, pair := range v.Pairs {
+			var one strings.Builder
+			writeUniqueKey(&one, pair.Key)
+			writeUniqueKey(&one, pair.Value)
+			pairs = append(pairs, one.String())
+		}
+		sort.Strings(pairs)
+		writeUniqueKeyCount(key, 'h', len(pairs))
+		for _, pair := range pairs {
+			key.WriteString(pair)
+		}
+	case *object.Struct:
+		names := make([]string, 0, len(v.Fields))
+		for name := range v.Fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		writeUniqueKeyPart(key, 't', v.TypeName)
+		writeUniqueKeyCount(key, 'n', len(names))
+		for _, name := range names {
+			writeUniqueKeyPart(key, 'k', name)
+			writeUniqueKey(key, v.Fields[name])
+		}
+	default:
+		writeUniqueKeyPart(key, 'x', string(obj.Type()))
+		writeUniqueKeyPart(key, 'r', obj.Inspect())
+	}
+}
+
+func writeUniqueKeyPart(key *strings.Builder, tag byte, text string) {
+	key.WriteByte(tag)
+	key.WriteString(strconv.Itoa(len(text)))
+	key.WriteByte(':')
+	key.WriteString(text)
+}
+
+func writeUniqueKeyCount(key *strings.Builder, tag byte, count int) {
+	key.WriteByte(tag)
+	key.WriteString(strconv.Itoa(count))
+	key.WriteByte(':')
 }
 
 func Range(args ...object.Object) object.Object {
@@ -298,13 +390,18 @@ func Zip(args ...object.Object) object.Object {
 
 // --- hash operations ---
 
+// hashSortedPairs is the order keys, values and entries list a hash in: the
+// order printing it and a for-in loop over it use, so keys(h)[i] and
+// values(h)[i] are one entry of h even when separate calls produced them, as
+// long as h did not change between the calls.
+//
+// These three used to sort for themselves, on the rendered key alone. That put
+// 10 before 2, and keys that render alike -- 1 and "1", true and "true" -- tied
+// and kept whatever order the Go map was ranged in, which differs from call to
+// call, so keys(h)[0] and values(h)[0] could come from different entries
+// (M26-BLT-007).
 func hashSortedPairs(h *object.Hash) []object.HashPair {
-	pairs := make([]object.HashPair, 0, len(h.Pairs))
-	for _, p := range h.Pairs {
-		pairs = append(pairs, p)
-	}
-	sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].Key.Inspect() < pairs[j].Key.Inspect() })
-	return pairs
+	return h.SortedPairs()
 }
 
 func Keys(args ...object.Object) object.Object {
@@ -358,7 +455,7 @@ func Entries(args ...object.Object) object.Object {
 func hashableKey(op string, key object.Object) (object.HashKey, *object.Error) {
 	hashable, ok := key.(object.Hashable)
 	if !ok {
-		return object.HashKey{}, newError("`%s` key must be a hashable type (STRING/INTEGER/FLOAT/BOOLEAN), got %s", op, key.Type())
+		return object.HashKey{}, newError("`%s` key must be a hashable type (STRING/BYTES/INTEGER/FLOAT/BOOLEAN), got %s", op, key.Type())
 	}
 	return hashable.HashKey(), nil
 }

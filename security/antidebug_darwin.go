@@ -4,12 +4,13 @@
 package security
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
-	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -17,9 +18,7 @@ const (
 	darwinDebugMethodParentProc = "darwin:parent_debugger_process"
 	darwinDebugMethodEnvMarkers = "darwin:debugger_environment"
 
-	darwinSysctlCTLKern     = 1
-	darwinSysctlKernProc    = 14
-	darwinSysctlKernProcPID = 1
+	darwinSysctlProcByPID = "kern.proc.pid"
 
 	darwinDYLDInsertLibsEnv = "DYLD_INSERT_LIBRARIES"
 	darwinPsCommand         = "ps"
@@ -28,30 +27,27 @@ const (
 )
 
 var (
-	darwinParentDebuggerPatterns = []string{
-		"lldb", "gdb", "xcode", "simulator", "instruments",
-		"dtrace", "fs_usage", "sample", "trace", "sc_usage",
-		"leaks", "malloc_history", "heap", "vmmap",
-		"frida-server", "idb", "appium",
-	}
-
+	// darwinDebuggerEnvVars are the variables
+	// hasDebuggerEnvironmentMarkersDarwin reads. Two kinds of setting are not
+	// among them, because neither says anything about this process
+	// (M26-TMP-010): where a debugger keeps its history -- GDBHISTFILE, which
+	// XDG base-directory guides tell users to export from a shell profile --
+	// and the build settings Xcode hands to every script phase it runs,
+	// XCODE_VERSION_ACTUAL among them.
 	darwinDebuggerEnvVars = []string{
 		"LLDB_DEBUGSERVER_PORT",
 		"LLDB_MasterPort",
 		"GDB_OPTS",
-		"GDBHISTFILE",
 		"XCODE_DEBUG_PORT",
 		darwinDYLDInsertLibsEnv,
 		"DYLD_ROOT_PATH",
-		"XCODE_VERSION_ACTUAL",
 		"XPC_DEBUG",
 		"LLVM_DEBUG",
 		"FRIDA_DEBUG",
 	}
 
-	darwinSuspiciousDYLDLibs = []string{"libgmalloc", "libc++abi", "libsystem_trace", "libsystem_sandbox"}
-	darwinRunningDebuggers   = []string{"lldb", "gdb", "xcode", "Instruments", "Simulator", "frida-server", "idb"}
-	darwinOtoolIndicators    = []string{"liblldb", "libgdb", "libdebug", "/tmp/", "/var/tmp/"}
+	darwinRunningDebuggers = []string{"lldb", "gdb", "xcode", "Instruments", "Simulator", "frida-server", "idb"}
+	darwinOtoolIndicators  = []string{"liblldb", "libgdb", "libdebug", "/tmp/", "/var/tmp/"}
 )
 
 // isDebuggerPresentDarwin performs multiple anti-debugging checks on macOS/Darwin
@@ -64,8 +60,16 @@ func isDebuggerPresentDarwin() bool {
 func detectDebuggerDetailsDarwin() (bool, []string) {
 	methods := make([]string, 0, 3)
 
-	// Check 1: P_TRACED flag (ptrace-based debuggers like lldb, gdb)
-	if isProcessBeingTraced() {
+	// Check 1: P_TRACED flag (ptrace-based debuggers like lldb, gdb). A flag
+	// that could not be read was not measured, which is not the same as clear.
+	// This function's answer -- a verdict and the methods that fired -- has no
+	// place for "not measured", so the security dev log (--dev with
+	// --security-log-level debug) says it, and the check adds no method.
+	traced, err := isTracedDarwin()
+	if err != nil {
+		securityDevLogf("debugger check %s not measured: %v", darwinDebugMethodPTraced, err)
+	}
+	if traced {
 		methods = append(methods, darwinDebugMethodPTraced)
 	}
 
@@ -82,87 +86,84 @@ func detectDebuggerDetailsDarwin() (bool, []string) {
 	return len(methods) > 0, methods
 }
 
-// isProcessBeingTraced checks if the process is being traced via P_TRACED flag
-func isProcessBeingTraced() bool {
-	// Define kinfo_proc structure (simplified, only the parts we need)
-	// The P_TRACED flag is at a specific offset in the kp_proc.p_flag field
-	type kinfoProc struct {
-		_    [40]byte  // padding to kp_proc
-		_    [4]byte   // kp_proc.p_pid
-		_    [296]byte // padding to kp_proc.p_flag
-		Flag uint32    // kp_proc.p_flag
-		_    [624]byte // rest of structure
-	}
-
-	const P_TRACED = 0x00000800 // Process is being traced
-
-	// sysctl MIB for querying process info
-	// CTL_KERN.KERN_PROC.KERN_PROC_PID.<pid>
-	mib := []int32{darwinSysctlCTLKern, darwinSysctlKernProc, darwinSysctlKernProcPID, int32(os.Getpid()), int32(unsafe.Sizeof(kinfoProc{})), 1}
-
-	var info kinfoProc
-	size := uintptr(unsafe.Sizeof(info))
-
-	_, _, err := syscall.Syscall6(
-		syscall.SYS___SYSCTL,
-		uintptr(unsafe.Pointer(&mib[0])),
-		uintptr(len(mib)),
-		uintptr(unsafe.Pointer(&info)),
-		uintptr(unsafe.Pointer(&size)),
-		0,
-		0,
-	)
-
-	if err != 0 {
-		return false
-	}
-
-	// Check if P_TRACED flag is set
-	return (info.Flag & P_TRACED) != 0
+// isTracedDarwin reports whether a debugger is tracing this process, by the
+// P_TRACED bit that the kernel sets in p_flag of the process's kinfo_proc while
+// lldb, or anything else attached through ptrace, traces it.
+//
+// An error means the bit was not read: not measured, which is not the same as
+// clear. The caller says so in the security dev log and adds no method.
+func isTracedDarwin() (bool, error) {
+	return darwinProcessTraced(os.Getpid())
 }
 
-// isParentDebuggerDarwin checks if the parent process is a known debugger
+// darwinProcessTraced reads P_TRACED for pid, from the kinfo_proc that sysctl
+// kern.proc.pid.<pid> returns.
+//
+// The request and the record are x/sys's, unix.SysctlKinfoProc and
+// unix.KinfoProc, rather than a MIB and a layout written out here. The ones
+// written out here before meant the check could never find a debugger
+// (M26-TMP-011). The MIB had six elements, {CTL_KERN, KERN_PROC,
+// KERN_PROC_PID, pid, size, 1}, which is the OpenBSD form; xnu's handler for
+// kern.proc.pid takes exactly one element after the name, the pid, and refuses
+// anything else with EINVAL, and the refusal was returned as "not traced". Had
+// a request gone through, p_flag would have been read 340 bytes into a
+// 968-byte record, where the kernel puts it 32 bytes into a 648-byte one on
+// both amd64 and arm64. unix.SysctlKinfoProc builds the four-element MIB from
+// the name, and refuses a reply that is not exactly one record.
+func darwinProcessTraced(pid int) (bool, error) {
+	kp, err := unix.SysctlKinfoProc(darwinSysctlProcByPID, pid)
+	if err != nil {
+		return false, fmt.Errorf("sysctl %s.%d: %w", darwinSysctlProcByPID, pid, err)
+	}
+	return darwinTracedFromRecord(pid, kp.Proc.P_pid, kp.Proc.P_flag)
+}
+
+// isParentDebuggerDarwin checks whether the parent process is one of the
+// debuggers in darwinDebuggerProcessNames, by the name of its executable.
+//
+// macOS has no /proc, so the parent's name comes from ps, and the name is
+// compared exactly rather than searched for inside what ps printed. Searching
+// matched far more than it meant to even on a bare name: the list holds "trace",
+// which matched ltrace, pytrace and dtrace, and "heap", which matched
+// heaptrack, so an ordinary parent was reported as a debugger -- and in secure
+// mode that ends the run (M26-TMP-019). `ps -o comm=` on this platform is
+// documented to print the executable's path, which if it holds makes the same
+// list match every tool under /Applications/Xcode.app through the entry
+// "xcode"; taking the base name covers both readings and needs neither to be
+// settled.
+//
+// A parent whose name cannot be read is not a debugger, for the same reason as
+// on Linux: isTracedDarwin is the check that finds one actually attached, and
+// this one should err towards silence.
 func isParentDebuggerDarwin() bool {
 	ppid := os.Getppid()
 
-	// Try to get parent process name via /proc
-	// Note: macOS /proc is limited, so we use ps command
 	cmd := exec.Command(darwinPsCommand, "-o", "comm=", "-p", strconv.Itoa(ppid))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
 	}
 
-	parentName := strings.ToLower(strings.TrimSpace(string(output)))
-
-	for _, pattern := range darwinParentDebuggerPatterns {
-		if strings.Contains(parentName, pattern) {
-			return true
-		}
-	}
-
-	return false
+	return debuggerProcessNameMatches(string(output), darwinDebuggerProcessNames)
 }
 
-// hasDebuggerEnvironmentMarkersDarwin checks for debugger environment markers on macOS
+// hasDebuggerEnvironmentMarkersDarwin reports whether any variable in
+// darwinDebuggerEnvVars holds a value: dyld's DYLD_INSERT_LIBRARIES, which
+// names libraries for dyld to insert into this process as it starts, or a
+// variable whose name ties it to debugging or instrumentation.
+// debuggerEnvironmentMarkerSet says what holding a value means.
+//
+// DYLD_ROOT_PATH is on the list as well, though dyld does nothing with it
+// here: on macOS 12 and later it reads it only in a simulator process (see
+// loaderListSeparators). Like the debugging names, it counts when it holds a
+// value.
+//
+// DYLD_INSERT_LIBRARIES counts whichever library it names. A filter that
+// counted it only for a few libraries, libgmalloc among them, sat after a loop
+// that had already returned on the variable existing, so it never ran
+// (M26-TMP-010).
 func hasDebuggerEnvironmentMarkersDarwin() bool {
-	for _, envVar := range darwinDebuggerEnvVars {
-		if _, exists := os.LookupEnv(envVar); exists {
-			return true
-		}
-	}
-
-	// Check for unusual DYLD settings which indicate debugging
-	if dyldLibs, exists := os.LookupEnv(darwinDYLDInsertLibsEnv); exists {
-		// Check if suspicious libraries are being injected
-		for _, lib := range darwinSuspiciousDYLDLibs {
-			if strings.Contains(dyldLibs, lib) {
-				return true
-			}
-		}
-	}
-
-	return false
+	return debuggerEnvironmentMarkerSet(darwinDebuggerEnvVars, os.Getenv)
 }
 
 // hasDebuggerProcessRunningDarwin checks if known debuggers are running

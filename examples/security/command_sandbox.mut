@@ -1,60 +1,56 @@
-// command_sandbox.mut — gate command execution behind a policy, then run guarded.
-//
-// Demonstrates the capability-gating pattern: evaluate an allow/deny policy first,
-// and only then attempt execution through the security-guarded exec_string. Command
-// execution is subject to the runtime's command_exec capability policy, so a denied
-// or disabled attempt is handled honestly (never faked as success).
+// Gate command execution behind a Rego policy, then run only what it allows.
 
-let header = fn(title) { putln("=== " + title + " ==="); };
+let module = r"""
+package cmd
 
-// A small Rego policy: allow only a whitelist of safe, read-only commands.
-let policy = {
-    "module": "package cmd\n\ndefault allow = false\n\n" +
-        "allow {\n  input.command == \"whoami\"\n}\n\n" +
-        "allow {\n  input.command == \"hostname\"\n}\n\n" +
-        "decision = {\"command\": input.command, \"allow\": allow}",
-    "eval_query": "data.cmd.decision",
-    "allow_query": "data.cmd.allow"
-};
+default allow = false
+
+allow {
+  input.command == "whoami"
+}
+
+allow {
+  input.command == "hostname"
+}
+
+decision = {"command": input.command, "allow": allow}
+""";
+let policy = {"module": module, "eval_query": "data.cmd.decision", "allow_query": "data.cmd.allow"};
 
 let run = fn() {
-    header("command_sandbox");
+    putln("=== command_sandbox ===");
 
-    let loaded, err = policy_load("cmd_policy", policy);
+    let _, err = policy_load("cmd_policy", policy);
     if (err) {
         putln("[error] policy_load:", err);
         return false;
-    };
+    }
 
-    // Decide-then-act for each candidate command.
-    let candidates = ["whoami", "rm -rf /"];
-    each(candidates, fn(cmd) {
-        let allowed, aerr = policy_allow("cmd_policy", { "command": cmd });
-        if (aerr) {
-            putln("[error] policy_allow:", aerr);
-        } else {
-            if (allowed) {
-                putln("policy ALLOWS:", cmd);
-                // Execution is still subject to the runtime command_exec capability.
-                let out, xerr = exec_string(cmd);
-                if (xerr) {
-                    putln("  exec error:", xerr);
-                } else {
-                    putln("  exec result:", out);
-                };
-            } else {
-                putln("policy DENIES:", cmd, "(not executed)");
-            };
-        };
-    });
+    for (cmd in ["whoami", "rm -rf /"]) {
+        let allowed, err = policy_allow("cmd_policy", {"command": cmd});
+        if (err) {
+            putln("[error] policy_allow:", err);
+            continue;
+        }
+        if (!allowed) {
+            putln("policy DENIES:", cmd, "(not executed)");
+            continue;
+        }
+        putln("policy ALLOWS:", cmd);
+        let out, err = exec_string(cmd);
+        if (err) {
+            putln("  exec error:", err);
+            continue;
+        }
+        // whoami prints this machine's account name, so show only that it printed one.
+        putln("  exec ok:", out["ok"], "exit_code:", out["exit_code"], "timed_out:", out["timed_out"], "printed a name:", len(out["stdout"]) > 0);
+    }
 
-    // Composing a command with the builder (does not run until cmd_run).
-    let b, berr = cmd_builder();
-    if (!berr) {
-        let b2, aerr = cmd_add(b, "echo");
+    let builder, err = cmd_builder();
+    if (!err) {
+        let _, _ = cmd_add(builder, "echo");
         putln("built a command via cmd_builder (guarded by the same policy at run time)");
-    };
-
+    }
     return true;
 };
 

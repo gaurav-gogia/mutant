@@ -110,6 +110,35 @@ type RecoverableError struct {
 	Kind RecoverableKind
 }
 
+// maxNestingDepth bounds how deeply one construct may be nested inside
+// another: parenthesised expressions, prefix operators, array and hash
+// literals, calls, indexes, function literals and block bodies all count,
+// because each one is a frame on the parser's stack.
+//
+// Source as it is written nests a handful deep and generated source little
+// more, so a program past this limit is one built to make the parse recurse,
+// and it is refused rather than followed. The value is three orders of
+// magnitude above anything a reader would write and three below the point
+// where the Go stack gives out: 100,000 levels parsed in 85 ms at HEAD and
+// 1,000,000 ended the process with a fatal stack overflow, which recover()
+// cannot catch and which therefore takes the language server with it
+// (M26-LEX-003).
+//
+//mutant:limit depth
+const maxNestingDepth = 1000
+
+// maxParseErrors bounds how many errors one parse reports.
+//
+// The errors are a list that grows once per mistake, and some mistakes are one
+// per character: every unclosed '(' in a file of them produced its own error,
+// so a 700 KB file of nothing else produced 700,001 of them and about a
+// megabyte of strings, all saying the same thing about the same program. The
+// first hundred are the ones anybody reads; the hundred-and-first is the parse
+// repeating itself.
+//
+//mutant:limit count
+const maxParseErrors = 100
+
 type Parser struct {
 	l              *lexer.Lexer
 	curToken       token.Token
@@ -118,6 +147,7 @@ type Parser struct {
 	typedErrors    []ParseError
 	recoverables   []RecoverableError
 	nodeRanges     map[ast.Node]ast.Range
+	parenthesized  map[ast.Node]bool
 	prefixParseFns map[token.TokenType]prefixParseFn
 	infixParseFns  map[token.TokenType]infixParseFn
 
@@ -126,6 +156,16 @@ type Parser struct {
 	// are linked into one program before it runs, so an import inside a
 	// function body could not mean "load this when control reaches here".
 	blockDepth int
+
+	// depth counts the frames of parser recursion currently open, across both
+	// expressions and block bodies, and is what maxNestingDepth bounds. It is
+	// a different question from blockDepth, which counts only braces and only
+	// so that `import` can refuse to be inside one.
+	depth int
+
+	// depthReported stops the nesting refusal being appended once per frame as
+	// a thousand of them unwind.
+	depthReported bool
 }
 
 func New(l *lexer.Lexer) *Parser {
@@ -145,6 +185,7 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(token.MATCH, p.parseMatchExpression)
 	p.registerPrefix(token.FUNCTION, p.parseFunctionLiteral)
 	p.registerPrefix(token.STRING, p.parseStringLiteral)
+	p.registerPrefix(token.UNTERMINATED, p.parseUnterminatedString)
 	p.registerPrefix(token.TEMPLATE, p.parseTemplateLiteral)
 	p.registerPrefix(token.LSQUARE, p.parseArrayLiteral)
 
@@ -221,6 +262,11 @@ func (p *Parser) ParseProgram() *ast.Program {
 	if len(p.nodeRanges) > 0 {
 		program.NodePositions = p.nodeRanges
 	}
+	// Likewise the expressions written inside brackets, which only the
+	// formatter reads.
+	if len(p.parenthesized) > 0 {
+		program.Parenthesized = p.parenthesized
+	}
 
 	// The lexer has now been driven through EOF, so its comment trivia is
 	// complete and can be published for the formatter.
@@ -273,6 +319,46 @@ func (p *Parser) Errors() []string { return p.errors }
 // and REPL.
 func (p *Parser) TypedErrors() []ParseError { return p.typedErrors }
 
+// PositionedErrors is Errors with each message prefixed by where it is:
+// "path:line:col: msg", or "line:col: msg" when path is empty, which is what a
+// REPL line wants.
+//
+// Errors alone carries no position at all, and it is what the whole command
+// line printed: `mutant run` reported `expected next token to be ), but got
+// IDENT instead` and left the author to find it (M26-LEX-015). The language
+// server never had the problem, because it renders TypedErrors.
+//
+// The two lists are built together by appendError, one entry each, in order, so
+// they pair by index -- with two exceptions this handles rather than assumes.
+// The "too many parse errors" note is appended to Errors alone, because a
+// diagnostic about the number of diagnostics has no range to sit at; and a
+// message from inside a `${...}` hole is given a prefix in Errors that its
+// typed twin does not carry. So an index past the end of typedErrors is
+// printed unprefixed, and a range that carries no line is left alone rather
+// than rendered as 0:0. TestThePlainAndTypedErrorListsStayPaired holds the
+// pairing in place, since a drift would put a position on the wrong message,
+// which is worse than putting none on any.
+func (p *Parser) PositionedErrors(path string) []string {
+	out := make([]string, 0, len(p.errors))
+	for i, msg := range p.errors {
+		if i >= len(p.typedErrors) {
+			out = append(out, msg)
+			continue
+		}
+		at := p.typedErrors[i].Range.Start
+		if !at.IsValid() {
+			out = append(out, msg)
+			continue
+		}
+		if path == "" {
+			out = append(out, fmt.Sprintf("%d:%d: %s", at.Line, at.Column, msg))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s:%d:%d: %s", path, at.Line, at.Column, msg))
+	}
+	return out
+}
+
 // startMark captures the current token's start position. Callers use it at
 // the top of a parse function to remember where a node begins before it is
 // fully constructed. Pair with recordRange at each successful return point.
@@ -293,6 +379,19 @@ func (p *Parser) recordRange(n ast.Node, start token.Position) {
 	p.nodeRanges[n] = ast.Range{Start: start, End: p.curToken.End}
 }
 
+// markParenthesized notes that the author wrote n inside brackets. The tree
+// drops them, since precedence is already in its shape; the formatter needs
+// them to print back the brackets that were written, and no others.
+func (p *Parser) markParenthesized(n ast.Expression) {
+	if n == nil {
+		return
+	}
+	if p.parenthesized == nil {
+		p.parenthesized = make(map[ast.Node]bool)
+	}
+	p.parenthesized[n] = true
+}
+
 // appendError records both a legacy string error and a range-annotated
 // ParseError for the same problem. The range is derived from tok so that
 // LSP clients can highlight the offending token precisely.
@@ -310,6 +409,16 @@ func (p *Parser) Recoverables() []RecoverableError { return p.recoverables }
 // *without* advancing, so the next statement starts where it should. The
 // older `if !p.curTokenIs(SEMICOLON) { p.nextToken() }` idiom swallowed the
 // first token of the following statement whenever a semicolon was missing.
+//
+// An omission is recoverable or hard depending on what follows it, and the
+// dividing line is whether another statement begins on the same line. Across a
+// line break the author has written two statements and left out a `;`, which is
+// what they meant and what the formatter repairs, so it stays recoverable. On
+// one line the two readings are not equally likely: `let y = x--1;` was read as
+// `let y = x--;` and then `1;`, and it ran, printing 4 and 4 while mutating x
+// (M26-LEX-007). Nothing in the source says the author wanted two statements
+// there, and a format-severity warning on a program that runs with wrong values
+// is not enough.
 func (p *Parser) consumeStatementTerminator(stmt ast.Statement) {
 	if p.peekTokenIs(token.SEMICOLON) {
 		p.nextToken()
@@ -320,7 +429,53 @@ func (p *Parser) consumeStatementTerminator(stmt ast.Statement) {
 		return
 	}
 
+	if p.statementFollowsOnSameLine() {
+		p.refuseMissingSemicolon(p.curToken, p.peekToken)
+		return
+	}
+
 	p.recordMissingSemicolon(p.curToken)
+}
+
+// statementFollowsOnSameLine reports whether the token after the statement that
+// just ended begins another statement on the same line.
+//
+// EOF and `}` are the two tokens that can follow a statement without beginning
+// one: `let x = 5` at end of input and `fn() { return 5 }` are both omissions
+// the formatter repairs, and both are pinned as recoverable. Every other token
+// on that line starts a statement, because a statement is the only thing the
+// grammar admits in this position.
+func (p *Parser) statementFollowsOnSameLine() bool {
+	if p.peekTokenIs(token.EOF) || p.peekTokenIs(token.RBRACE) {
+		return false
+	}
+	return p.peekToken.Start.Line == p.curToken.End.Line
+}
+
+// refuseMissingSemicolon reports two statements written on one line with no `;`
+// between them, naming both ends so the split is visible.
+//
+// The range is the token that begins the second statement rather than the
+// insertion point, because this is an error and not a quick fix: what the reader
+// needs to see is the code that was read as a statement of its own.
+//
+// Written with no space at all between them, the two are almost certainly one
+// spelling that this language does not have, so the message says so. The three
+// that reach here from another language -- a hex literal, an exponent and a
+// digit separator -- are refused by the lexer with their own names, since it can
+// see they were one token; this is the rest, `x--1` among them.
+func (p *Parser) refuseMissingSemicolon(end, next token.Token) {
+	msg := fmt.Sprintf(
+		"missing ';': the statement ending at `%s` is followed on the same line by `%s`, which begins another one, so this line is two statements and not one",
+		end.Literal, next.Literal)
+
+	if next.Start == end.End {
+		msg += fmt.Sprintf(
+			". They are written with nothing between them, so `%s%s` was more likely meant as one thing",
+			end.Literal, next.Literal)
+	}
+
+	p.appendError(next, msg)
 }
 
 // recordMissingSemicolon notes that the statement ending at tok needs a `;`.
@@ -348,12 +503,43 @@ func (p *Parser) recordRedundantSemicolon(tok token.Token) {
 }
 
 func (p *Parser) appendError(tok token.Token, msg string) {
+	// Past the cap the parse is repeating itself, so it says so once and stops.
+	// The note is appended to errors only: typedErrors is what the language
+	// server renders, and a diagnostic about the number of diagnostics has no
+	// range to put itself at.
+	if len(p.errors) >= maxParseErrors {
+		if len(p.errors) == maxParseErrors {
+			p.errors = append(p.errors, fmt.Sprintf(
+				"too many parse errors; stopped reporting after %d", maxParseErrors))
+		}
+		return
+	}
 	p.errors = append(p.errors, msg)
 	p.typedErrors = append(p.typedErrors, ParseError{
 		Msg:   msg,
 		Range: ast.Range{Start: tok.Start, End: tok.End},
 	})
 }
+
+// enterNesting opens one level of parser recursion and reports whether the
+// parse may go deeper. On a refusal the counter is NOT incremented, so the
+// frame that was refused owes no matching leaveNesting.
+func (p *Parser) enterNesting() bool {
+	if p.depth >= maxNestingDepth {
+		if !p.depthReported {
+			p.depthReported = true
+			p.appendError(p.curToken, fmt.Sprintf(
+				"nested more than %d levels deep at line %d, column %d: this is past what the parser will follow, and a program written by hand does not reach it",
+				maxNestingDepth, p.curToken.Start.Line, p.curToken.Start.Column))
+		}
+		return false
+	}
+	p.depth++
+	return true
+}
+
+// leaveNesting closes the level enterNesting opened.
+func (p *Parser) leaveNesting() { p.depth-- }
 
 func (p *Parser) parseIdentifier() ast.Expression {
 	start := p.startMark()
@@ -371,6 +557,7 @@ func (p *Parser) parseBoolean() ast.Expression {
 
 func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 	identifiers := []*ast.Identifier{}
+	named := map[string]bool{}
 
 	if p.peekTokenIs(token.RPAREN) {
 		p.nextToken()
@@ -379,19 +566,21 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 
 	p.nextToken()
 
-	identStart := p.startMark()
-	ident := &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}
-	p.recordRange(ident, identStart)
+	ident := p.parseParameterName(named)
+	if ident == nil {
+		return nil
+	}
 	identifiers = append(identifiers, ident)
 
 	for p.peekTokenIs(token.COMMA) {
 		p.nextToken()
 		p.nextToken()
 
-		nextStart := p.startMark()
-		ident := &ast.Identifier{Token: p.curToken, Value: p.curToken.Literal}
-		p.recordRange(ident, nextStart)
-		identifiers = append(identifiers, ident)
+		next := p.parseParameterName(named)
+		if next == nil {
+			return nil
+		}
+		identifiers = append(identifiers, next)
 	}
 
 	if !p.expectPeek(token.RPAREN) {
@@ -401,28 +590,94 @@ func (p *Parser) parseFunctionParameters() []*ast.Identifier {
 	return identifiers
 }
 
-func (p *Parser) parseCallArguments() []ast.Expression {
-	args := []ast.Expression{}
-
-	if p.peekTokenIs(token.RPAREN) {
-		p.nextToken()
-		return args
-	}
-
-	p.nextToken()
-	args = append(args, p.parseExpression(LOWEST))
-
-	for p.peekTokenIs(token.COMMA) {
-		p.nextToken()
-		p.nextToken()
-		args = append(args, p.parseExpression(LOWEST))
-	}
-
-	if !p.expectPeek(token.RPAREN) {
+// parseParameterName reads one parameter name, refusing a token that is not a
+// name and a name the list already holds.
+//
+// It returns nil only for the first of those. A duplicate is reported and then
+// kept, because the list is well formed apart from it: dropping it would cost
+// the author an invented second error from the caller's expectPeek, and keeping
+// it leaves the tree shaped like the source, which is what every position
+// recorded against it assumes.
+func (p *Parser) parseParameterName(named map[string]bool) *ast.Identifier {
+	start := p.startMark()
+	if !p.curTokenIs(token.IDENT) {
+		p.refuseParameter()
 		return nil
 	}
 
-	return args
+	name := p.curToken.Literal
+	if name != blankParameter {
+		if named[name] {
+			p.refuseDuplicateParameter(name, p.curToken)
+		}
+		named[name] = true
+	}
+
+	ident := &ast.Identifier{Token: p.curToken, Value: name}
+	p.recordRange(ident, start)
+	return ident
+}
+
+// blankParameter is the discard slot, exempt from the duplicate rule for the
+// reason compiler.blankName exists: a parameter list is positional, so `fn(_,
+// _, c)` has to keep all three slots or c would read the wrong argument. Two
+// discards are also not two readings of one name, because neither can be read.
+const blankParameter = "_"
+
+// refuseDuplicateParameter reports a parameter list naming one parameter twice.
+//
+// The sentence is sema.DuplicateParameterRefusal's, written out rather than
+// called: this package depends on token, ast and lexer and nothing else, which
+// is what lets the formatter and the language server parse a file without the
+// object model, the builtin table and the graph store coming with it.
+// TestTheDuplicateParameterSentenceIsTheOneSemaWrites holds the two spellings
+// together so they cannot drift apart unnoticed.
+//
+// It is refused here, and not only where it already was, because the compiler's
+// copy never sees a macro. A macro literal shares parseFunctionParameters and is
+// then expanded by the evaluator, which has no such check at all, so `macro(a,
+// a)` compiled and ran with the second parameter winning while `fn(a, a)` was
+// refused (M26-LEX-013). One check where both go through settles both engines,
+// and a parse error carries the range the editor needs to show this as an error
+// rather than as the lint warning it was.
+func (p *Parser) refuseDuplicateParameter(name string, at token.Token) {
+	p.appendError(at, fmt.Sprintf(
+		"parameter %s is declared twice: the second one could never be read, because every mention of %s in the body means the first",
+		name, name))
+}
+
+// refuseParameter rejects the token standing in a parameter slot when it is
+// not a name, and reports the lexer's own account of it when it is an ILLEGAL
+// that carries one.
+//
+// Both slots in parseFunctionParameters took p.curToken.Literal as a
+// parameter's name without asking what the token was, which made this the one
+// position in the grammar where an ILLEGAL never became an error: in
+// `fn("a<NUL>b") { 1 }` the illegal literal became a parameter named with the
+// illegal text, both of the caller's expectPeeks then succeeded, and the file
+// parsed with no diagnostic anywhere. The same slot accepted `fn(1)` and
+// `fn("ok")`, and the formatter reprinted the second as `fn(ok)`, dropping the
+// author's quotes.
+//
+// It then steps onto the list's `)` when what is left of the list is well
+// formed, so a refused parameter costs the author one error and not two:
+// without that step the caller's expectPeek(token.LBRACE) reports a missing
+// `{` that is in fact there, one token further on. The walk advances only over
+// a `,` or a name, so it can neither enter the function's body nor run past
+// the end of the input.
+func (p *Parser) refuseParameter() {
+	msg := fmt.Sprintf("a parameter must be a name, but got %s", p.curToken.Type)
+	if detail := illegalDetail(p.curToken); detail != "" {
+		msg = detail
+	}
+	p.appendError(p.curToken, msg)
+
+	for p.peekTokenIs(token.COMMA) || p.peekTokenIs(token.IDENT) {
+		p.nextToken()
+	}
+	if p.peekTokenIs(token.RPAREN) {
+		p.nextToken()
+	}
 }
 
 func (p *Parser) expectPeek(tokenType token.TokenType) bool {
@@ -438,21 +693,28 @@ func (p *Parser) peekTokenIs(tokenType token.TokenType) bool { return p.peekToke
 func (p *Parser) curTokenIs(tokenType token.TokenType) bool  { return p.curToken.Type == tokenType }
 func (p *Parser) peekError(t token.TokenType) {
 	msg := fmt.Sprintf("expected next token to be %s, but got %s instead", t, p.peekToken.Type)
+	if detail := illegalDetail(p.peekToken); detail != "" {
+		msg = detail
+	}
 	p.appendError(p.peekToken, msg)
 }
 
-func (p *Parser) peekPrecedence() int {
-	if prec, ok := precedences[p.peekToken.Type]; ok {
+// Precedence is how tightly an infix operator's token binds, or LOWEST for a
+// token that is not one. It is the parser's own table, so a printer deciding
+// where brackets are needed cannot disagree with how the source parses.
+func Precedence(t token.TokenType) int {
+	if prec, ok := precedences[t]; ok {
 		return prec
 	}
 	return LOWEST
 }
 
+func (p *Parser) peekPrecedence() int {
+	return Precedence(p.peekToken.Type)
+}
+
 func (p *Parser) curPrecedence() int {
-	if prec, ok := precedences[p.curToken.Type]; ok {
-		return prec
-	}
-	return LOWEST
+	return Precedence(p.curToken.Type)
 }
 
 func (p *Parser) registerPrefix(tokenType token.TokenType, fn prefixParseFn) {
@@ -465,5 +727,20 @@ func (p *Parser) registerInfix(tokenType token.TokenType, fn infixParseFn) {
 
 func (p *Parser) notPrefixParseFnError(t token.TokenType) {
 	msg := fmt.Sprintf("no prefix parse function for %s found", t)
+	if detail := illegalDetail(p.curToken); detail != "" {
+		msg = detail
+	}
 	p.appendError(p.curToken, msg)
+}
+
+// illegalDetail is the lexer's own account of an ILLEGAL token, when it has
+// one. The lexer knows that a quote is never closed, that a ${ has no }, that a
+// NUL byte is in the file; the parser knows only that no rule begins with
+// ILLEGAL, which is the less useful half of the truth. So the lexer's sentence
+// replaces the parser's, and the position is the token's either way.
+func illegalDetail(tok token.Token) string {
+	if tok.Type == token.ILLEGAL {
+		return tok.Err
+	}
+	return ""
 }

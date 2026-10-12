@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	mast "mutant/ast"
+	"mutant/sema"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -24,7 +25,7 @@ func (s *Snapshot) MemberCompletionsAt(pos lsp.Position) ([]lsp.CompletionItem, 
 	if s == nil || s.Program == nil {
 		return nil, false
 	}
-	offset, ok := offsetForPosition(s.Source, pos)
+	offset, ok := s.ByteOffset(pos)
 	if !ok {
 		return nil, false
 	}
@@ -48,11 +49,11 @@ func (s *Snapshot) MemberCompletionsAt(pos lsp.Position) ([]lsp.CompletionItem, 
 	// to fs_read and friends.
 	shadowed := false
 	for _, b := range s.VisibleBindingsAt(pos) {
-		if b.ident == nil || b.ident.Value != receiver {
+		if b.name != receiver {
 			continue
 		}
 		shadowed = true
-		if typeName, ok := s.structTypeNameForBinding(b); ok {
+		if typeName, ok := s.structTypeNameForDeclaration(b.ident); ok {
 			if fields, ok := s.structFieldNames(typeName); ok {
 				return s.structFieldCompletionItems(typeName, fields, prefix, pos), true
 			}
@@ -66,17 +67,34 @@ func (s *Snapshot) MemberCompletionsAt(pos lsp.Position) ([]lsp.CompletionItem, 
 		break
 	}
 
-	// 3. A builtin family receiver -> the family's members. `fs.` offers read,
-	//    write and the rest, because fs.read IS fs_read.
+	// 3. An import namespace receiver -> what that module exports.
 	//
-	//    An import binding this namespace comes first: a module called `fs`
-	//    means the file's own functions, not the standard library's, and
+	//    This comes before the builtin family, and must: a module imported as
+	//    `fs` means that file's functions, not the standard library's, and
 	//    offering fs_read's members there would be offering the wrong module.
-	//    What that module exports is cross-file knowledge the Snapshot does
-	//    not have, so the honest answer is to offer nothing rather than guess.
+	//
+	//    Until sema.Workspace existed this arm could only decline -- what a
+	//    module exports is cross-file knowledge a single parsed document does
+	//    not have, and guessing by name is how go-to-definition came to jump
+	//    into files nothing had imported. Now the workspace knows, and the
+	//    private names are filtered by the same rule the compiler refuses on,
+	//    so nothing is offered that the build would reject.
+	//
+	//    A namespace whose target has not been read yet still declines. Offering
+	//    an empty list would be a claim that the module declares nothing.
 	if _, imported := importNamespaces(s.Program.Statements)[receiver]; imported {
-		return nil, false
+		if s.workspace == nil {
+			return nil, false
+		}
+		members := s.workspace.MembersOf(s.ModuleKey, receiver)
+		if len(members) == 0 {
+			return nil, false
+		}
+		return moduleMemberCompletionItems(members, prefix, pos), true
 	}
+
+	// 4. A builtin family receiver -> the family's members. `fs.` offers read,
+	//    write and the rest, because fs.read IS fs_read.
 	if !shadowed {
 		if members := builtinFamilyMembers(receiver); len(members) > 0 {
 			return memberCompletionItems(members, lsp.CompletionItemKindFunction, prefix, pos), true
@@ -121,28 +139,6 @@ func errorFieldCompletionItems(prefix string, pos lsp.Position) []lsp.Completion
 		}
 	}
 	return items
-}
-
-// offsetForPosition converts a zero-based (line, character) position to a byte
-// offset in src. Characters are treated as bytes, matching the rest of the
-// analyzer's ASCII-oriented position handling.
-func offsetForPosition(src string, pos lsp.Position) (int, bool) {
-	i := 0
-	for line := 0; line < int(pos.Line); line++ {
-		nl := strings.IndexByte(src[i:], '\n')
-		if nl < 0 {
-			return 0, false
-		}
-		i += nl + 1
-	}
-	target := i + int(pos.Character)
-	if target > len(src) {
-		target = len(src)
-	}
-	if target < 0 {
-		return 0, false
-	}
-	return target, true
 }
 
 // memberAccessAt inspects src ending at offset and, if it is a `receiver.prefix`
@@ -208,20 +204,21 @@ func (s *Snapshot) enumVariantNames(typeName string) ([]string, bool) {
 }
 
 func (s *Snapshot) structFieldNames(typeName string) ([]string, bool) {
-	for _, stmt := range s.Program.Statements {
-		st, ok := stmt.(*mast.StructStatement)
-		if !ok || st.Name == nil || st.Name.Value != typeName {
-			continue
-		}
-		names := make([]string, 0, len(st.Fields))
-		for _, f := range st.Fields {
-			if f != nil {
-				names = append(names, f.Value)
-			}
-		}
-		return names, true
+	if s == nil || s.Program == nil {
+		return nil, false
 	}
-	return nil, false
+	s.buildStructIndex()
+	st, ok := s.structDecls[typeName]
+	if !ok {
+		return nil, false
+	}
+	names := make([]string, 0, len(st.Fields))
+	for _, f := range st.Fields {
+		if f != nil {
+			names = append(names, f.Value)
+		}
+	}
+	return names, true
 }
 
 // structFieldCompletionItems builds the field completions for a struct-typed
@@ -243,8 +240,12 @@ func (s *Snapshot) structFieldCompletionItems(typeName string, names []string, p
 func memberCompletionItems(names []string, kind lsp.CompletionItemKind, prefix string, pos lsp.Position) []lsp.CompletionItem {
 	lowerPrefix := strings.ToLower(prefix)
 	start := pos
-	if lsp.UInteger(len(prefix)) <= pos.Character {
-		start.Character = pos.Character - lsp.UInteger(len(prefix))
+	// The prefix is measured in the same units as the position it is subtracted
+	// from. len(prefix) is bytes, so on a non-ASCII prefix the edit started too
+	// far left and replaced text the user had not typed.
+	units := lsp.UInteger(utf16Len(prefix))
+	if units <= pos.Character {
+		start.Character = pos.Character - units
 	}
 	editRange := lsp.Range{Start: start, End: pos}
 
@@ -267,6 +268,33 @@ func memberCompletionItems(names []string, kind lsp.CompletionItemKind, prefix s
 			Kind:     &k,
 			TextEdit: &lsp.TextEdit{Range: editRange, NewText: name},
 		})
+	}
+	return items
+}
+
+// moduleMemberCompletionItems renders what a module exports.
+//
+// Each member's kind is carried from the declaration rather than guessed, so a
+// function offers as a function and a value as a variable -- the client sorts
+// and icons on that. The list arrives already filtered of private names; see
+// Workspace.MembersOf.
+func moduleMemberCompletionItems(members []sema.ExportFact, prefix string, pos lsp.Position) []lsp.CompletionItem {
+	byKind := make(map[lsp.CompletionItemKind][]string, 2)
+	order := make([]lsp.CompletionItemKind, 0, 2)
+	for _, member := range members {
+		kind := lsp.CompletionItemKindVariable
+		if member.Kind == sema.SymFunction {
+			kind = lsp.CompletionItemKindFunction
+		}
+		if _, seen := byKind[kind]; !seen {
+			order = append(order, kind)
+		}
+		byKind[kind] = append(byKind[kind], member.Name)
+	}
+
+	items := make([]lsp.CompletionItem, 0, len(members))
+	for _, kind := range order {
+		items = append(items, memberCompletionItems(byKind[kind], kind, prefix, pos)...)
 	}
 	return items
 }

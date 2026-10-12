@@ -32,6 +32,8 @@ Evidence levels used in this matrix:
 - `T` = tested
 - `C` = wired into the repository-wide `go test ./...` gate
 - `P` = partial / pending depth
+- `D` = declined by decision: no control exists, none is planned, and the
+  decision is recorded beside the row
 
 ---
 
@@ -44,19 +46,57 @@ Evidence levels used in this matrix:
 | SEC-003 | Signature failure handling must be policy-driven                                   | Tamper response policy        | [runner/runner.go](../runner/runner.go#L35), [runner/runner.go](../runner/runner.go#L43), [security/response_policy.go](../security/response_policy.go#L34)                                                                                                                                                                              | `--secure` / `--compat` / `--dev`                         | [security/security_test.go](../security/security_test.go#L295), [runner/runner_test.go](../runner/runner_test.go#L30)                                                                                                             | I/T/C  |
 | SEC-004 | Payload confidentiality and integrity at rest must use AEAD                        | Crypto layer                  | [security/crypto.go](../security/crypto.go#L29), [security/crypto.go](../security/crypto.go#L132), [security/const.go](../security/const.go#L9)                                                                                                                                                                                          | Password input and metadata                               | indirect via runner decode path tests [runner/runner_test.go](../runner/runner_test.go#L76)                                                                                                                                    | I/T/P  |
 | SEC-005 | Password-based key derivation must use bounded Argon2id params                     | KDF hardening                 | [security/kdf.go](../security/kdf.go#L42), [security/kdf.go](../security/kdf.go#L97), [security/crypto.go](../security/crypto.go#L196)                                                                                                                                                                                                   | password mode + metadata fields                           | [security/security_test.go](../security/security_test.go#L147)                                                                                                                                                                 | I/T    |
-| SEC-006 | Password quality policy required when explicit password mode is used               | Password policy               | [security/kdf.go](../security/kdf.go#L73), [generator/generate.go](../generator/generate.go#L26)                                                                                                                                                                                                                                      | prompt / `--password-file` / `--password-stdin` (`-password` deprecated) | covered by generator path behavior and policy validation unit scope                                                                                                                                                         | I/P    |
+| SEC-006 | Password quality policy required when explicit password mode is used               | Password policy               | [security/kdf.go](../security/kdf.go#L73), [generator/generate.go](../generator/generate.go#L26)                                                                                                                                                                                                                                      | prompt / `--password-file` / `--password-stdin` (`-password` refused)    | covered by generator path behavior and policy validation unit scope                                                                                                                                                         | I/P    |
 | SEC-007 | Runtime instruction decode must be offset-aware to reduce keystream reuse          | VM decode hardening           | [vm/vm.go](../vm/vm.go#L90), [code/code.go](../code/code.go#L177), [code/code.go](../code/code.go#L190), [security/secure_random.go](../security/secure_random.go#L39)                                                                                                                                                                      | runtime password/seed context                             | [security/security_test.go](../security/security_test.go#L179), [security/security_test.go](../security/security_test.go#L197)                                                                                                    | I/T/C  |
 | SEC-008 | Runtime integrity checks must detect instruction tampering                         | VM integrity probes           | [vm/vm.go](../vm/vm.go#L333), [vm/vm.go](../vm/vm.go#L662), [vm/vm.go](../vm/vm.go#L681)                                                                                                                                                                                                                                                 | policy + secure default behavior                          | [vm/vm_security_policy_test.go](../vm/vm_security_policy_test.go#L11)                                                                                                                                                          | I/T/C  |
 | SEC-009 | Integrity failures must trigger telemetry and policy action                        | Telemetry + policy coupling   | [vm/vm.go](../vm/vm.go#L697), [security/telemetry.go](../security/telemetry.go#L25), [security/response_policy.go](../security/response_policy.go#L34)                                                                                                                                                                                   | None; VM forces secure policy                             | [vm/vm_security_policy_test.go](../vm/vm_security_policy_test.go#L21), [vm/vm_security_policy_test.go](../vm/vm_security_policy_test.go#L41), [vm/vm_security_policy_test.go](../vm/vm_security_policy_test.go#L59)                  | I/T/C  |
 | SEC-010 | Anti-debug checks must be staged before decode and before execution                | Runtime gate enforcement      | [runner/runner.go](../runner/runner.go#L49), [runner/runner.go](../runner/runner.go#L58), [runner/runner.go](../runner/runner.go#L67)                                                                                                                                                                                                    | mode + tamper response env                                | policy behavior tests [security/security_test.go](../security/security_test.go#L295)                                                                                                                                           | I/T/P  |
 | SEC-011 | Debugger detection must be platform-specific with weighted signal logic on Windows | Anti-debug platform design    | [security/antidebug.go](../security/antidebug.go#L29), [security/antidebug_windows.go](../security/antidebug_windows.go#L32), [security/antidebug_weighting.go](../security/antidebug_weighting.go#L3), [security/antidebug_linux.go](../security/antidebug_linux.go#L15), [security/antidebug_darwin.go](../security/antidebug_darwin.go#L17) | runtime OS selection                                      | [security/security_test.go](../security/security_test.go#L349)                                                                                                                                                                 | I/T/P  |
 | SEC-012 | Security telemetry must support atomic counters and secure export                  | Telemetry subsystem           | [security/telemetry.go](../security/telemetry.go#L20), [security/telemetry.go](../security/telemetry.go#L35), [security/telemetry.go](../security/telemetry.go#L48)                                                                                                                                                                      | None; in-process API only                                 | [security/security_test.go](../security/security_test.go#L205), [security/security_test.go](../security/security_test.go#L230) | I/T/C  |
-| SEC-013 | CLI must clearly resolve secure/compat/dev mode and developer fallback semantics   | CLI posture controls          | [main.go](../main.go#L165), [main.go](../main.go#L180), [main.go](../main.go#L118), [main.go](../main.go#L129)                                                                                                                                                                                                                              | `--secure`, `--compat`, `--dev`, `-pwd`                   | operationally validated in local runtime use; no dedicated CLI parsing tests yet                                                                                                                                            | I/P    |
+| SEC-013 | CLI must clearly resolve secure/compat/dev mode and developer fallback semantics   | CLI posture controls          | [main.go](../main.go#L165), [main.go](../main.go#L180), [main.go](../main.go#L118), [main.go](../main.go#L129)                                                                                                                                                                                                                              | `--secure`, `--compat`, `--dev`, `--password-*`           | operationally validated in local runtime use; no dedicated CLI parsing tests yet                                                                                                                                            | I/P    |
 | SEC-014 | Generator must use a stable per-host signing identity                              | Signing workflow              | [generator/generate.go](../generator/generate.go#L36), [generator/generate.go](../generator/generate.go#L80), [security/key_bootstrap.go](../security/key_bootstrap.go#L37)                                                                                                                                                                              | None; local keystore only                                 | indirectly validated by signature verification tests                                                                                                                                                                        | I/P    |
 | SEC-015 | The security suites must run on every supported OS before a release                | Release validation            | [CONTRIBUTING.md](../CONTRIBUTING.md), [SECURITY_LLD.md](SECURITY_LLD.md#162-running-the-security-profile)                                                                                                                                                                     | None; `go test ./...` with `CGO_ENABLED=0`                | the suites themselves; **nothing automates the "every OS" half** since the CI workflow was removed                                                                                                                           | I/P    |
 | SEC-016 | Protection profile must define default tamper behavior                             | Runtime policy profile        | [security/profile.go](../security/profile.go), [security/response_policy.go](../security/response_policy.go)                                                                                                                                                                                                                          | None; fixed at `standard`                                 | [security/security_test.go](../security/security_test.go)                                                                                                                                                                      | I/T    |
-| SEC-017 | Builtin capability configuration (under design)                                    | Builtin capability gates      | [builtin/builtin.go](../builtin/builtin.go), [builtin/command_exec.go](../builtin/command_exec.go), [builtin/fs.go](../builtin/fs.go), [builtin/net.go](../builtin/net.go), [builtin/http.go](../builtin/http.go)                                                                                                                              | Under design                                              | [builtin/command_exec_test.go](../builtin/command_exec_test.go)                                                                                                                                                                | I/T    |
+| SEC-017 | Per-builtin capability configuration -- declined; none exists (note 1)             | Builtin capability gates      | None. A gate would have to cover: [builtin/builtin.go](../builtin/builtin.go), [builtin/command_exec.go](../builtin/command_exec.go), [builtin/fs.go](../builtin/fs.go), [builtin/net.go](../builtin/net.go), [builtin/http.go](../builtin/http.go)                                                                                            | None. No per-builtin gate exists (note 1)                 | [security/command_exec_bounds_test.go](../security/command_exec_bounds_test.go) covers the fixed limits that do apply, there being no gate to test                                                                             | D      |
 | SEC-018 | Standalone release artifacts must carry profile attestation and provenance         | Release trailer attestation   | [generator/writebinary.go](../generator/writebinary.go), [runner/runner.go](../runner/runner.go), [security/profile.go](../security/profile.go), [security/const.go](../security/const.go)                                                                                                                                                  | build profile + release generation path                   | [runner/runner_test.go](../runner/runner_test.go)                                                                                                                                                                              | I/T    |
+
+### 3.1 Note 1 -- SEC-017, per-builtin capability configuration
+
+**There is no per-builtin capability gate, and none is planned for 2.6.0.**
+This is a decision taken on 2026-10-10, not an unfinished item: a Mutant
+program carries the authority of the process that runs it, the same way a
+program written in Python, Ruby, Node or Go does. None of those puts a
+per-call gate in front of `subprocess`, `os/exec` or opening a socket
+either.
+
+What follows from that, stated plainly because a reader deciding whether to
+run a program they did not write needs it stated rather than softened:
+
+- A program that can reach `exec_string`, `exec_argv` or `cmd_run` can run
+  commands, and one that can reach the `fs_*`, `net_*` or `http_*` families
+  can read files and open sockets, with this process's own permissions.
+- The operator's decision is **whether to run the program**, not what it may
+  do once running. The controls that support that decision are the signed
+  artifact envelope and the mode flags (SEC-001), not a capability set.
+- What does constrain command execution is fixed and not configurable: a
+  3-second timeout bounding the whole call rather than one process, 8 KiB
+  kept of each output stream, a kill that reaches the process tree, and a
+  shell named rather than written out as a command line. Those are limits on
+  blast radius, not permissions, and they are tested in
+  [security/command_exec_bounds_test.go](../security/command_exec_bounds_test.go).
+- The LSP's `commandInjection` rule is an editor-time warning. It can be
+  switched off and it does not run at execution time, so it is not an
+  enforcement point.
+- The `policy_*` builtins are not this control under another name. They wrap
+  Open Policy Agent, so a program loads a Rego module and asks it a question,
+  and the program itself decides what to do with the answer. Nothing outside
+  those five builtins calls the engine, so it is never consulted before a
+  builtin runs.
+
+The design is revisited if a user asks for it. Until then this row exists so
+that a reviewer auditing control coverage finds a recorded decision rather
+than a gap, and so that nothing in this repository describes the control as
+pending.
 
 ---
 
@@ -90,7 +130,8 @@ sequenceDiagram
 
 Every switch is a command-line flag. Mutant reads no environment variable for
 configuration, so this section is the complete control surface. See
-[CONFIGURATION_POLICY.md](CONFIGURATION_POLICY.md).
+[CONFIGURATION_POLICY.md](CONFIGURATION_POLICY.md), which also lists the
+variables the Go runtime and Mutant's libraries still read on its behalf.
 
 0. Mode-flag validation
 
@@ -116,8 +157,8 @@ configuration, so this section is the complete control surface. See
 - anchors: [main.go](../main.go#L202), [main.go](../main.go#L329)
 
 4. Password sources: prompt (default), `--password-file`, `--password-stdin`,
-   `--password-insecure`, and the deprecated `-password` / `-pwd` /
-   `--password=` / `--pwd=`
+   `--password-insecure`; `-password` / `-pwd` / `--password=` / `--pwd=` are
+   parsed only so the resolver can refuse them by name (since 2.6.0)
 
 - collected into a `credential.Request` by `extractPasswordRequest`, then
   resolved by `credential.Resolver`, which rejects a command line naming more
@@ -150,8 +191,9 @@ configuration, so this section is the complete control surface. See
 
 ### 5.2 Fixed behaviour (no control surface)
 
-These were once environment variables and are now constants. Listed so a
-reviewer does not go looking for the control that used to exist:
+These were once environment variables and are now constants, with one entry
+that was never a control at all. Listed so a reviewer does not go looking
+for a control that used to exist, or never did:
 
 1. Protection profile -- `standard`
    ([security/profile.go](../security/profile.go)).
@@ -168,7 +210,8 @@ reviewer does not go looking for the control that used to exist:
    ([security/telemetry.go](../security/telemetry.go)).
 8. Signing key -- local keystore only
    ([security/key_bootstrap.go](../security/key_bootstrap.go)).
-9. Builtin capability configuration -- under design.
+9. Builtin capability configuration -- never existed and is not planned;
+   declined 2026-10-10. See note 1 under the control matrix.
 
 ---
 

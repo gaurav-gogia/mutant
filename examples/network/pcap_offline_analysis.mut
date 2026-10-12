@@ -1,13 +1,18 @@
+// Summarises an offline packet capture with net_pcap_analyze.
+// mutant:sweep needs-input -- reads examples/data/sample_capture.pcap, which the repository does not ship
+
 putln("=== Offline PCAP Analysis (Pure-Go backend) ===");
 
 let pcap_path = "examples/data/sample_capture.pcap";
 let present, err = fs_exists(pcap_path);
 if (err) {
     putln("fs_exists error:", err);
-} else if (!present) {
+}
+if (!err && !present) {
     putln("No sample PCAP found at", pcap_path);
     putln("Place a .pcap file there or change pcap_path to your capture file.");
-} else {
+}
+if (present) {
     let report, err = net_pcap_analyze(pcap_path);
     putln("net_pcap_analyze:", report, "err:", err);
-};
+}

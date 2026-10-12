@@ -159,7 +159,7 @@ format      pe
 machine     0x8664
 compiled    1970-01-01 00:00:00 UTC
 sections    8
-toolchain   go 1.26.2  buildinfo=true build_id=false pclntab=false
+toolchain   go 1.26.6  buildinfo=true build_id=false pclntab=false
 
   .text      addr=0x1000     size=13747200
   .rdata     addr=0xd1e000   size=18840064
@@ -268,7 +268,7 @@ case\update.dat
 
 **Filter `is_dir` before you pass paths to anything.** `fs_walk` returns the
 root and every directory under it alongside the files. Hand a directory to
-`fs_hash` and you get a read error rather than a hash. Each entry already
+`fs_hash` and it is refused: a directory has no digest. Each entry already
 carries `depth`, `is_dir`, `mod_time`, `name`, `path` and `size`, so you rarely
 need a second `fs_stat`.
 
@@ -945,12 +945,12 @@ language is for.
 ## Where to go next
 
 - **[Mutant in 30 minutes](TUTORIAL_30_MIN.md)** — install to standalone binary
-- **[CAPABILITY_REFERENCE.md](CAPABILITY_REFERENCE.md)** — all 497 builtins,
+- **[CAPABILITY_REFERENCE.md](CAPABILITY_REFERENCE.md)** — all 694 builtins,
   with signatures and return shapes
 - **[MUTANT_LANGUAGE_REFERENCE.md](MUTANT_LANGUAGE_REFERENCE.md)** — syntax and
   semantics
 - **[Why Mutant, and when not to](COMPARISON.md)** — how this compares with
   plaso, Velociraptor, osquery and a YARA+Sigma pipeline
-- **`examples/`** — 116 runnable programs, including `examples/workshop/` for
+- **`examples/`** — 127 runnable programs, including `examples/workshop/` for
   guided exercises and `examples/forensics/supertimeline.mut` for a longer
   timeline build

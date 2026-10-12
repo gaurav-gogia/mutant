@@ -1,15 +1,13 @@
 package builtin
 
 import (
-	"context"
-	"encoding/json"
+	"bytes"
+	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	crankcql "github.com/shreybatra/crankdb/cql"
-	crankserver "github.com/shreybatra/crankdb/server"
 
 	"mutant/object"
 )
@@ -20,7 +18,7 @@ type cacheEntry struct {
 
 type cacheStore struct {
 	entries map[string]cacheEntry
-	db      *crankserver.Database
+	values  map[string]object.Object
 	stats   cacheStoreStats
 }
 
@@ -40,12 +38,15 @@ var runtimeCacheStores = struct {
 	stores: map[string]*cacheStore{},
 }
 
-var crankRuntime = struct {
-	sync.Mutex
-	server *crankserver.CrankServer
-}{
-	server: &crankserver.CrankServer{},
-}
+// cacheValues serialises reads and writes of every store's values map.
+//
+// One process-wide lock rather than one per store, deliberately: the values
+// used to be held by calling a gRPC server method in-process, which required
+// swapping a package-level global in the backend for the duration of the call,
+// so a single process-wide lock is the serialisation this code has always had.
+// Keeping it means the change cannot introduce a concurrency difference. It is
+// held only across a single map read or write.
+var cacheValues sync.Mutex
 
 func CacheOpen(args ...object.Object) object.Object {
 	if len(args) != 1 {
@@ -65,7 +66,7 @@ func CacheOpen(args ...object.Object) object.Object {
 	if !exists {
 		runtimeCacheStores.stores[nameObj.Value] = &cacheStore{
 			entries: map[string]cacheEntry{},
-			db:      crankserver.NewDatabase(),
+			values:  map[string]object.Object{},
 		}
 	}
 	runtimeCacheStores.Unlock()
@@ -84,6 +85,9 @@ func CachePut(args ...object.Object) object.Object {
 
 	cacheName, key, errObj := cacheNameAndKey(BuiltinNameCachePut, args[0], args[1])
 	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	if errObj := refuseClassified(BuiltinNameCachePut, args...); errObj != nil {
 		return resultAndError(nil, errObj)
 	}
 
@@ -106,7 +110,7 @@ func CachePut(args ...object.Object) object.Object {
 		}
 	}
 
-	if errObj := cacheSetJSON(store, key, args[2]); errObj != nil {
+	if errObj := cacheSetValue(store, key, args[2]); errObj != nil {
 		return resultAndError(nil, errObj)
 	}
 
@@ -155,7 +159,7 @@ func CacheGet(args ...object.Object) object.Object {
 		}), nil)
 	}
 
-	value, errObj := cacheGetJSON(store, key)
+	value, errObj := cacheGetValue(store, key)
 	if errObj != nil {
 		if strings.Contains(strings.ToLower(errObj.Message), "not found") {
 			runtimeCacheStores.Lock()
@@ -201,7 +205,7 @@ func CacheDelete(args ...object.Object) object.Object {
 	runtimeCacheStores.Unlock()
 
 	if existed {
-		_ = cacheSetJSON(store, key, &object.Null{})
+		_ = cacheSetValue(store, key, &object.Null{})
 	}
 
 	return resultAndError(boolObj(existed), nil)
@@ -291,7 +295,7 @@ func CacheClear(args ...object.Object) object.Object {
 	runtimeCacheStores.Lock()
 	removed := int64(len(store.entries))
 	store.entries = map[string]cacheEntry{}
-	store.db = crankserver.NewDatabase()
+	store.values = map[string]object.Object{}
 	store.stats.clears++
 	runtimeCacheStores.Unlock()
 
@@ -321,7 +325,7 @@ func CacheClose(args ...object.Object) object.Object {
 
 	runtimeCacheStores.Lock()
 	store.entries = map[string]cacheEntry{}
-	store.db = nil
+	store.values = nil
 	runtimeCacheStores.Unlock()
 
 	return resultAndError(makeHashObject(map[string]object.Object{
@@ -361,78 +365,156 @@ func cacheCleanupExpiredLocked(store *cacheStore, now time.Time) {
 	}
 }
 
-func cacheSetJSON(store *cacheStore, key string, value object.Object) *object.Error {
-	goVal, err := objectToJSONValue(value)
+// cacheSetValue stores a copy of value under key. Only cache_put hands it a
+// value a program chose, so a value it cannot copy is refused in cache_put's
+// words; cache_delete's NULL always copies.
+func cacheSetValue(store *cacheStore, key string, value object.Object) *object.Error {
+	stored, err := cacheCopy(value, 0)
 	if err != nil {
-		return newError("cache backend encode: %s", err.Error())
-	}
-	jsonBytes, err := json.Marshal(goVal)
-	if err != nil {
-		return newError("cache backend encode: %s", err.Error())
+		return newError("argument 3 to `%s` %s", BuiltinNameCachePut, err.Error())
 	}
 
-	db := cacheStoreDBSnapshot(store)
-	if db == nil {
+	values := cacheStoreValuesSnapshot(store)
+	if values == nil {
 		return newError("cache backend set: cache is closed")
 	}
 
-	crankRuntime.Lock()
-	orig := crankserver.Db
-	crankserver.Db = db
-	_, callErr := crankRuntime.server.Set(context.Background(), &crankcql.DataPacket{
-		Key:      key,
-		DataType: crankcql.DataType_JSON,
-		JsonVal:  jsonBytes,
-	})
-	crankserver.Db = orig
-	crankRuntime.Unlock()
+	cacheValues.Lock()
+	values[key] = stored
+	cacheValues.Unlock()
 
-	if callErr != nil {
-		return newError("cache backend set: %s", callErr.Error())
-	}
 	return nil
 }
 
-// cacheStoreDBSnapshot reads store.db under the same lock that CacheClear/
-// CacheClose use to write it, avoiding a data race and a nil-deref after close.
-// The returned pointer stays valid for the caller even if the store is closed
-// concurrently (the in-flight op completes on the pre-close database).
-func cacheStoreDBSnapshot(store *cacheStore) *crankserver.Database {
+// cacheStoreValuesSnapshot reads store.values under the same lock that
+// CacheClear/CacheClose use to write it, avoiding a data race and a nil-deref
+// after close. The returned map stays usable for the caller even if the store
+// is closed concurrently: CacheClose replaces the field, it does not clear the
+// map, so an in-flight operation completes against the pre-close values.
+func cacheStoreValuesSnapshot(store *cacheStore) map[string]object.Object {
 	runtimeCacheStores.RLock()
-	db := store.db
+	values := store.values
 	runtimeCacheStores.RUnlock()
-	return db
+	return values
 }
 
-func cacheGetJSON(store *cacheStore, key string) (object.Object, *object.Error) {
-	db := cacheStoreDBSnapshot(store)
-	if db == nil {
+func cacheGetValue(store *cacheStore, key string) (object.Object, *object.Error) {
+	values := cacheStoreValuesSnapshot(store)
+	if values == nil {
 		return nil, newError("cache backend get: cache is closed")
 	}
 
-	crankRuntime.Lock()
-	orig := crankserver.Db
-	crankserver.Db = db
-	packet, callErr := crankRuntime.server.Get(context.Background(), &crankcql.GetCommandRequest{Key: key})
-	crankserver.Db = orig
-	crankRuntime.Unlock()
+	cacheValues.Lock()
+	stored, found := values[key]
+	cacheValues.Unlock()
 
-	if callErr != nil {
-		return nil, newError("cache backend get: %s", callErr.Error())
+	// "not found" is load-bearing, not decoration: CacheGet matches this
+	// message to recognise an entry whose value has gone and correct its own
+	// bookkeeping from a hit to a miss. The old backend returned a gRPC
+	// NotFound status whose text happened to contain the same two words.
+	if !found {
+		return nil, newError("cache backend get: key not found")
 	}
 
-	if packet.GetDataType() != crankcql.DataType_JSON {
-		return nil, newError("cache backend get: unsupported type %s", packet.GetDataType().String())
-	}
-
-	var raw any
-	if err := json.Unmarshal(packet.GetJsonVal(), &raw); err != nil {
-		return nil, newError("cache backend decode: %s", err.Error())
-	}
-
-	obj, err := jsonValueToObject(raw)
+	// Copied outside the lock, which is safe because nothing changes a stored
+	// value: a put replaces it and every get hands out a copy of its own. The
+	// copy cannot fail either, since what is stored is what cacheCopy made.
+	value, err := cacheCopy(stored, 0)
 	if err != nil {
-		return nil, newError("cache backend decode: %s", err.Error())
+		return nil, newError("cache backend get: the stored value %s", err.Error())
 	}
-	return obj, nil
+	return value, nil
+}
+
+// cacheCopy returns a value of value's type, equal to it, that shares nothing
+// a program can change with it. cache_put keeps one and cache_get hands out
+// another, so a value comes back as it went in.
+//
+// It replaced a round trip through JSON, which has one kind of number and no
+// binary type: an INTEGER came back as a FLOAT, rounded once past 2^53, a
+// BYTES came back as its hex in a STRING, a STRUCT as a HASH, and a STRING
+// that was not UTF-8 had each stray byte replaced with U+FFFD (M26-BLT-010).
+//
+// It copies in both directions, and all the way down, because a value can be
+// changed in place after cache_put has returned: the evaluator assigns to an
+// element of an array, a hash or a buffer where it stands, so `b[0] = 0` on a
+// buffer just stored would reach into an entry that shared its memory, and a
+// program that read the entry could do the same to what it was handed.
+//
+// The depth bound is the one refuseClassified walks to, and cache_put has
+// already refused a value nested deeper. What reaches it here holds itself --
+// the evaluator makes one of `a[0] = a` -- or reaches one container by two
+// paths, one of them longer than the bound.
+func cacheCopy(value object.Object, depth int) (object.Object, error) {
+	if depth > classifiedWalkDepth {
+		return nil, fmt.Errorf("is nested more than %d levels deep, or holds itself; the cache keeps a copy "+
+			"of what it is given, and a value that holds itself has no end to copy", classifiedWalkDepth)
+	}
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case *object.String:
+		return stringObj(v.Value), nil
+	case *object.Integer:
+		return intObj(v.Value), nil
+	case *object.Float:
+		return floatObj(v.Value), nil
+	case *object.Boolean:
+		return boolObj(v.Value), nil
+	case *object.Null:
+		return &object.Null{}, nil
+	case *object.Bytes:
+		// The mark goes with the bytes. cache_put refuses a marked buffer
+		// before it gets here, and a copy that dropped the mark would launder
+		// one the day that changed.
+		return &object.Bytes{Value: bytes.Clone(v.Value), Classified: v.Classified}, nil
+	case *object.Array:
+		elements := make([]object.Object, len(v.Elements))
+		for i, element := range v.Elements {
+			copied, err := cacheCopy(element, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			elements[i] = copied
+		}
+		return &object.Array{Elements: elements}, nil
+	case *object.Hash:
+		// Each pair stays filed under the HashKey it had: the copy of its key
+		// holds the same value.
+		pairs := make(map[object.HashKey]object.HashPair, len(v.Pairs))
+		for hashKey, pair := range v.Pairs {
+			key, err := cacheCopy(pair.Key, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			item, err := cacheCopy(pair.Value, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			pairs[hashKey] = object.HashPair{Key: key, Value: item}
+		}
+		return &object.Hash{Pairs: pairs}, nil
+	case *object.Struct:
+		fields := make(map[string]object.Object, len(v.Fields))
+		for name, field := range v.Fields {
+			copied, err := cacheCopy(field, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			fields[name] = copied
+		}
+		return &object.Struct{TypeName: v.TypeName, FieldOrder: slices.Clone(v.FieldOrder), Fields: fields}, nil
+	case *object.EnumValue:
+		payload, err := cacheCopy(v.Value, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return &object.EnumValue{TypeName: v.TypeName, Tag: v.Tag, Value: payload}, nil
+	}
+	verb := "holds"
+	if depth == 0 {
+		verb = "is"
+	}
+	return nil, fmt.Errorf("%s a %s, and a cache entry holds only STRING, BYTES, INTEGER, FLOAT, BOOLEAN and NULL, "+
+		"and ARRAY, HASH, STRUCT and ENUM_VALUE values made of them", verb, value.Type())
 }

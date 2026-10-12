@@ -1,7 +1,5 @@
 package object
 
-import "sort"
-
 // Iterator is the cursor a `for (x in xs)` loop holds while it runs.
 //
 // It is a runtime object rather than compiler bookkeeping because the loop has
@@ -67,14 +65,11 @@ func NewIterator(over Object) (*Iterator, bool) {
 		return &Iterator{Keys: keys, Values: src.Elements}, true
 
 	case *Hash:
-		pairs := make([]HashPair, 0, len(src.Pairs))
-		for _, pair := range src.Pairs {
-			pairs = append(pairs, pair)
-		}
-		// The same comparison Hash.Inspect uses, so a program that prints a
-		// hash and a program that loops over it agree about its order. Ranging
-		// the map directly would give a different order on every run.
-		sort.Slice(pairs, func(i, j int) bool { return hashKeyLess(pairs[i].Key, pairs[j].Key) })
+		// The order Hash.Inspect prints and keys, values and entries list, so
+		// a program that prints a hash, loops over it or asks for its keys
+		// sees one order. Ranging the map directly would give a different
+		// order on every run.
+		pairs := src.SortedPairs()
 
 		keys := make([]Object, len(pairs))
 		values := make([]Object, len(pairs))

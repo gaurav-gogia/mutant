@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"mutant/object"
 )
@@ -118,6 +119,16 @@ func StrRepeat(args ...object.Object) object.Object {
 	if n < 0 {
 		return newError("argument 2 to `str_repeat` must be non-negative, got %d", n)
 	}
+	if n == 0 || len(s) == 0 {
+		return stringObj("")
+	}
+	// Compared as a division so the product cannot overflow on the way to the
+	// comparison, and checked after the empty cases so that past this point n
+	// is at most the limit and int(n) is exact on every platform.
+	if n > maxBuiltinResultBytes/int64(len(s)) {
+		return newError("argument 2 to `str_repeat` would repeat a %d-byte string %d times, over the %d-byte limit on one builtin result; write data this large to a file instead",
+			len(s), n, int64(maxBuiltinResultBytes))
+	}
 	return stringObj(strings.Repeat(s, int(n)))
 }
 
@@ -161,15 +172,26 @@ func StrSubstr(args ...object.Object) object.Object {
 		return newError("arguments to `str_substr` must be non-negative")
 	}
 	// rune-aware, with clamping so out-of-range requests return what exists.
+	//
+	// The length is clamped before it is added, which is the whole fix. Adding
+	// first and clamping the sum is what this did, and `start + length`
+	// overflows for a large length -- asking for the rest of the string by
+	// passing a number bigger than it is the natural idiom -- so the sum came
+	// out negative, a negative sum is not greater than len(runes) and the clamp
+	// did not fire, and the slice panicked. It needed start >= 1 to go wrong,
+	// which is why a clamp that reads as correct is not (M26-BLT-006).
+	//
+	// Neither arithmetic here can overflow: start is clamped into
+	// [0, len(runes)] first, so int64(len(runes))-start is in the same range,
+	// and length is already known to be non-negative and no larger than it.
 	runes := []rune(s)
 	if start > int64(len(runes)) {
 		start = int64(len(runes))
 	}
-	end := start + length
-	if end > int64(len(runes)) {
-		end = int64(len(runes))
+	if length > int64(len(runes))-start {
+		length = int64(len(runes)) - start
 	}
-	return stringObj(string(runes[start:end]))
+	return stringObj(string(runes[start : start+length]))
 }
 
 func StrCharAt(args ...object.Object) object.Object {
@@ -280,6 +302,13 @@ func strPad(op string, args []object.Object, left bool) object.Object {
 	runes := []rune(s)
 	if int64(len(runes)) >= width {
 		return stringObj(s)
+	}
+	// The fill is built as runes, so the limit is the byte cap divided by the
+	// worst case a rune costs. Subtracting here cannot overflow: width is the
+	// larger of the two and len(runes) is not negative.
+	if width-int64(len(runes)) > maxBuiltinResultBytes/utf8.UTFMax {
+		return newError("argument 2 to `%s` would add %d runes of padding, over the %d runes that the %d-byte limit on one builtin result allows",
+			op, width-int64(len(runes)), int64(maxBuiltinResultBytes/utf8.UTFMax), int64(maxBuiltinResultBytes))
 	}
 	needed := int(width) - len(runes)
 	padRunes := []rune(pad)

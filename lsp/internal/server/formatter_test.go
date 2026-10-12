@@ -5,11 +5,20 @@ import (
 	"testing"
 
 	"mutant/lsp/internal/analyzer"
+
+	lsp "github.com/tliron/glsp/protocol_3_16"
 )
 
+// format is formatSnapshotText for a source that is expected to parse, which
+// is every case in this file but one. A refusal fails the test rather than
+// returning "", so a test can never read the refusal as "formats to nothing".
 func format(t *testing.T, src string) string {
 	t.Helper()
-	return formatSnapshotText(analyzer.New().Analyze(src))
+	formatted, parseErrors, ok := formatSnapshotText(analyzer.New().Analyze(src))
+	if !ok {
+		t.Fatalf("the formatter refused %q: %v", src, parseErrors)
+	}
+	return formatted
 }
 
 func TestFormatterUsesFourSpaceIndent(t *testing.T) {
@@ -83,7 +92,7 @@ func TestFormatterOmitsSemicolonAfterBraceTerminatedStatements(t *testing.T) {
 		{"if else", "if (x) { y; } else { z; }", "if (x) {\n    y;\n} else {\n    z;\n}\n"},
 		{"struct", "struct Point{x;y;}", "struct Point { x; y; }\n"},
 		{"enum", "enum Color{Red,Green}", "enum Color { Red, Green }\n"},
-		{"for", "for(let i=0;i<3;i=i+1){i;}", "for (let i = 0; (i < 3); i = (i + 1)) {\n    i;\n}\n"},
+		{"for", "for(let i=0;i<3;i=i+1){i;}", "for (let i = 0; i < 3; i = i + 1) {\n    i;\n}\n"},
 	}
 
 	for _, tt := range tests {
@@ -154,9 +163,11 @@ func TestFormatterDoesNotInventBlankLines(t *testing.T) {
 	}
 }
 
-// HashLiteral.Pairs is a Go map. Printing it without sorting yields a
-// different byte sequence per run, which would make formatting
-// non-deterministic and break format-on-save.
+// Hash literals used to be the one construct whose rendering was not a function
+// of the tree: HashLiteral.Pairs was a Go map, and printing it without sorting
+// yielded a different byte sequence per run, which would make formatting
+// non-deterministic and break format-on-save. The pairs are ordered now
+// (M26-CMP-010), and this keeps saying so.
 func TestFormatterIsDeterministicForHashLiterals(t *testing.T) {
 	src := `let h = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6};`
 
@@ -232,21 +243,41 @@ func TestFormatterIsIdempotent(t *testing.T) {
 
 	for _, src := range corpus {
 		once := format(t, src)
-		twice := formatSnapshotText(analyzer.New().Analyze(once))
+		twice := format(t, once)
 		if once != twice {
 			t.Errorf("not idempotent for %q:\n first pass: %q\nsecond pass: %q", src, once, twice)
 		}
 	}
 }
 
-func TestFormatterFallsBackOnParseErrors(t *testing.T) {
-	// `let = 5` cannot produce a usable tree, so the formatter must not
-	// attempt to print one; it only normalises whitespace.
+// TestFormatterRefusesSourceWithParseErrors is M26-TOOL-014's floor, at the
+// level where the decision is made.
+//
+// This test used to be TestFormatterFallsBackOnParseErrors and asserted the
+// defect: that `let = 5;   ` came back as `let = 5;`, trailing whitespace
+// stripped. Stripping trailing whitespace with no tree to read is precisely
+// what shortened the inside of a triple-quoted string, so the fallback is
+// gone and the formatter refuses.
+func TestFormatterRefusesSourceWithParseErrors(t *testing.T) {
 	src := "let = 5;   \nlet ok = 1;   \n"
-	want := "let = 5;\nlet ok = 1;\n"
 
-	if got := format(t, src); got != want {
-		t.Errorf("formatted = %q, want %q", got, want)
+	formatted, parseErrors, ok := formatSnapshotText(analyzer.New().Analyze(src))
+	if ok {
+		t.Fatalf("the formatter accepted source that does not parse, giving %q", formatted)
+	}
+	if formatted != "" {
+		t.Errorf("a refusal returned text: %q", formatted)
+	}
+	if len(parseErrors) == 0 {
+		t.Fatal("a refusal must say why; got no parse errors")
+	}
+	for _, d := range parseErrors {
+		if d.Severity == nil || *d.Severity != lsp.DiagnosticSeverityError {
+			t.Errorf("parse diagnostic severity = %v, want error", d.Severity)
+		}
+		if d.Source == nil || *d.Source != "mutant-parser" {
+			t.Errorf("parse diagnostic source = %v, want mutant-parser", d.Source)
+		}
 	}
 }
 
@@ -258,23 +289,119 @@ func TestFormatterHandlesEmptyAndWhitespaceOnlyInput(t *testing.T) {
 	}
 }
 
-func TestFormatterParenthesizesOperatorExpressions(t *testing.T) {
+// TestFormatterKeepsTheBracketsTheAuthorWrote pins the owner's decision of
+// 2026-09-29: the formatter keeps the brackets the author wrote and adds none.
+// It used to bracket every operator expression, which buried a plain string
+// concatenation under one pair per `+`.
+func TestFormatterKeepsTheBracketsTheAuthorWrote(t *testing.T) {
 	tests := []struct {
 		src  string
 		want string
 	}{
-		{"let x = a + b * c;", "let x = (a + (b * c));\n"},
-		{"let x = (a + b) * c;", "let x = ((a + b) * c);\n"},
-		{"let x = -a;", "let x = (-a);\n"},
-		{"let x = !flag;", "let x = (!flag);\n"},
-		// Redundant grouping parens are dropped by the parser, so the
-		// canonical form has exactly one pair per operator.
-		{"let x = ((a));", "let x = a;\n"},
+		{"let x = a + b * c;", "let x = a + b * c;\n"},
+		{"let x = (a + b) * c;", "let x = (a + b) * c;\n"},
+		// A pair that precedence does not need is the author's, and stays.
+		{"let x = a + (b * c);", "let x = a + (b * c);\n"},
+		{"let ok = (flags & MASK) == 0;", "let ok = (flags & MASK) == 0;\n"},
+		{"let ok = flags & MASK == 0;", "let ok = flags & MASK == 0;\n"},
+		{"let x = a - (b - c);", "let x = a - (b - c);\n"},
+		{"let x = a - b - c;", "let x = a - b - c;\n"},
+		{"let x = -a;", "let x = -a;\n"},
+		{"let x = !flag;", "let x = !flag;\n"},
+		{"let x = -(a + b);", "let x = -(a + b);\n"},
+		// Two minus signs stay apart: `--` is the decrement token.
+		{"let x = - -a;", "let x = - -a;\n"},
+		{"let x = -(-a);", "let x = -(-a);\n"},
+		// Two pairs around one expression are one grouping.
+		{"let x = ((a));", "let x = (a);\n"},
+		{`putf("a=" + b + "\n");`, "putf(\"a=\" + b + \"\\n\");\n"},
+		{`putf(("a=" + b));`, "putf((\"a=\" + b));\n"},
+		{"let y = (-f)(1);", "let y = (-f)(1);\n"},
+		{"let y = (a + b)[0];", "let y = (a + b)[0];\n"},
+		{"x += (a + b) * c;", "x += (a + b) * c;\n"},
 	}
 
 	for _, tt := range tests {
 		if got := format(t, tt.src); got != tt.want {
 			t.Errorf("format(%q) = %q, want %q", tt.src, got, tt.want)
+		}
+	}
+}
+
+// TestFormatterBracketsWhatATreeWithoutTheSideTableNeeds covers the operand
+// rules on their own. With the record of written brackets removed, the output
+// must still parse back to the same tree, so every pair precedence needs is
+// written -- and no other, which is why `(a - b) - (c - d)` loses one.
+func TestFormatterBracketsWhatATreeWithoutTheSideTableNeeds(t *testing.T) {
+	src := "let x = (a + b) * c;\n" +
+		"let y = -(a + b);\n" +
+		"let z = (a - b) - (c - d);\n" +
+		"let w = a - (b - c);\n" +
+		"let v = (-f)(1);\n" +
+		"let u = (a + b)[0];\n" +
+		"let t = (a || b) && !(c == d);\n" +
+		"let s = - -a;\n"
+	want := "let x = (a + b) * c;\n" +
+		"let y = -(a + b);\n" +
+		"let z = a - b - (c - d);\n" +
+		"let w = a - (b - c);\n" +
+		"let v = (-f)(1);\n" +
+		"let u = (a + b)[0];\n" +
+		"let t = (a || b) && !(c == d);\n" +
+		"let s = - -a;\n"
+
+	snapshot := analyzer.New().Analyze(src)
+	if len(snapshot.ParseErrors) > 0 || snapshot.Program == nil {
+		t.Fatalf("fixture did not parse: %v", snapshot.ParseErrors)
+	}
+	snapshot.Program.Parenthesized = nil
+	got, _, ok := formatSnapshotText(snapshot)
+	if !ok {
+		t.Fatal("the fixture parses, so the formatter must not refuse it")
+	}
+	if got != want {
+		t.Errorf("formatted without the side table =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestFormatterWritesTheBracketsAConditionNeeds is M26-LSP-008's regression
+// test. The brackets around a condition belong to `if`, `while` and `match`,
+// and the formatter used to leave them out whenever the printed condition began
+// with '(' and ended with ')' -- which a call on a bracketed callee does too.
+func TestFormatterWritesTheBracketsAConditionNeeds(t *testing.T) {
+	tests := []struct {
+		src  string
+		want string // a line the output must contain
+	}{
+		{"let fs = [fn(x) { return x; }];\nlet more = [];\nif ((fs + more)[0](true)) { putln(1); }\n",
+			"if ((fs + more)[0](true)) {"},
+		{"let f = fn(x) { return x; };\nif ((-f)(1)) { putln(1); }\n", "if ((-f)(1)) {"},
+		{"let h = {\"a\": 1};\nmatch ((h)[\"a\"]) { 1 => putln(1), _ => putln(2) }\n", "match ((h)[\"a\"]) {"},
+		{"let a = 1;\nif (a + a > 1) { putln(1); }\n", "if (a + a > 1) {"},
+		{"let i = 0;\nwhile (i < 3) { i = i + 1; }\n", "while (i < 3) {"},
+	}
+
+	for _, tt := range tests {
+		got := format(t, tt.src)
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("format(%q) = %q, want it to contain %q", tt.src, got, tt.want)
+		}
+		reparsed := analyzer.New().Analyze(got)
+		if len(reparsed.ParseErrors) > 0 || reparsed.Program == nil {
+			t.Errorf("format(%q) = %q, which does not parse: %v", tt.src, got, reparsed.ParseErrors)
+			continue
+		}
+		before := canonicalRendering(analyzer.New().Analyze(tt.src).Program.String())
+		if after := canonicalRendering(reparsed.Program.String()); after != before {
+			t.Errorf("format(%q) changed the tree\n%s", tt.src, firstDifference(before, after))
+		}
+		again, _, ok := formatSnapshotText(reparsed)
+		if !ok {
+			t.Errorf("format(%q) = %q, which the formatter then refused", tt.src, got)
+			continue
+		}
+		if again != got {
+			t.Errorf("formatting %q twice gave %q, then %q", tt.src, got, again)
 		}
 	}
 }
@@ -291,5 +418,18 @@ func TestFormatterNormalizesTabsAndTrailingWhitespace(t *testing.T) {
 		if strings.TrimRight(line, " \t") != line {
 			t.Errorf("line %q has trailing whitespace", line)
 		}
+	}
+}
+
+// TestFormatterKeepsWhitespaceInsideStringsOfAFileThatParses is the control
+// for M26-TOOL-014: the same banner, in a file with nothing wrong with it,
+// keeps its three trailing spaces. The defect was never in the printer -- it
+// was in what used to happen when the printer could not run at all.
+func TestFormatterKeepsWhitespaceInsideStringsOfAFileThatParses(t *testing.T) {
+	src := "let banner = \"\"\"\nrow one   \nrow two\n\"\"\";\n"
+
+	got := format(t, src)
+	if !strings.Contains(got, "row one   ") {
+		t.Errorf("the formatter edited the inside of a string literal:\n%q", got)
 	}
 }

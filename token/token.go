@@ -4,8 +4,29 @@ import "sort"
 
 // Position identifies a location in source code.
 //
-// Line and Column are 1-based (LSP-friendly) and count runes, not bytes.
-// Offset is a 0-based byte offset into the source input.
+// Line is 1-based. Column is 1-based and counts BYTES, not runes and not UTF-16
+// code units: the lexer computes it as l.position - l.lineStart + 1, which is a
+// difference of byte offsets. Offset is a 0-based byte offset into the source
+// input, so Offset and Column measure in the same unit and a caller can slice
+// the source with either.
+//
+// This comment used to say "1-based (LSP-friendly) and count runes, not bytes",
+// which was wrong twice over and was M26-LEX-014. It was wrong about the unit,
+// and the parenthesis was wrong about the protocol: LSP 3.16 measures
+// Position.character in UTF-16 code units, which is a third unit again, equal
+// to the rune count only for text inside the basic multilingual plane. Three
+// units agree on ASCII, which is why the claim went unnoticed and why the tests
+// that assert a Column all used ASCII.
+//
+// Bytes are the deliberate choice and not an accident waiting to be corrected.
+// The CLI prints these columns, the parser's messages quote them, and the sweep
+// goldens pin them, so every one of those would move if the unit here changed.
+// The conversion to what an editor needs happens once, at the protocol
+// boundary, in lsp/internal/protocol.Mapper -- see its type comment for why it
+// is there and nowhere else. Anything that converts a Column must go through a
+// Mapper; a conversion written at a call site is M26-LSP-027, which is how the
+// language server came to report every position after a non-ASCII character on
+// the same line in the wrong place.
 //
 // A zero-value Position (Line == 0) means "unknown position" and is used
 // by hand-constructed tokens (e.g. in tests) that pre-date position tracking.
@@ -106,6 +127,13 @@ type Token struct {
 	// diagnostic inside a hole underlines the code the author wrote rather
 	// than the string that contains it.
 	Parts []StringPart
+
+	// Err is the lexer's own account of why this token is ILLEGAL: a quote
+	// that is never closed, a ${ with no }, a NUL byte in the file. It is set
+	// only on ILLEGAL, and only where the lexer knows more than "no rule
+	// begins with this character", which is all the parser can work out for
+	// itself. Empty on every other token.
+	Err string
 }
 
 // StringPart is one piece of an interpolated string literal.
@@ -132,6 +160,18 @@ const (
 	ILLEGAL = "ILLEGAL"
 	EOF     = "EOF"
 
+	// UNTERMINATED is a string literal whose closing delimiter is missing: the
+	// scan for it reached end of input instead. Literal carries the decoded
+	// text that was read and Start is the opening quote, which is the position
+	// a reader has to be given -- the end of the token is the end of the file
+	// and says nothing about where the mistake is.
+	//
+	// It is not ILLEGAL. ILLEGAL is a rune no reader claims, reported one rune
+	// at a time; this is a token many runes wide, read correctly, that no
+	// program can contain. Keeping them apart is what lets the parser explain
+	// this one instead of saying no prefix function was found (M26-LEX-005).
+	UNTERMINATED = "UNTERMINATED"
+
 	// Identifiers + Literals
 	// ex: add, foobar, x, y, ....
 	IDENT  = "IDENT"
@@ -150,7 +190,6 @@ const (
 	ASTERISK   = "*"
 	FSLASH     = "/"
 	MODULO     = "%"
-	BSLASH     = "\\"
 	DOT        = "."
 	LT         = "<"
 	GT         = ">"

@@ -19,7 +19,7 @@ Security issues do **not** go through the normal issue tracker — see
 
 ## Getting set up
 
-Go **1.26.2** or newer (`go.mod` pins the floor). Nothing else.
+Go **1.26.9** or newer (`go.mod` pins the floor). Nothing else.
 
 ```bash
 git clone https://github.com/aoiflux/mutant
@@ -63,6 +63,29 @@ for t in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin
   GOOS="${t%/*}" GOARCH="${t#*/}" CGO_ENABLED=0 go build ./... || echo "FAILED $t"
 done
 ```
+
+Those two are the minimum. The whole release gate -- the pinned toolchain,
+gofmt, vet on three platforms, every build target, the tests, the race detector,
+the generated documents, the example sweep against its recorded output, module
+verification, the changelog date against the tag, and govulncheck -- is one command, and it
+prints a table of what passed:
+
+```bash
+scripts/release_gate.sh --go go1.26.9        # Linux, macOS, WSL
+```
+
+```powershell
+scripts/release_gate.ps1 -Go go1.26.9        # Windows
+```
+
+The gates run on the toolchain `go.mod` pins, installed beside any newer one with
+`go install golang.org/dl/go1.26.9@latest` and `go1.26.9 download`; the gate
+reads the version from `go.mod` and refuses any other. Add `--quick` / `-Quick`
+to skip the slow steps while iterating. A release needs the full gate: a
+vulnerability govulncheck finds reachable fails it, and moving the toolchain to
+the fixing patch release is how that is cleared. `scripts/coverage.sh` and
+`scripts/coverage.ps1` measure coverage per package; that is a measurement, not a
+gate.
 
 ## Configuration: no environment variables
 
@@ -146,7 +169,7 @@ builtin changes what the server teaches without touching a single file under
 `lsp/`.
 
 `npm run check:lsp-bins` is what stands in the way, and
-`scripts/package-targets.mjs` runs it before it publishes anything. It compares
+`mutant-vscode-extension/scripts/package-targets.mjs` runs it before it publishes anything. It compares
 the staged binaries against the Go sources of the whole module, not just
 `lsp/**`, and — for the one target the machine running it can execute — asks
 the binary for `--version` and compares that with what the sources build.
@@ -240,8 +263,11 @@ cd lsp && go test ./...
 ## Compatibility and stability
 
 **Artifacts.** The bytecode container is versioned (`ByteCode.Version`). A newer
-runtime runs older artifacts: the v2.4.0 builtin registry is frozen in
-`builtin/legacy_ordinals.go` precisely so pre-v2.5 artifacts keep resolving.
+runtime runs older artifacts: the v2.4.0 builtin registry, and the one slot where
+v2.3.x's differed from it, are frozen in `builtin/legacy_ordinals.go` precisely
+so artifacts from v2.3.0 to v2.4.x keep resolving. Artifacts from v2.2.x and
+earlier are not refused, but one that calls a builtin does not run correctly:
+their instruction set differs (`compiler/bytecode_version.go` says how).
 The reverse is not supported and fails loudly by design — an old runtime handed
 a new artifact trips a bounds check rather than silently calling the wrong
 builtin. Any change to the container needs a version bump and a round-trip test

@@ -144,6 +144,9 @@ single snapshot.
 | textDocument/definition          | `definition`             | local definition + workspace fallback                        |
 | textDocument/typeDefinition      | `typeDefinition`         | `Snapshot.TypeDefinitionLocation`                            |
 | textDocument/references          | `references`             | local refs + workspace refs + dedupe                         |
+| textDocument/prepareCallHierarchy | `prepareCallHierarchy`  | declaration under the cursor, following a module member      |
+| callHierarchy/incomingCalls      | `callHierarchyIncomingCalls` | graph call edges + `alias.name(` sites in importing files |
+| callHierarchy/outgoingCalls      | `callHierarchyOutgoingCalls` | graph call edges out of the declaration                   |
 | textDocument/prepareRename       | `prepareRename`          | local rename target + workspace fallback                     |
 | textDocument/rename              | `rename`                 | location collection + per-URI sorted text edits              |
 | textDocument/codeAction          | `codeActions`            | diagnostic-driven quick fixes                                |
@@ -229,11 +232,38 @@ Diagnostics sources:
 - `mutant-lint`: semantic lint rules.
 - `mutant-format`: strict-formatting rules (the semicolon rule) — distinct from
   `mutant-lint` so quick fixes can key off it.
+- `mutant-modules`: refusals that cross a module boundary — a member another
+  module does not declare or exports privately, an import cycle, and two
+  imports binding one namespace — in the module loader's own words. A cycle
+  is shown on every import a build entered at this file would meet it
+  through, not only on the files inside it.
+- `mutant-structs`: a field a struct does not declare, read or written, in
+  the compiler's words.
+- `mutant-declarations`: a `let` the compiler refuses because it declares
+  nothing new in its scope, on the compiler's rule and in its words. Its quick
+  fix turns a single-name `let` into an assignment, which is the remedy the
+  refusal names.
+- `mutant-compiler`: the compiler's own first refusal for the file. The editor
+  compiles a document that parses, the way `mutant gen` would, and reports what
+  the compiler says at the node that raised it, unless a refusal above already
+  covers that range. A file that defines or calls macros is not compiled here,
+  because expanding a macro runs code. None of these four sources is
+  configurable: each is a refusal the build makes, and `mutant lint` exits 1
+  on any of them.
 
 Current lint rules (rule id -> default severity):
 
 - `duplicateTopLevelDeclaration` -> warning (also nested duplicates)
-- `unusedDeclaration` -> warning (top-level and local; skips `_`)
+- `unusedDeclaration` -> warning (top-level and local; skips `_`. A module-shaped
+  file -- one with no top-level action -- exempts its top-level names, because
+  they exist for whatever imports it; a top-level `_private` name is NOT
+  exempt, because no other file can reach it)
+- `unusedImport` -> information (an import that brings nothing this file uses:
+  its namespace is never read AND it declares no struct, enum or macro the file
+  names bare -- those three cross a module boundary without a namespace, so the
+  alias not appearing is not the whole question. Information rather than warning
+  because the imported module's top-level statements run either way and Mutant
+  has no `import _` form)
 - `undefinedDeclaration` -> error (scope-aware; builtins + macro special forms
   count as defined)
 - `nestingComplexity` -> warning (if/for nesting depth > 2 in function bodies)
@@ -252,6 +282,10 @@ Current lint rules (rule id -> default severity):
 - `builtinArgType` -> warning (a builtin passed a kind its parameter cannot
   accept, for arguments whose type is certain -- a literal, or a name that is
   never reassigned)
+- `builtinArgChoice` -> warning (a string literal that is not one of the words
+  a parameter takes, from `builtin.ParamSpecs(name)[i].OneOf` -- the builtin's
+  own list, compared with its own case and space folding through
+  `AcceptsChoice`. Only literals: a name's value is never guessed at)
 - `builtinSingleReturn` -> warning (several names bound from a builtin that
   returns one value rather than a `(value, err)` pair; from
   `builtin.ReturnSpec(name).Pair`)
@@ -405,6 +439,52 @@ policy.
   derived path or a containing directory is never reported. `fs_copy` *from* the
   evidence is the correct procedure and is silent. `db_open_disk` and
   `cache_open` are deliberately not openers: those are the analyst's own files)
+- `classifiedPlaintext` -> warning (plaintext read out of a classified record
+  -- `record_read`'s buffer, `record_read_partial`'s `bytes`, a `bytes_slice` of
+  either, one of `record_search`'s hits or its `context`, or an array, hash or
+  struct literal holding one -- handed to a builtin that refuses it. A search's
+  whole result and its `hits` are not reported: they hold plaintext only when
+  the search found something. The run time is the enforcement and is exact; this is the
+  other half of the owner's "runtime + LSP lint" decision, the same finding at
+  the line before a passphrase has been typed. The sink and source lists are
+  the run time's own, `builtin.ClassifiedSinks` and `builtin.ClassifiedSources`,
+  each held to the code by a test that reads the builtin package's source.
+  Certainty is by construction: a name bound once in its scope is followed, a
+  name bound twice, a user function's result and `a + b` are not.
+  `record_release`'s result is never reported -- it is the way to comply)
+- `roleLiteral` -> warning (the `role` in `case_open`'s or `ledger_open`'s
+  options, when it is one they refuse: a word that is not a role, a recipient
+  role -- `legal`, `external_partner`, `restricted_viewer` -- or `unasserted`,
+  which is what is recorded when no role is given. The message is
+  `builtin.ExaminerRoleRefusal`, the sentence both builtins refuse with, held to
+  them by a test; the builtins are `builtin.RoleOptionBuiltins`, held to the
+  calls of `roleOption` by a test that reads the source. A role passed as an
+  argument -- `case_assign`'s, `role_define`'s, `role_assign`'s -- is a parameter
+  that declares its words, so `builtinArgChoice` reports it and this rule does
+  not. Two `role` keys in one literal are left alone: which one the run time
+  reads is the order it builds the hash in)
+- `filteredLedgerHandle` -> warning (the handle `ledger_under_view` returns --
+  the `handle` entry of its result, through names bound once -- passed as the
+  ledger of a builtin that refuses it. It asks
+  `builtin.RefusesLedgerViewHandle`: every builtin whose first parameter is a
+  ledger, except the reads in `builtin.LedgerViewReads` and `ledger_close`. The
+  test that calls every such builtin with a handle under a view is held to the
+  same predicate, so the rule and the run time cannot disagree. The message
+  lists the reads that do read under a view and says to pass the ledger's own
+  handle, knowing nothing it returns is filtered)
+- `secretOption` -> warning (an option named `passphrase`, `password`, `secret`
+  or `key`, matched exactly, in the options hash of a builtin in
+  `builtin.SecretOptionRefusers` -- every builtin that reads its options with
+  `secretOptionsArg`, which a test finds in the source and holds to the list,
+  checking too that each reads the hash where the metadata puts it
+  (`builtin.OptionsPosition`). One report per call, at the first such key
+  written. The message ends with the run time's own refusal)
+- `lifecycleState` -> warning (a state `case_transition` never moves a case to:
+  one no move in `builtin.CaseMoves` made by `case_transition` leads to. Such a
+  call is refused whatever state the case is in, and the message names the
+  builtin that makes the move -- `review_request`, `review_decide`,
+  `retention_set` -- or says the case starts out in that state. A word that is
+  not a state is `builtinArgChoice`'s, and is left to it)
 - `pathTraversal` -> warning (a path built from a value the program did not
   write, reaching `fs_*`, a `*_read_file` or an archive entry, with nothing
   looking at the value in between. The only rule in the family with taint
@@ -444,20 +524,24 @@ Core file:
 
 Behavior model:
 
-- If hard parse errors exist (or the snapshot is invalid), the formatter degrades
-  to whitespace normalization only (CRLF -> LF, strip trailing whitespace, exactly
-  one trailing newline).
+- If hard parse errors exist (or the snapshot is invalid), the formatter makes no
+  edits at all. `mutant fmt` prints the parse errors, leaves the file
+  byte-for-byte unchanged and exits 1 in every mode; the editor's formatting,
+  range-formatting and on-type-formatting requests return an empty edit list.
+  There is deliberately no whitespace-only fallback: with no tree, "strip
+  trailing whitespace" cannot tell a line of code from a line inside a
+  triple-quoted string, so it edited string data in the one case it was reached.
 - Otherwise it applies AST-driven formatting for statements/expressions. Comments
   and blank lines are handled **through** the AST printer (re-attached from the
   `program.Comments` side-table; runs of blank lines collapse to one), so the
-  presence of comments/blank lines no longer forces the normalization path.
+  presence of comments/blank lines does not stop the formatter.
 
 Strict semicolons (canonical):
 
 - Semicolons are emitted from the AST via `ast.Statement.RequiresSemicolon()`, not
   copied from source. The formatter therefore **repairs** missing semicolons and
-  **removes** redundant ones on format. Recoverable semicolon issues do not trigger
-  the normalization fallback; only hard parse errors do. Struct fields are
+  **removes** redundant ones on format. Recoverable semicolon issues do not stop
+  the formatter; only hard parse errors do. Struct fields are
   `;`-terminated including the last.
 
 Canonical style policy:
@@ -471,9 +555,15 @@ Canonical style policy:
 On-type formatting behavior:
 
 - Server advertises `textDocument/onTypeFormatting` and supports triggers for
-  `}`, `;`, and newline.
-- Extension keeps on-type formatting disabled by default to avoid intrusive
-  edits, and exposes an opt-in setting.
+  `}` and `;`. Newline is not one: formatting the whole document on Enter
+  collapsed the block the user had just opened, because the printer has no
+  form for an empty line, and the editor's own indentation rules already
+  indent the new line.
+- Extension keeps on-type formatting off by default to avoid intrusive edits,
+  and exposes the opt-in setting `mutant.format.onType.enabled`. It writes
+  nothing into the user's settings to arrange this: the manifest turns
+  `editor.formatOnType` on for Mutant files as a default, and a language
+  client middleware asks the server only while the setting is on.
 
 Important safety guarantees:
 

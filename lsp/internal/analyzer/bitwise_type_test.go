@@ -84,22 +84,22 @@ func TestSolverNarrowsABitwiseOperandToInteger(t *testing.T) {
 		{
 			name: "a flag test",
 			src:  "let can = fn(flags) { return (flags & 4) != 0; };",
-			want: "can(flags: INTEGER)",
+			want: "- `flags` _(used as INTEGER)_",
 		},
 		{
 			name: "a shift",
 			src:  "let hi = fn(n) { return n >> 8; };",
-			want: "hi(n: INTEGER)",
+			want: "- `n` _(used as INTEGER)_",
 		},
 		{
 			name: "both operands of an or",
 			src:  "let both = fn(a, b) { return a | b; };",
-			want: "both(a: INTEGER, b: INTEGER)",
+			want: "- `a` _(used as INTEGER)_\n- `b` _(used as INTEGER)_",
 		},
 		{
 			name: "the complement",
 			src:  "let inv = fn(n) { return ~n; };",
-			want: "inv(n: INTEGER)",
+			want: "- `n` _(used as INTEGER)_",
 		},
 	}
 

@@ -86,7 +86,14 @@ func (e *ReadError) Error() string {
 func (e *ReadError) Unwrap() error { return e.Err }
 
 // ParseError reports a module that could not be parsed. Errors holds the
-// parser's own messages, already carrying their own file:line:col prefixes.
+// parser's own messages, each prefixed with path:line:col.
+//
+// That prefix is the caller's job and not this type's: the walker builds these
+// from Parser.PositionedErrors, which is given the display path. This comment
+// used to assert the prefixes were there as a property of the parser's
+// messages, which they were not -- Parser.Errors has never carried a position
+// -- so every parse error the command line printed was unlocated while the
+// code said otherwise (M26-LEX-015).
 type ParseError struct {
 	Path   string
 	Errors []string

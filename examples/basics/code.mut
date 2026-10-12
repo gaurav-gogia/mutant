@@ -1,29 +1,25 @@
-let sum = fn(n1, n2) {
-    return n1 + n2;
+// Reads two numbers from the terminal and adds them.
+
+let sum = fn(a, b) {
+    return a + b;
 };
 
 putln("Lets add two numbers: ");
-
-// gets() returns one value, not a (value, err) pair: at end of input it hands
-// back an error object, which type_of reports as "ERROR_OBJ".
 putf("Enter first number: ");
 let num1 = gets();
-
 putf("Enter second number: ");
 let num2 = gets();
 
 if (type_of(num1) == "ERROR_OBJ" || type_of(num2) == "ERROR_OBJ") {
     putln("no input to read; this example needs a terminal");
-} else {
-    // gets() hands back text, and + on two strings concatenates. Convert first,
-    // or "3" and "4" add up to "34".
-    let a, a_err = to_int(num1);
-    let b, b_err = to_int(num2);
+    return;
+}
 
-    if (a_err || b_err) {
-        putln("please enter two whole numbers");
-    } else {
-        putf("Answer is: ", sum(a, b));
-        putln("");
-    };
-};
+let a, a_err = to_int(num1);
+let b, b_err = to_int(num2);
+if (a_err || b_err) {
+    putln("please enter two whole numbers");
+    return;
+}
+
+putf("Answer is: %d\n", sum(a, b));

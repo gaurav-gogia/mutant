@@ -1,10 +1,5 @@
-// secure_client.mut
-// Establish a secure (TLS) connection and speak HTTP over it using the
-// dev-sec networking builtins. Demonstrates: net_connect, net_tls_upgrade_client,
-// http_build_request, net_conn_write, http_conn_read_response.
-//
-// Run:  mutant gen --src examples/network/secure_client.mut --dev
-//       mutant examples/network/secure_client.mu --dev
+// Opens a verified TLS connection and speaks HTTP over it.
+// mutant:sweep needs-input -- opens a TLS connection to example.com:443 over the internet
 
 let fetch_secure = fn(host, addr) {
     putln("=== Secure client: connecting to ", addr, " ===");
@@ -12,42 +7,37 @@ let fetch_secure = fn(host, addr) {
     if (err) {
         putln("connect failed: ", err);
         return false;
-    };
+    }
 
-    // Upgrade the raw socket to a verified TLS 1.2+ session.
-    let tls_opts = {"server_name": host, "min_version": "1.2"};
-    let info, err = net_tls_upgrade_client(conn, tls_opts);
+    let info, err = net_tls_upgrade_client(conn, {"server_name": host, "min_version": "1.2"});
     if (err) {
         putln("TLS handshake failed: ", err);
         net_conn_close(conn);
         return false;
-    };
+    }
     putln("negotiated ", info["tls_version"], " / ", info["cipher"]);
 
-    // Build and send an HTTP request over the encrypted channel.
-    let req_headers = {"Connection": "close", "User-Agent": "mutant-secure-client"};
-    let request = {"method": "GET", "path": "/", "host": host, "headers": req_headers};
-    let raw, err = http_build_request(request);
+    let headers = {"Connection": "close", "User-Agent": "mutant-secure-client"};
+    let raw, err = http_build_request({"method": "GET", "path": "/", "host": host, "headers": headers});
     if (err) {
         putln("request build failed: ", err);
         net_conn_close(conn);
         return false;
-    };
-    let sent, err = net_conn_write(conn, raw);
+    }
+    let _, err = net_conn_write(conn, raw);
     if (err) {
         putln("write failed: ", err);
         net_conn_close(conn);
         return false;
-    };
+    }
 
-    // Read one framed HTTP response back.
     let resp, err = http_conn_read_response(conn, 5000);
     if (err) {
         putln("read failed: ", err);
     } else {
         putln("HTTP status: ", resp["status"]);
         putln("body bytes:  ", len(resp["body"]));
-    };
+    }
 
     net_conn_close(conn);
     putln("=== done ===");

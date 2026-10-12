@@ -136,6 +136,52 @@ func TestUnquoteConvertsEveryLiteralValue(t *testing.T) {
 	}
 }
 
+// A macro definition nested inside an `unquote` argument is the one shape
+// DefineMacros does not remove. It scans program.Statements and takes out the
+// top-level `let x = macro(...)` statements only, so a nested one survives into
+// code this engine runs at expansion time -- and `mutant gen` expands every
+// module with no flag behind it. `eval` has no arm for *ast.MacroLiteral, so
+// the name binds a nil object, and calling it used to reach applyFunction's
+// default arm, which asks fn.Type() of a nil interface.
+//
+// That was a Go panic out of the toolchain for a .mut file someone handed you,
+// rather than a diagnostic. The compiler already refuses the same nesting when
+// it is not inside an unquote, which is why only the expansion path was
+// exposed. It is the tree-walking sibling of the VM defect fixed in 8daed8e,
+// where calling a non-function silently called whatever sat at stack[0].
+//
+// The arm landed in cf79eb4, and so did a guard for it:
+// parity.TestCallingANameWithNoValueIsReportedAndNotAPanic drives the same
+// nesting and fails with the nil dereference if the arm is removed, which was
+// measured on a scratch copy with it taken out. An earlier version of this
+// comment said nothing tested the arm, on the evidence that the diagnostic's
+// text appears once in the tree; that was wrong, because the parity test
+// matches on the substrings "no value" and "top level" rather than the
+// sentence.
+//
+// What that test does not assert is the diagnostic's whole text, or that it
+// names the macro being expanded. Both are checked below, in the package that
+// owns the arm, so a reword that kept those two substrings still has to keep
+// the rest.
+func TestMacroNestedInUnquoteIsRefusedNotPanicked(t *testing.T) {
+	got := expandExpectingError(t, `let show = macro() { quote(unquote(fn() { let inner = macro() { quote(2); }; return inner(); }())); };
+putln(show());`)
+
+	if !strings.Contains(got, "call of a name that has no value") {
+		t.Fatalf("a macro nested in an unquote did not give the nil-callee diagnostic.\ngot: %s", got)
+	}
+	// The message has to state the rule, because the rule is also the remedy and
+	// there is no type to name -- naming the shape is the whole of the fix.
+	if !strings.Contains(got, "top level") {
+		t.Fatalf("the diagnostic does not say where a macro definition must appear.\ngot: %s", got)
+	}
+	// And it names the macro being expanded, like every other case in this file,
+	// because expansion runs before any line information survives.
+	if !strings.Contains(got, "show") {
+		t.Fatalf("the diagnostic does not name the failing macro: %s", got)
+	}
+}
+
 // A failed expansion must not hand back a half-rewritten program: the caller
 // compiles whatever it is given, and a partially expanded tree is exactly the
 // nil-argument shape that killed the VM.

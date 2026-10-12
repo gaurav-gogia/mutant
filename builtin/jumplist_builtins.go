@@ -57,6 +57,16 @@ func JumplistParse(args ...object.Object) (result object.Object) {
 	return parseCustomJumplist(data)
 }
 
+// maxJumplistStreamBytes bounds one stream inside an automatic jump list. The
+// stream is read into memory whole before anything looks at it, and the size
+// comes from the compound file's own directory, which is a number in the file
+// rather than evidence about it. A DestList of a few thousand destinations and a
+// shell link are both far below this, so a stream above it is not one Windows
+// wrote.
+//
+//mutant:limit bytes
+const maxJumplistStreamBytes = 64 << 20
+
 // destEntry is the per-destination metadata from the DestList stream.
 type destEntry struct {
 	streamID   uint32
@@ -77,20 +87,51 @@ func parseAutomaticJumplist(data []byte) object.Object {
 	var version, total, pinned uint32
 	var order []uint32
 
+	// Counted and reported rather than passed over in silence: an answer that is
+	// short says nothing about being short, and nothing downstream can tell it
+	// from a complete one.
+	//
+	// Only a numbered stream counts. The container declares each of those to be
+	// a shell link, which is what makes a failure to read one a destination the
+	// jump list held and this answer does not. A stream this format does not use
+	// is not a destination, and a DestList that cannot be read is a different
+	// loss -- the metadata rather than an entry -- and does not belong under
+	// this name.
+	unreadable := 0
+
 	for {
 		f, err := r.Next()
 		if err == io.EOF || err != nil {
 			break
 		}
-		if f.Size <= 0 || f.Size > 64<<20 {
+
+		// The stream is classified before any failure is counted. A compound
+		// file holds streams this format does not use, and one of those being
+		// empty or unreadable is not a destination anybody lost -- counting it
+		// would report a loss that did not happen, which is the same fault as
+		// passing over a real one.
+		destList := strings.EqualFold(f.Name, "DestList")
+		id, perr := strconv.ParseUint(strings.TrimSpace(f.Name), 16, 32)
+		numbered := perr == nil
+		if !destList && !numbered {
+			continue
+		}
+
+		if f.Size <= 0 || f.Size > maxJumplistStreamBytes {
+			if numbered {
+				unreadable++
+			}
 			continue
 		}
 		buf := make([]byte, f.Size)
 		if _, err := io.ReadFull(f, buf); err != nil {
+			if numbered {
+				unreadable++
+			}
 			continue
 		}
 
-		if strings.EqualFold(f.Name, "DestList") {
+		if destList {
 			version, total, pinned = destListHeader(buf)
 			for _, de := range parseDestList(buf) {
 				if _, seen := destByID[de.streamID]; !seen {
@@ -100,13 +141,11 @@ func parseAutomaticJumplist(data []byte) object.Object {
 			}
 			continue
 		}
-		// Numbered stream (hex) → a shell link.
-		id, perr := strconv.ParseUint(strings.TrimSpace(f.Name), 16, 32)
-		if perr != nil {
-			continue
-		}
-		if m, lerr := parseLnkBytes(buf); lerr == nil {
+		// A numbered stream (hex) is a shell link.
+		if m, _, lerr := parseLnkFields(buf); lerr == nil {
 			lnkByID[uint32(id)] = m
+		} else {
+			unreadable++
 		}
 	}
 
@@ -148,11 +187,12 @@ func parseAutomaticJumplist(data []byte) object.Object {
 	}
 
 	return resultAndError(makeHashObject(map[string]object.Object{
-		"type":           stringObj("automatic"),
-		"format_version": intObj(int64(version)),
-		"entry_count":    intObj(int64(total)),
-		"pinned_count":   intObj(int64(pinned)),
-		"entries":        &object.Array{Elements: entries},
+		"type":               stringObj("automatic"),
+		"format_version":     intObj(int64(version)),
+		"entry_count":        intObj(int64(total)),
+		"pinned_count":       intObj(int64(pinned)),
+		"entries":            &object.Array{Elements: entries},
+		"unreadable_entries": intObj(int64(unreadable)),
 	}), nil)
 }
 
@@ -167,31 +207,61 @@ func destListHeader(buf []byte) (version, total, pinned uint32) {
 		binary.LittleEndian.Uint32(buf[8:12])
 }
 
-// parseDestList walks the variable-length DestList entries. Field offsets are
-// stable up to the pin-status field (0x6C); the path-size field then sits at
-// 0x70 for v1 (Win7) and 0x74 for v3/v4 (Win8+/Win10), with a 4-byte trailer on
-// v3/v4. Every access is bounds-checked; a malformed entry ends iteration.
+// The DestList stream, after libyal's dtformats and JLECmd's DestListEntry,
+// which agree. An entry's fields are the same in every version up to the pin
+// status. Version 1 (Windows 7 and 8) puts the path size straight after it.
+// Every later version -- Windows 10 and 11 write 3 to 6 -- first inserts four
+// unknown bytes, the access count and eight more unknown bytes, and ends the
+// entry with four bytes after the path.
+//
+//mutant:format libyal dtformats, Jump lists format, DestList header and entry
+const (
+	destListHeaderSize     = 32
+	destEntryHostname      = 0x48
+	destEntryNumber        = 0x58
+	destEntryLastModified  = 0x64
+	destEntryPinStatus     = 0x6C
+	destEntryPathSizeV1    = 0x70
+	destEntryPathSizeLater = 0x80
+	destEntryTrailerLater  = 4
+)
+
+// parseDestList walks the variable-length DestList entries. Every access is
+// bounds-checked; a malformed entry ends iteration.
+//
+// Versions 2 and later keep the path size at 0x80. This read it at 0x74 for
+// version 3 and above, which is the access count, so the path came out of the
+// wrong bytes and the next entry was looked for at the wrong offset: on a real
+// Windows 10 or 11 jump list the walk stopped after the first entry, and every
+// later entry lost its hostname, time, pin and path (M26-ART-001).
 func parseDestList(buf []byte) []destEntry {
 	version, total, _ := destListHeader(buf)
-	entries := make([]destEntry, 0, total)
 
-	pathSizeOff := 0x70
-	trailer := 0
-	if version >= 3 {
-		pathSizeOff = 0x74
-		trailer = 4
+	pathSizeOff, trailer := destEntryPathSizeV1, 0
+	if version >= 2 {
+		pathSizeOff, trailer = destEntryPathSizeLater, destEntryTrailerLater
 	}
 
-	off := 32
+	// The count is the file's word, so it sizes nothing by itself: an entry is
+	// at least its fixed fields long, and the stream holds no more entries
+	// than fit in it. Sized by the count alone, a header claiming four billion
+	// entries asked for 240 GB before one was read (M26-ART-005).
+	capacity := 0
+	if len(buf) > destListHeaderSize {
+		capacity = (len(buf) - destListHeaderSize) / (pathSizeOff + 2 + trailer)
+	}
+	entries := make([]destEntry, 0, min(int(total), capacity))
+
+	off := destListHeaderSize
 	for len(entries) < int(total) {
 		if off+pathSizeOff+2 > len(buf) {
 			break
 		}
 		de := destEntry{
-			streamID:   binary.LittleEndian.Uint32(buf[off+0x58 : off+0x5C]),
-			hostname:   trimZeros(buf[off+0x48 : off+0x58]),
-			lastAccess: filetimeToUnix(binary.LittleEndian.Uint64(buf[off+0x64 : off+0x6C])),
-			pinned:     binary.LittleEndian.Uint32(buf[off+0x6C:off+0x70]) != 0xFFFFFFFF,
+			streamID:   binary.LittleEndian.Uint32(buf[off+destEntryNumber : off+destEntryNumber+4]),
+			hostname:   trimZeros(buf[off+destEntryHostname : off+destEntryNumber]),
+			lastAccess: filetimeToUnix(binary.LittleEndian.Uint64(buf[off+destEntryLastModified : off+destEntryPinStatus])),
+			pinned:     binary.LittleEndian.Uint32(buf[off+destEntryPinStatus:off+destEntryPinStatus+4]) != 0xFFFFFFFF,
 		}
 		pathChars := int(binary.LittleEndian.Uint16(buf[off+pathSizeOff : off+pathSizeOff+2]))
 		pathStart := off + pathSizeOff + 2
@@ -211,26 +281,35 @@ func parseDestList(buf []byte) []destEntry {
 // it (parseLnkBytes tolerates the trailing bytes of the next link).
 func parseCustomJumplist(data []byte) object.Object {
 	entries := make([]object.Object, 0)
+	// Only a link that came apart under the parser is counted. This format has
+	// no directory: the links are found by scanning for their signature, so a
+	// failure here is usually four bytes that were never a link -- a path
+	// string holding the signature is enough -- and counting those would report
+	// losses that did not happen.
+	damagedLinks := 0
 	for i := 0; i+len(lnkHeaderSig) <= len(data); {
 		idx := bytes.Index(data[i:], lnkHeaderSig)
 		if idx < 0 {
 			break
 		}
 		start := i + idx
-		if m, err := parseLnkBytes(data[start:]); err == nil {
+		if m, damaged, err := parseLnkFields(data[start:]); err == nil {
 			m["stream_id"] = intObj(int64(len(entries)))
 			m["target"] = m["local_base_path"]
 			entries = append(entries, makeHashObject(m))
+		} else if damaged {
+			damagedLinks++
 		}
 		i = start + len(lnkHeaderSig)
 	}
 
 	return resultAndError(makeHashObject(map[string]object.Object{
-		"type":           stringObj("custom"),
-		"format_version": intObj(0),
-		"entry_count":    intObj(int64(len(entries))),
-		"pinned_count":   intObj(0),
-		"entries":        &object.Array{Elements: entries},
+		"type":               stringObj("custom"),
+		"format_version":     intObj(0),
+		"entry_count":        intObj(int64(len(entries))),
+		"pinned_count":       intObj(0),
+		"entries":            &object.Array{Elements: entries},
+		"unreadable_entries": intObj(int64(damagedLinks)),
 	}), nil)
 }
 

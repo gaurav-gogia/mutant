@@ -23,6 +23,19 @@ import numbers "lib/stats.mut";  // binds the namespace `numbers`
 The path is a string literal and must include the `.mut` extension — the
 extension is not guessed, so the line says exactly which file it opens.
 
+Either slash separates directories, on every host: `import "lib\\stats.mut";`
+(the backslash escaped, as in any string) opens the same file as
+`import "lib/stats.mut";`. A path that begins or ends with whitespace is
+refused, and so is one with a directory or file name ending in a space or a
+dot: Windows does not keep a space or a dot at the end of a name, where other
+systems do, so such a line need not open the same file on each. On Windows, a
+path that begins with a single slash of either kind and names no drive is
+refused as well: Windows reads it from the root of the current drive, not from
+the importing file's directory, while on other systems it is an absolute path.
+A path that begins with two slashes, `//server/share/x.mut`, is absolute on
+every host and is used as written: a network share on Windows, `/server/share`
+elsewhere.
+
 Without an alias the namespace is the file's base name with `.mut` removed:
 `lib/net/tls_pool.mut` binds `tls_pool`. Give an alias when that is not the
 name you want at the call site, or when two imports would otherwise bind the
@@ -54,6 +67,7 @@ Each module has its own top level. Two modules may both declare `label`, or
 `helper`, or `main`, and they are two different bindings — the one you write in
 a file is always that file's own.
 
+<!-- mutant:fragment -->
 ```mutant
 // lib/report.mut
 let label = "report";
@@ -76,8 +90,8 @@ A top-level name beginning with `_` is private to the file that declares it.
 
 ```mutant
 // lib/stats.mut
-let _total = fn(values) { /* ... */ };   // private
-let mean = fn(values) { /* ... */ };     // reachable as stats.mean
+let _total = fn(values) { return sum(values); };                // private
+let mean = fn(values) { return _total(values) / len(values); }; // reachable as stats.mean
 ```
 
 Reaching for one from another module is a compile error that names both:
@@ -189,6 +203,22 @@ before any file that imports it runs its own. The entry file is last.
 One consequence worth knowing: macros are shared program-wide and filled in the
 same order, so a macro a module defines is usable by everything that imports it.
 
+Two details of that are worth spelling out, because neither is what an import
+normally means.
+
+A macro is used **bare**, never through a namespace. `import stats "lib.mut";`
+followed by `stats.unless(...)` is an error -- "lib.mut declares no unless" --
+because a macro definition is removed from the module before it is compiled, so
+the module's scope never binds the name. Write `unless(...)`.
+
+And "everything that imports it" is a floor, not a ceiling. The environment is
+filled in compile order, so a macro is in scope for every module compiled after
+its definition, including one that imports nothing from it. That makes such a
+program depend on the order two `import` lines were written in, so do not rely
+on it: import the module whose macros you use. Editor tooling deliberately
+offers only the guaranteed half -- a module you actually import -- and will not
+resolve a macro that reaches you by accident of ordering.
+
 ## Tracebacks
 
 Modules are linked into one instruction stream, one constant pool and one global
@@ -209,9 +239,15 @@ traceback (most recent call first):
 	    |              ^^^^^^^^^^^^
 ```
 
-The file-to-line map is debug information. `mutant release` and any build with
-polymorphic mutation strip it along with the rest, so a released artifact does
-not carry the layout of your source tree.
+The file-to-line map is debug information, and `mutant release` is the only
+build that strips it. A gen artifact carries the map at every mutation level,
+along with each module's file name and its full source text, which is why the
+traceback above can name a module file and quote its line in a directory that
+holds no source at all. Polymorphism does not strip: the engine moves every
+instruction and remaps the tables, because a mutated artifact still has to be
+able to report a position. So anyone who can run a gen artifact, which means
+anyone holding its password, can recover the source of every module in it, and
+only `mutant release` leaves the layout of your source tree behind.
 
 ## Editor support
 
@@ -223,6 +259,9 @@ not carry the layout of your source tree.
   exactly as it treats `fs_read`.
 - A file whose top level only declares things is treated as a module, so its
   exported names are not reported as unused declarations.
+- An import cycle, and two imports binding one namespace, are errors in the
+  editor in the module loader's own words, on every import through which a
+  build entered at this file would meet them.
 
 ## What modules are not
 

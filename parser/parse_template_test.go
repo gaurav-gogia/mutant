@@ -50,9 +50,17 @@ func TestTemplateHoleIsAParsedExpression(t *testing.T) {
 	}
 }
 
-// TestHolePositionsAreFilePositions is the point of parsing each hole inside
-// padding: a range recorded for a node in a hole has to be usable by an editor
-// against this file, not against a fragment starting at line 1 column 1.
+// TestHolePositionsAreFilePositions is the point of telling the sub-lexer where
+// the hole is: a range recorded for a node in a hole has to be usable by an
+// editor against this file, not against a fragment starting at line 1 column 1.
+//
+// It used to say "the point of parsing each hole inside padding", which is how
+// the file coordinates were arrived at until 2026-10-11. The padding was
+// quadratic in the hole's column and it got the offsets wrong, so it is gone and
+// lexer.NewAt does the job (M26-LEX-009, M26-LEX-018). This test passes both
+// before and after, which is what it is for: it covers the node ranges, and
+// those were already shifted back by hand. The typed errors beside them were
+// not, and template_position_test.go is where that is pinned.
 func TestHolePositionsAreFilePositions(t *testing.T) {
 	src := "let a = 1;\nlet s = \"n=${a}\";"
 	program, p := parseOne(t, src)
@@ -104,17 +112,30 @@ func TestHoleErrorsNameTheHole(t *testing.T) {
 	}
 }
 
-// TestABrokenHoleReportsItsOwnLine keeps the padding honest: the error has to
-// name the line the hole is on, not the line the string starts on.
+// TestABrokenHoleReportsItsOwnLine: the error has to name the line the hole is
+// on, not the line the string starts on.
+//
+// It is asserted against PositionedErrors, which is what the command line and
+// the REPL print. It used to be asserted against Errors, which worked because
+// parseHole wrote the hole's line and column into the message text by hand --
+// and that was the only position any plain parser message carried, which is
+// how `mutant run` came to report every other parse error with no position at
+// all (M26-LEX-015). The position comes from the error's own range now, so it
+// names where the mistake is rather than where the hole begins, and the string
+// the author never sees is no longer where this is checked.
 func TestABrokenHoleReportsItsOwnLine(t *testing.T) {
 	src := "let x = 1;\nlet y = 2;\nlet s = \"${ x + }\";"
 	_, p := parseOne(t, src)
-	joined := strings.Join(p.Errors(), "\n")
+
+	joined := strings.Join(p.PositionedErrors("w.mut"), "\n")
 	if joined == "" {
 		t.Fatal("a hole with a dangling operator parsed clean")
 	}
-	if !strings.Contains(joined, "3") {
-		t.Errorf("errors %q do not mention line 3", joined)
+	if !strings.Contains(joined, "w.mut:3:") {
+		t.Errorf("errors %q do not place the mistake on line 3 of w.mut", joined)
+	}
+	if !strings.Contains(joined, "inside ${...}") {
+		t.Errorf("errors %q do not say the mistake is inside a hole", joined)
 	}
 }
 

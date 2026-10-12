@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mutant/object"
+	"mutant/compiler"
 )
 
 func TestIsExitCommand(t *testing.T) {
@@ -68,12 +68,19 @@ func TestParseHelpCall(t *testing.T) {
 	}
 }
 
+// TestHandleCompleteCommandIncludesSessionSymbols passed before M26-TOOL-024
+// was fixed, because it built its own object.Environment and wrote a name into
+// it. Start's environment was a different one that nothing ever wrote to, so
+// the test proved the plumbing carried whatever it was handed and said nothing
+// about what a session holds. It is handed the symbol table now, which is where
+// a session's names really are, and TestReplCompleteOffersSessionGlobals in
+// repl_tooling_test.go drives the whole REPL rather than this one function.
 func TestHandleCompleteCommandIncludesSessionSymbols(t *testing.T) {
-	env := object.NewEnvironment()
-	env.Set("session_symbol", &object.Integer{Value: 1})
+	symbols := compiler.NewSymbolTable()
+	symbols.Define("session_symbol")
 	var out bytes.Buffer
 
-	handled := handleCompleteCommand(":complete session_", &out, env)
+	handled := handleCompleteCommand(":complete session_", &out, symbols)
 	if !handled {
 		t.Fatal("expected :complete command to be handled")
 	}
@@ -85,7 +92,7 @@ func TestHandleCompleteCommandIncludesSessionSymbols(t *testing.T) {
 
 func TestHandleMetaHelpCommand(t *testing.T) {
 	var out bytes.Buffer
-	handled := handleMetaHelpCommand(":help docs", &out, object.NewEnvironment())
+	handled := handleMetaHelpCommand(":help docs", &out)
 	if !handled {
 		t.Fatal("expected :help command to be handled")
 	}
@@ -97,7 +104,7 @@ func TestHandleMetaHelpCommand(t *testing.T) {
 
 func TestHandleMetaHelpCommandPlainHelpAlias(t *testing.T) {
 	var out bytes.Buffer
-	handled := handleMetaHelpCommand("help", &out, object.NewEnvironment())
+	handled := handleMetaHelpCommand("help", &out)
 	if !handled {
 		t.Fatal("expected plain help command to be handled")
 	}

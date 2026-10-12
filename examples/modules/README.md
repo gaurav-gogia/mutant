@@ -18,6 +18,9 @@ main.mut
 report.mut
 LATENCIES: sum=190 mean=38 max=92
 largest alone: 92
+latencies holds 5 values
+grade: Grade.Fast(0)
+doubled first: 24
 ```
 
 The first two lines are the point: `main.mut` and `lib/report.mut` each declare
@@ -35,7 +38,9 @@ What the files show:
   which is the other thing an import is for.
 
 The library files also run on their own, because a module is an ordinary `.mut`
-file. They just declare things and finish.
+file. They just declare things and finish, and like any program each prints
+the value it ends on, which here is the last function it declares:
+`fn largest(values)` and `fn line(name, values)`.
 
 ## Tests
 
@@ -49,8 +54,8 @@ ok    lib/stats_test.mut  (9 tests, 2ms)
 
 2 files | 12 tests  (2ms)
 
-coverage: 100.0% of 21 lines
-      100.0%      4/4  lib/report.mut
+coverage: 100.0% of 20 lines
+      100.0%      3/3  lib/report.mut
       100.0%    17/17  lib/stats.mut
 ```
 

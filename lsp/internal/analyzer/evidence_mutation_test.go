@@ -40,6 +40,25 @@ let d, derr = fs_delete(path);`,
 			"`fs_delete` deletes the same path `ewf_open` opened",
 		},
 		{
+			// A set damaged enough to need ewf_open_partial is the last thing
+			// that should be written over, so the lint has to know the builtin
+			// opens evidence -- it is curated, not derived, and a new opener
+			// that is not added here is simply never covered.
+			"a write to a partially opened image",
+			`let img, err = ewf_open_partial("damaged.E01");
+let w, werr = fs_write("damaged.E01", "notes");`,
+			"`fs_write` overwrites the same path `ewf_open_partial` opened as an incomplete EWF/E01 image",
+		},
+		{
+			// vhdi_probe hands back no handle, so nothing else in the analyzer
+			// has reason to know it touched a file. It opens one all the same,
+			// and the file it opens is an exhibit.
+			"a write to an image that was only probed",
+			`let info, err = vhdi_probe("snap.avhdx");
+let w, werr = fs_write("snap.avhdx", "notes");`,
+			"`fs_write` overwrites the same path `vhdi_probe` opened as a VHD/VHDX image",
+		},
+		{
 			"an append to a hive that is being read",
 			`let hive, err = hive_open("SYSTEM");
 let a, aerr = fs_append("SYSTEM", "x");`,
@@ -190,5 +209,58 @@ let w, werr = fs_write("case01.dd", "notes");`
 		if strings.Contains(d.Message, "Evidence is written once") {
 			t.Fatalf("rule is off but still reported: %s", d.Message)
 		}
+	}
+}
+
+// One call is one report however deep it sits. The rule paired
+// forEachStatementInScope, which visits a nested statement as well as the one
+// it sits in, with walkExpressions, which descends into the nested statement
+// again -- so a call three blocks down was reported once per ancestor. The
+// Problems panel repeated the same long warning, and the count a --strict user
+// sees was inflated by nesting alone.
+func TestEvidenceMutationReportsANestedCallOnce(t *testing.T) {
+	src := `let img, err = raw_open("case01.dd");
+if (true) {
+  if (true) {
+    if (true) {
+      let w, werr = fs_write("case01.dd", "notes");
+    }
+  }
+}`
+
+	if messages := evidenceMessages(t, src); len(messages) != 1 {
+		t.Fatalf("want one report, got %d: %v", len(messages), messages)
+	}
+}
+
+// Two loops over one name are two variables, and the rule keyed them by the
+// word. Iterate the images, then write the reports is the shape every triage
+// script has, so the one rule meant to protect exhibits fired on it -- which
+// teaches an examiner to ignore the rule, and with it the reports that are
+// real.
+func TestEvidenceMutationDoesNotFollowASpellingAcrossTwoBindings(t *testing.T) {
+	reused := `let images = ["a.dd", "b.dd"];
+let outputs = ["a.txt", "b.txt"];
+for (path in images) {
+  let img, err = raw_open(path);
+}
+for (path in outputs) {
+  let w, werr = fs_write(path, "report");
+}`
+
+	if messages := evidenceMessages(t, reused); len(messages) != 0 {
+		t.Fatalf("two bindings of one name, want silence, got %v", messages)
+	}
+
+	// The control, so the fix is a narrowing and not an amputation: one
+	// binding, opened and then written, still reports.
+	same := `let images = ["a.dd", "b.dd"];
+for (path in images) {
+  let img, err = raw_open(path);
+  let w, werr = fs_write(path, "report");
+}`
+
+	if messages := evidenceMessages(t, same); len(messages) != 1 {
+		t.Fatalf("one binding opened and written, want one report, got %d: %v", len(messages), messages)
 	}
 }

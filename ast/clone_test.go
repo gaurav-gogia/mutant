@@ -1,7 +1,6 @@
 package ast_test
 
 import (
-	"reflect"
 	"testing"
 
 	"mutant/ast"
@@ -233,48 +232,10 @@ func TestClonedProgramDropsNodePositions(t *testing.T) {
 // Every node type in the package needs a Clone case. Without this, a new node
 // type falls through to the "return the node as-is" default and is silently
 // shared between the original and the copy.
-func TestCloneCoversEveryNodeType(t *testing.T) {
-	samples := []ast.Node{
-		&ast.Program{},
-		&ast.BlockStatement{},
-		&ast.ExpressionStatement{},
-		&ast.LetStatement{},
-		&ast.ReturnStatement{},
-		&ast.ForStatement{},
-		&ast.BreakStatement{},
-		&ast.ContinueStatement{},
-		&ast.StructStatement{},
-		&ast.EnumStatement{},
-		&ast.ImportStatement{},
-		&ast.Identifier{},
-		&ast.IntegerLiteral{},
-		&ast.FloatLiteral{},
-		&ast.StringLiteral{},
-		&ast.Boolean{},
-		&ast.PrefixExpression{},
-		&ast.InfixExpression{},
-		&ast.IndexExpression{},
-		&ast.CallExpression{},
-		&ast.AssignExpression{},
-		&ast.FieldExpression{},
-		&ast.IfExpression{},
-		&ast.FunctionLiteral{},
-		&ast.MacroLiteral{},
-		&ast.ArrayLiteral{},
-		&ast.HashLiteral{},
-		&ast.StructLiteral{},
-	}
-
-	covered := map[reflect.Type]struct{}{}
-	for _, sample := range samples {
-		typ := reflect.TypeOf(sample)
-		if cloned := ast.Clone(sample); cloned == sample {
-			t.Fatalf("Clone returned the same %s pointer, so it has no case for it", typ)
-		}
-		covered[typ] = struct{}{}
-	}
-
-	if len(covered) != len(samples) {
-		t.Fatalf("the sample list has duplicates: %d types for %d samples", len(covered), len(samples))
-	}
-}
+//
+// The test that checks it lives in node_coverage_test.go now, as
+// TestCloneCoversEveryNodeType. It used to be here, written against a list of
+// twenty-eight node types typed out by hand, and the package had thirty-two: a
+// list cannot notice what is missing from it, and this one was four short. The
+// replacement reads the node types out of the package's own source, so adding
+// one without covering it fails with its name (M26-LEX-012).

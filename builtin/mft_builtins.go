@@ -22,8 +22,12 @@ const mftRootRecord = 5
 //
 // Each entry carries both the $STANDARD_INFORMATION and $FILE_NAME MAC times
 // (unix + ISO-8601), the reconstructed full path, size, sequence number, and
-// hard-link count. Returns {source_type, record_size, count, skipped, entries}
-// paired with an error; skipped counts records that would not parse.
+// hard-link count, and the $FILE_NAME parent reference: parent_record and
+// parent_sequence as the reference holds them (5 and 0 for a record with no
+// $FILE_NAME), and parent_checked and parent_reused for what comparing it with
+// the record now in that slot showed (see mftLinkToParent). Returns
+// {source_type, record_size, count, skipped, entries} paired with an error;
+// skipped counts records that would not parse.
 func MftParse(args ...object.Object) (result object.Object) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -171,6 +175,13 @@ type mftRow struct {
 	fileAttrs uint32
 	si        *libntfs.StandardInformation
 	fn        *libntfs.FileName
+
+	// parentSequence is the sequence number the $FILE_NAME parent reference
+	// carries beside parent, which says which of the files that have held that
+	// record was this one's directory. It is zero when the record has no
+	// $FILE_NAME, and zero in a reference is NTFS's "no sequence number",
+	// which asks for no check.
+	parentSequence uint16
 }
 
 func mftRowFromEntry(e *libntfs.MFTEntry, recordNum uint64) mftRow {
@@ -189,21 +200,59 @@ func mftRowFromEntry(e *libntfs.MFTEntry, recordNum uint64) mftRow {
 	if fn, err := e.GetFileName(); err == nil && fn != nil {
 		row.fn = fn
 		row.name = fn.Name
-		row.parent = fn.ParentDirectory & 0x0000FFFFFFFFFFFF // strip sequence bits
+		// libntfs hands the reference over in two fields: ParentDirectory holds
+		// the record number and ParentSeqNum the sequence number. The second is
+		// what tells the directory this file was in apart from a later file
+		// that took over its record (M26-ART-023).
+		row.parent = libntfs.FileReferenceEntry(fn.ParentDirectory)
+		row.parentSequence = fn.ParentSeqNum
 		row.size = fn.RealSize
 		row.allocated = fn.AllocatedSize
+	}
+	// The size is the file's default $DATA stream's wherever this record holds
+	// the start of it. $FILE_NAME carries a copy that NTFS updates lazily, and it
+	// is routinely stale and often zero, so a file's size -- and the length a
+	// recovery of a deleted one is cut to -- came from a figure the filesystem
+	// does not keep current (M26-FS2-002). A stream whose first extent lives in
+	// another record leaves the $FILE_NAME figure, the only one this record has.
+	if data := mftDefaultDataStream(e); data != nil {
+		switch {
+		case data.Resident != nil:
+			row.size = uint64(data.Resident.ValueLength)
+		case data.NonResident != nil && data.NonResident.StartingVCN == 0:
+			row.size, row.allocated = data.NonResident.RealSize, data.NonResident.AllocatedSize
+		}
 	}
 	return row
 }
 
-func (r mftRow) toHash(fullPath string) object.Object {
+// mftDefaultDataStream returns a record's unnamed $DATA attribute, or nil. It
+// does not fall back to a named one, as libntfs's FindPrimaryDataAttribute does
+// for reading: a file's size is its default stream's, and an alternate data
+// stream's size in its place would be a different file's worth of bytes.
+func mftDefaultDataStream(e *libntfs.MFTEntry) *libntfs.Attribute {
+	for _, attr := range e.FindAllAttributes(libntfs.AttrTypeData) {
+		switch {
+		case attr.Resident != nil && attr.Resident.Name == "":
+			return attr
+		case attr.NonResident != nil && attr.NonResident.Name == "":
+			return attr
+		}
+	}
+	return nil
+}
+
+func (r mftRow) toHash(at mftPath) object.Object {
 	m := map[string]object.Object{
 		"record":          intObj(int64(r.record)),
 		"parent_record":   intObj(int64(r.parent)),
+		"parent_sequence": intObj(int64(r.parentSequence)),
+		"parent_checked":  boolObj(at.link != mftParentUnchecked),
+		"parent_reused":   boolObj(at.link == mftParentReused),
 		"in_use":          boolObj(r.inUse),
 		"is_directory":    boolObj(r.isDir),
 		"name":            stringObj(r.name),
-		"path":            stringObj(fullPath),
+		"path":            stringObj(at.path),
 		"size":            intObj(int64(r.size)),
 		"allocated_size":  intObj(int64(r.allocated)),
 		"sequence":        intObj(int64(r.sequence)),
@@ -262,16 +311,93 @@ func mftTimeFields(t time.Time) (int64, int64, string) {
 	return t.Unix(), int64(t.Nanosecond()), t.UTC().Format(time.RFC3339Nano)
 }
 
+// mftParentLink is what comparing a record's $FILE_NAME parent reference with
+// the record now at the number it names shows.
+type mftParentLink int
+
+const (
+	// mftParentUnchecked: there was nothing to compare. The record has no
+	// $FILE_NAME, its reference carries sequence number 0, NTFS's "no
+	// sequence number", or the table holds no record at that number -- it
+	// would not parse, or the table does not reach that far, as a partial
+	// standalone $MFT may not.
+	mftParentUnchecked mftParentLink = iota
+	// mftParentSame: the record is still the directory the reference names,
+	// in use or deleted.
+	mftParentSame
+	// mftParentReused: the record has been freed and given to another file
+	// since the reference was written, so the directory it names is gone.
+	mftParentReused
+)
+
+// mftPath is where reconstructMFTPaths places one record, and what that
+// record's own parent reference showed.
+type mftPath struct {
+	path string
+	link mftParentLink
+}
+
+// mftLinkToParent compares child's $FILE_NAME parent reference with the record
+// at the number it names. An NTFS file reference is a record number and that
+// record's sequence number, and NTFS reuses records: it adds one to a record's
+// sequence number each time it frees the record, so the number tells apart the
+// files that have held it. The record is still the directory the reference
+// names when the two numbers agree, or when the record is free and carries the
+// number freeing it made from the reference's -- the directory was deleted and
+// nothing has taken its record since. Any other number means the record was
+// freed and taken again after the reference was written.
+func mftLinkToParent(byRecord map[uint64]mftRow, child mftRow) mftParentLink {
+	if child.parentSequence == 0 {
+		return mftParentUnchecked
+	}
+	parent, ok := byRecord[child.parent]
+	if !ok {
+		return mftParentUnchecked
+	}
+	switch {
+	case parent.sequence == child.parentSequence:
+		return mftParentSame
+	case !parent.inUse && parent.sequence == mftSequenceAfterFree(child.parentSequence):
+		return mftParentSame
+	}
+	return mftParentReused
+}
+
+// mftSequenceAfterFree is the sequence number NTFS gives a record when it
+// frees it, if the record's sequence number was seq. The counter is circular
+// and skips zero, the value a reference carries to mean "no sequence number".
+func mftSequenceAfterFree(seq uint16) uint16 {
+	next := seq + 1
+	if next == 0 {
+		return 1
+	}
+	return next
+}
+
 // reconstructMFTPaths walks each record's $FILE_NAME parent reference up to the
-// root directory (record 5), producing a backslash-separated full path. Records
-// whose parent chain is broken (orphans, or a partial standalone $MFT) are
-// prefixed with "?". Cycles are bounded by a depth cap.
-func reconstructMFTPaths(rows []mftRow) map[uint64]string {
+// root directory (record 5), producing a backslash-separated full path, and
+// reports what each record's own reference showed (see mftLinkToParent). A
+// chain that breaks is prefixed with "?" where it breaks: at a parent the table
+// does not hold or that has no name (orphans, or a partial standalone $MFT), and
+// at a reference whose parent's record has been given to another file since,
+// rather than placing the file in whatever directory holds that record now.
+// Record 5 is the root by number, so a reference to it resolves even when the
+// table does not hold it. Cycles are bounded by a depth cap, which breaks a
+// chain with "?" too: a walk that has followed 257 directories without
+// reaching the root stops there (dirPrefix says what that leaves cached).
+func reconstructMFTPaths(rows []mftRow) map[uint64]mftPath {
 	byRecord := make(map[uint64]mftRow, len(rows))
 	for _, r := range rows {
 		byRecord[r.record] = r
 	}
 
+	// dirPrefix is the path of rec, the record a child names as its directory,
+	// for a child whose own reference mftLinkToParent did not find reused. It
+	// caches every prefix it builds. A prefix depends only on rec and the
+	// records above it, except where the depth cap cut the walk short: a walk
+	// that gives up leaves a cut-short prefix cached for each directory it
+	// passed, and anything placed under one of those afterwards is cut at the
+	// same place, even when its own chain to the root is shorter than the cap.
 	prefixCache := make(map[uint64]string, len(rows))
 	var dirPrefix func(rec uint64, depth int) string
 	dirPrefix = func(rec uint64, depth int) string {
@@ -288,22 +414,28 @@ func reconstructMFTPaths(rows []mftRow) map[uint64]string {
 		if !ok || r.name == "" {
 			return "?"
 		}
-		p := dirPrefix(r.parent, depth+1) + `\` + r.name
+		up := "?"
+		if mftLinkToParent(byRecord, r) != mftParentReused {
+			up = dirPrefix(r.parent, depth+1)
+		}
+		p := up + `\` + r.name
 		prefixCache[rec] = p
 		return p
 	}
 
-	paths := make(map[uint64]string, len(rows))
+	paths := make(map[uint64]mftPath, len(rows))
 	for _, r := range rows {
-		if r.record == mftRootRecord {
-			paths[r.record] = `\`
-			continue
+		at := mftPath{link: mftLinkToParent(byRecord, r)}
+		switch {
+		case r.record == mftRootRecord:
+			at.path = `\`
+		case r.name == "":
+		case at.link == mftParentReused:
+			at.path = `?\` + r.name
+		default:
+			at.path = dirPrefix(r.parent, 0) + `\` + r.name
 		}
-		if r.name == "" {
-			paths[r.record] = ""
-			continue
-		}
-		paths[r.record] = dirPrefix(r.parent, 0) + `\` + r.name
+		paths[r.record] = at
 	}
 	return paths
 }

@@ -1,19 +1,23 @@
 putln("=== Filesystem Integrity Baseline ===");
 
 let base = "examples/data";
-let list, err = fs_list(base);
-putln("fs_list:", list, "err:", err);
+let list, list_err = fs_list(base);
+putln("fs_list:", list, "err:", list_err);
 
-let walk, err = fs_walk(base);
-putln("fs_walk count:", len(walk), "err:", err);
+let walk, walk_err = fs_walk(base);
+putln("fs_walk count:", len(walk), "err:", walk_err);
 
-let i = 0;
-for (; i < len(walk); i = i + 1) {
-  let path = walk[i]["path"];
-  let hash, herr = fs_hash(path, "sha256");
-  if (herr) {
-    putln("hash error:", path, herr);
-  } else {
-    putln("sha256:", path, hash["hash"]);
-  }
+// A directory has no contents to hash. Names, not paths, read the same on every host.
+for (let i = 0; i < len(walk); i = i + 1) {
+    let entry = walk[i];
+    if (entry["is_dir"]) {
+        putln("directory:", entry["name"]);
+        continue;
+    }
+    let hash, err = fs_hash(entry["path"], "sha256");
+    if (err) {
+        putln("hash error:", entry["name"], err);
+        continue;
+    }
+    putln("sha256:", entry["name"], hash["hash"]);
 }

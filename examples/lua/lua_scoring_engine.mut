@@ -1,48 +1,32 @@
-// lua_scoring_engine.mut — embed a Lua scoring rule in the sandbox.
-//
-// Scriptable risk scoring: the scoring logic is Lua that could be shipped and
-// updated independently of the host program. Lua runs in a restricted sandbox
-// (no io, dangerous os.* stripped, fixed execution timeout). See
-// docs/RUNTIME_INTEGRATION.md for the full security model.
+// Score a risk event with a Lua rule run in the sandbox.
 
-let header = fn(title) { putln("=== " + title + " ==="); };
+let rule = """
+    local score = 0
+    if fails > 5 then score = score + 40 end
+    if off_hours then score = score + 30 end
+    return score
+    """;
 
-// Build a Lua scoring script from mutant-side facts. (Facts are embedded into the
-// script because values are passed in as source, not as shared variables.)
-let build_script = fn(failed_logins, off_hours) {
-    let off = "false";
-    if (off_hours) {
-        off = "true";
-    };
-    return "local fails = " + to_string(failed_logins) + "\n" +
-        "local off_hours = " + off + "\n" +
-        "local score = 0\n" +
-        "if fails > 5 then score = score + 40 end\n" +
-        "if off_hours then score = score + 30 end\n" +
-        "return score";
+let build_script = fn(fails, off_hours) {
+    let facts = "local fails = " + to_string(fails) + "\nlocal off_hours = " + to_string(off_hours) + "\n";
+    return facts + rule;
 };
 
-let score_event = fn(failed_logins, off_hours) {
-    let result, err = lua_run_string(build_script(failed_logins, off_hours));
+let score_event = fn(fails, off_hours) {
+    let result, err = lua_run_string(build_script(fails, off_hours));
     if (err) {
         putln("[error] lua_run_string:", err);
         return -1;
-    };
+    }
     if (!result["ok"]) {
         putln("[lua script error]", result["error"]);
         return -1;
-    };
+    }
     return result["result"];
 };
 
-let run = fn() {
-    header("lua_scoring_engine");
-
-    putln("8 fails, off-hours -> score", score_event(8, true));
-    putln("2 fails, business hours -> score", score_event(2, false));
-    putln("9 fails, business hours -> score", score_event(9, false));
-
-    return true;
-};
-
-run();
+putln("=== lua_scoring_engine ===");
+putln("8 fails, off-hours -> score", score_event(8, true));
+putln("2 fails, business hours -> score", score_event(2, false));
+putln("9 fails, business hours -> score", score_event(9, false));
+putln(true);

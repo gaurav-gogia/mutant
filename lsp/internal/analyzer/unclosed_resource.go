@@ -35,7 +35,6 @@ import (
 
 	mast "mutant/ast"
 	"mutant/builtin"
-	localprotocol "mutant/lsp/internal/protocol"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -77,6 +76,14 @@ var resourceFamilies = []resourceFamily{
 	{openers: []string{builtin.BuiltinNameZipOpen}, closer: builtin.BuiltinNameZipClose, prefixes: []string{"zip_"}},
 	{openers: []string{builtin.BuiltinNameTarOpen}, closer: builtin.BuiltinNameTarClose, prefixes: []string{"tar_"}},
 	{openers: []string{builtin.BuiltinNameDbOpen, builtin.BuiltinNameDbOpenDisk}, closer: builtin.BuiltinNameDbClose, prefixes: []string{"db_"}},
+	// A record is its own family for the same reason the ledger is: the handle
+	// spaces are separate, so a record handle passed to db_close is a mistake
+	// the rule should see rather than one it should excuse.
+	{openers: []string{builtin.BuiltinNameRecordOpen}, closer: builtin.BuiltinNameRecordClose, prefixes: []string{"record_"}},
+	// The ledger is its own family rather than part of db_: the handle spaces
+	// are separate, so a ledger_ call on a db_ handle is a bug the rule should
+	// not be taught to read as a use.
+	{openers: []string{builtin.BuiltinNameLedgerOpen}, closer: builtin.BuiltinNameLedgerClose, prefixes: []string{"ledger_"}},
 	{openers: []string{builtin.BuiltinNameHashsetLoad}, closer: builtin.BuiltinNameHashsetClose, prefixes: []string{"hashset_"}},
 	{openers: []string{builtin.BuiltinNameCacheOpen}, closer: builtin.BuiltinNameCacheClose, prefixes: []string{"cache_"}},
 	{openers: []string{builtin.BuiltinNameChanNew}, closer: builtin.BuiltinNameChanClose, prefixes: []string{"chan_"}},
@@ -335,7 +342,7 @@ func (c *unclosedResourceCollector) report(
 	}
 
 	c.result = append(c.result, lsp.Diagnostic{
-		Range:    localprotocol.ToLSPRange(rng),
+		Range:    c.snapshot.Range(rng),
 		Severity: c.severity,
 		Source:   c.source,
 		Message: fmt.Sprintf(
@@ -380,9 +387,13 @@ func forEachStatementInScope(statements []mast.Statement, visit func(mast.Statem
 		case *mast.LetStatement:
 			forEachNestedBlockExpression(n.Value, walk)
 		case *mast.ReturnStatement:
-			forEachNestedBlockExpression(n.ReturnValue, walk)
+			// The parser records the first value in both fields, so
+			// ReturnValue alone is walked only when it is the only one set.
 			for _, value := range n.ReturnValues {
 				forEachNestedBlockExpression(value, walk)
+			}
+			if len(n.ReturnValues) == 0 {
+				forEachNestedBlockExpression(n.ReturnValue, walk)
 			}
 		}
 	}

@@ -66,25 +66,47 @@ func DetectInjection(args ...object.Object) object.Object {
 
 	reasons := make([]object.Object, 0)
 	matched := make([]object.Object, 0)
+	chance := make([]object.Object, 0)
 	score := int64(0)
 	shellHits := 0
 
-	mzOffsets := carveOffsets(data, []byte{0x4d, 0x5a})
-	if len(mzOffsets) > 1 {
+	// Only a confirmed PE header counts: an MZ marker whose e_lfanew leads to
+	// "PE\0\0", the test mem_find_pe applies. Every bare 0x4D 0x5A pair used to
+	// count, and random bytes hold one about every 64 KiB, so a buffer of a few
+	// hundred KiB scored 40 for PE headers it did not contain (M26-ART-026).
+	peHeaders := confirmedPEHeaders(data)
+	if peHeaders > 1 {
 		score += 40
 		reasons = append(reasons, stringObj("multiple_pe_headers"))
 	}
 
+	// A signature shorter than injectionDensityBelowBytes counts by density,
+	// not presence: only when it turns up more often than random bytes of the
+	// same length would explain (signatureBeyondChance). Random bytes hold the
+	// two-byte cld; call prologue about once per 64 KiB, so counted on presence
+	// it scored 20 in almost every buffer of a few hundred KiB, and with the 40
+	// that bare MZ pairs used to score, random bytes came to 60 and detected
+	// (M26-ART-026). A count that chance explains is not dropped: it is listed
+	// in chance_signatures, beside the count random bytes would hold, and adds
+	// nothing to the score. The longer signatures count on presence.
 	for _, s := range injectionSignatures {
 		hits := len(carveOffsets(data, s.sig))
-		if hits > 0 {
-			score += s.weight
-			shellHits += hits
-			matched = append(matched, makeHashObject(map[string]object.Object{
-				"name":  stringObj(s.name),
-				"count": intObj(int64(hits)),
-			}))
+		if hits == 0 {
+			continue
 		}
+		if len(s.sig) < injectionDensityBelowBytes {
+			expected := randomPatternHits(len(data)-len(s.sig)+1, 8*len(s.sig))
+			if !signatureBeyondChance(hits, expected) {
+				chance = append(chance, chanceSignatureEntry(s.name, hits, expected))
+				continue
+			}
+		}
+		score += s.weight
+		shellHits += hits
+		matched = append(matched, makeHashObject(map[string]object.Object{
+			"name":  stringObj(s.name),
+			"count": intObj(int64(hits)),
+		}))
 	}
 
 	// GetPC via "call $+5; pop reg" — a position-independent-code hallmark that a
@@ -119,15 +141,89 @@ func DetectInjection(args ...object.Object) object.Object {
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"detected":           boolObj(score >= 60),
 		"score":              intObj(score),
-		"pe_headers":         intObj(int64(len(mzOffsets))),
+		"pe_headers":         intObj(int64(peHeaders)),
 		"shellcode_hits":     intObj(int64(shellHits)),
 		"matched_signatures": &object.Array{Elements: matched},
+		"chance_signatures":  &object.Array{Elements: chance},
 		"reasons":            &object.Array{Elements: reasons},
 	}), nil)
 }
 
+// injectionDensityBelowBytes is the signature length below which
+// detect_injection weighs a signature by density rather than presence.
+// Uniformly random bytes hold a given two-byte pattern about once per 64 KiB,
+// a three-byte one about once per 16 MiB and a four-byte one about once per
+// 4 GiB.
+const injectionDensityBelowBytes = 4
+
+// injectionChanceLevel is how rare the hit count of a signature shorter than
+// injectionDensityBelowBytes has to be in random bytes before detect_injection
+// counts the signature: a count that more than one buffer of random bytes in a
+// thousand would reach is chance, not evidence.
+const injectionChanceLevel = 1e-3
+
+// confirmedPEHeaders counts the distinct PE headers in data. A header is
+// confirmed the way mem_find_pe confirms one, by an MZ marker whose e_lfanew
+// leads to "PE\0\0" (validatePEAt); two markers that lead to the same header
+// are one header.
+func confirmedPEHeaders(data []byte) int {
+	headers := map[int]bool{}
+	for _, mz := range carveOffsets(data, []byte{0x4d, 0x5a}) {
+		if pe, _, ok := validatePEAt(data, mz); ok {
+			headers[pe] = true
+		}
+	}
+	return len(headers)
+}
+
+// randomPatternHits is how many times a pattern that fixes bits bits turns up
+// on average when it is tried at positions places in uniformly random bytes.
+func randomPatternHits(positions, bits int) float64 {
+	if positions <= 0 {
+		return 0
+	}
+	return math.Ldexp(float64(positions), -bits)
+}
+
+// signatureBeyondChance reports whether hits occurrences of a pattern are more
+// than random bytes would explain, where random bytes hold expected occurrences
+// on average: whether P(X >= hits), for X ~ Poisson(expected), is at most
+// injectionChanceLevel. The tail is bounded from above rather than estimated.
+// For k > expected each term after P(X = k) is at most expected/(k+1) times the
+// one before it, so P(X >= k) <= P(X = k) / (1 - expected/(k+1)), and a count
+// passes only when even that bound is small enough.
+func signatureBeyondChance(hits int, expected float64) bool {
+	if hits <= 0 {
+		return false
+	}
+	if expected <= 0 {
+		// Random bytes this short cannot hold the pattern at all.
+		return true
+	}
+	k := float64(hits)
+	if k <= expected {
+		return false
+	}
+	logFactorial, _ := math.Lgamma(k + 1)
+	logPointMass := -expected + k*math.Log(expected) - logFactorial
+	logTail := logPointMass - math.Log1p(-expected/(k+1))
+	return logTail <= math.Log(injectionChanceLevel)
+}
+
+// chanceSignatureEntry describes a signature whose hits chance explains: how
+// many there were, and how many random bytes of the same length hold on average.
+func chanceSignatureEntry(name string, hits int, expected float64) object.Object {
+	return makeHashObject(map[string]object.Object{
+		"name":     stringObj(name),
+		"count":    intObj(int64(hits)),
+		"expected": &object.Float{Value: expected},
+	})
+}
+
 // injectionSignature is a named, weighted byte pattern characteristic of
-// shellcode / injected code. Weights feed the injection score (capped at 100).
+// shellcode / injected code. Weights feed the injection score (capped at 100);
+// a signature shorter than injectionDensityBelowBytes adds its weight only when
+// chance does not explain its hits (signatureBeyondChance).
 type injectionSignature struct {
 	name   string
 	weight int64
@@ -135,11 +231,11 @@ type injectionSignature struct {
 }
 
 var injectionSignatures = []injectionSignature{
-	{name: "getpc_fnstenv", weight: 30, sig: []byte{0xd9, 0x74, 0x24, 0xf4}},                             // fnstenv [esp-0Ch] GetPC
-	{name: "peb_walk_x86", weight: 25, sig: []byte{0x64, 0xa1, 0x30, 0x00, 0x00, 0x00}},                  // mov eax, fs:[0x30]
+	{name: "getpc_fnstenv", weight: 30, sig: []byte{0xd9, 0x74, 0x24, 0xf4}},                              // fnstenv [esp-0Ch] GetPC
+	{name: "peb_walk_x86", weight: 25, sig: []byte{0x64, 0xa1, 0x30, 0x00, 0x00, 0x00}},                   // mov eax, fs:[0x30]
 	{name: "peb_walk_x64", weight: 25, sig: []byte{0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00}}, // mov rax, gs:[0x60]
-	{name: "classic_prologue", weight: 20, sig: []byte{0xfc, 0xe8}},                                      // cld; call
-	{name: "xor_push", weight: 15, sig: []byte{0x31, 0xc0, 0x50, 0x68}},                                  // xor eax,eax; push eax; push imm
+	{name: "classic_prologue", weight: 20, sig: []byte{0xfc, 0xe8}},                                       // cld; call
+	{name: "xor_push", weight: 15, sig: []byte{0x31, 0xc0, 0x50, 0x68}},                                   // xor eax,eax; push eax; push imm
 }
 
 // countCallPopGetPC counts "call $+5; pop reg" GetPC sequences (E8 00000000
@@ -417,20 +513,48 @@ func DetectSuspiciousFiles(args ...object.Object) object.Object {
 	}
 
 	hits := make([]object.Object, 0)
+	unread := make([]object.Object, 0)
 	for idx, pObj := range pathsObj.Elements {
 		pathStr, ok := pObj.(*object.String)
 		if !ok {
 			return resultAndError(nil, newError("path at index %d must be STRING", idx))
 		}
+
+		// One of the three signals is decided by the name alone, so the name is
+		// read before the file is and the answer survives a read that fails.
+		lowerPath := strings.ToLower(pathStr.Value)
+		nameReasons := make([]string, 0, 1)
+		if hasDoubleExecutableExtension(filepath.Base(lowerPath)) {
+			nameReasons = append(nameReasons, "double_extension")
+		}
+
 		data, err := os.ReadFile(pathStr.Value)
 		if err != nil {
+			// A path that could not be read used to `continue`, so a list of
+			// missing, locked or ACL-denied files came back
+			// {count: 0, detected: false, hits: []} with no error at all: a
+			// triage run over evidence this tool could not open reported
+			// nothing suspicious, which is a wrong forensic answer in the shape
+			// of a right one, and the shipped example's golden recorded it as
+			// the expected output (M26-EX-008).
+			//
+			// It is reported rather than refused. One locked file on a live
+			// system must not throw away the findings for every other path, so
+			// `unread` names what was not examined and why, `complete` is the
+			// bit a caller tests, and the name-only reasons come too, because a
+			// name is evidence that does not need the file opened.
+			unread = append(unread, makeHashObject(map[string]object.Object{
+				"path":    stringObj(pathStr.Value),
+				"error":   stringObj(err.Error()),
+				"reasons": stringArrayLiteral(nameReasons),
+			}))
 			continue
 		}
+
 		ent := shannonEntropy(data)
 		typ, _, _ := detectMagic(data)
-		lowerPath := strings.ToLower(pathStr.Value)
 		ext := filepath.Ext(lowerPath)
-		reasons := make([]string, 0)
+		reasons := make([]string, 0, 3)
 		if ent > 7.8 {
 			reasons = append(reasons, "very_high_entropy")
 		} else if ent > 7.2 {
@@ -439,27 +563,30 @@ func DetectSuspiciousFiles(args ...object.Object) object.Object {
 		if (typ == "pe" || typ == "elf") && documentExtensions[ext] {
 			reasons = append(reasons, "extension_mismatch")
 		}
-		if hasDoubleExecutableExtension(filepath.Base(lowerPath)) {
-			reasons = append(reasons, "double_extension")
-		}
+		// Appended last, so the order a caller already sees is unchanged:
+		// entropy, then the magic mismatch, then the name.
+		reasons = append(reasons, nameReasons...)
 		if len(reasons) > 0 {
-			reasonObjs := make([]object.Object, len(reasons))
-			for i, r := range reasons {
-				reasonObjs[i] = stringObj(r)
-			}
 			hits = append(hits, makeHashObject(map[string]object.Object{
 				"path":    stringObj(pathStr.Value),
 				"entropy": &object.Float{Value: ent},
 				"type":    stringObj(typ),
-				"reasons": &object.Array{Elements: reasonObjs},
+				"reasons": stringArrayLiteral(reasons),
 			}))
 		}
 	}
 
+	// `detected` and `count` still describe `hits` and nothing else, so a
+	// caller that reads them is unaffected and no number in this result
+	// describes a file the call did not open. What an unread path costs is
+	// `complete`, which is the two-bit shape used everywhere in this tree that
+	// "checked" and "passed" are different questions.
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"detected": boolObj(len(hits) > 0),
 		"count":    intObj(int64(len(hits))),
 		"hits":     &object.Array{Elements: hits},
+		"unread":   &object.Array{Elements: unread},
+		"complete": boolObj(len(unread) == 0),
 	}), nil)
 }
 

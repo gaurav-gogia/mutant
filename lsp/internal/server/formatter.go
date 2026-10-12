@@ -1,12 +1,16 @@
 package server
 
 import (
+	"math"
 	"sort"
 	"strings"
 
 	mast "mutant/ast"
 	"mutant/lsp/internal/analyzer"
+	"mutant/parser"
 	"mutant/token"
+
+	lsp "github.com/tliron/glsp/protocol_3_16"
 )
 
 // Canonical Mutant style. These are constants, not settings.
@@ -22,28 +26,41 @@ const (
 	indentUnit = "    "
 )
 
-// formatSnapshotText renders snapshot as canonical Mutant source.
-//
-// When the document has hard parse errors the AST cannot be trusted, so the
-// formatter degrades to whitespace normalisation rather than emitting a
-// mangled program. Recoverable problems (a missing or redundant `;`) do not
-// trigger the fallback — repairing those is the formatter's job, and it
-// happens naturally: terminators are emitted from Statement.RequiresSemicolon
-// rather than copied from the source, and stray semicolons never reach the
-// tree in the first place.
 // FormatSource returns the canonical formatting of Mutant source. It is the
-// exported entry point used by the `mutant fmt` CLI (via lsp/api); on a hard
-// parse error it degrades to whitespace normalization rather than mangling.
-func FormatSource(src string) string {
+// exported entry point used by the `mutant fmt` CLI (via lsp/api).
+//
+// ok is false when no formatting is available and the caller must leave the
+// source exactly as it is; parseErrors then says why.
+func FormatSource(src string) (formatted string, parseErrors []lsp.Diagnostic, ok bool) {
 	return formatSnapshotText(analyzer.New().Analyze(src))
 }
 
-func formatSnapshotText(snapshot *analyzer.Snapshot) string {
+// formatSnapshotText renders snapshot as canonical Mutant source, or refuses.
+//
+// A formatter that cannot read a file does not rewrite it. There was a
+// whitespace-only fallback here for a document with hard parse errors, and it
+// was worse than doing nothing: with no tree, "strip trailing whitespace from
+// every line" cannot tell a line of code from a line inside a triple-quoted
+// string, so `mutant fmt` quietly shortened banners and expected-output
+// literals in exactly the files it had already failed to understand -- and
+// reported success. gofmt, rustfmt and prettier all refuse such a file.
+//
+// Recoverable problems (a missing or redundant `;`) are not parse errors and
+// never reach the refusal — repairing those is the formatter's job, and it
+// happens naturally: terminators are emitted from Statement.RequiresSemicolon
+// rather than copied from the source, and stray semicolons never reach the
+// tree in the first place. The one terminator written where RequiresSemicolon
+// says none is due follows an if or match statement whose next statement would
+// otherwise continue it (see continuesExpression).
+func formatSnapshotText(snapshot *analyzer.Snapshot) (string, []lsp.Diagnostic, bool) {
 	if snapshot == nil {
-		return ""
+		return "", nil, false
 	}
-	if snapshot.Program == nil || len(snapshot.ParseErrors) > 0 {
-		return normalizeDocumentWhitespace(snapshot.Source)
+	if parseErrors := analyzer.ParseDiagnostics(snapshot); len(parseErrors) > 0 {
+		return "", parseErrors, false
+	}
+	if snapshot.Program == nil {
+		return "", nil, false
 	}
 
 	p := newPrinter(snapshot.Program)
@@ -51,9 +68,9 @@ func formatSnapshotText(snapshot *analyzer.Snapshot) string {
 
 	formatted := strings.TrimRight(body, "\n")
 	if formatted == "" {
-		return ""
+		return "", nil, true
 	}
-	return formatted + "\n"
+	return formatted + "\n", nil, true
 }
 
 // endOfSourceOffset is the offset past the final byte, used as the flush
@@ -103,8 +120,22 @@ func indent(level int) string {
 // including interleaved comments and preserved blank lines. endOffset bounds
 // the region so comments trailing the final statement are flushed at the
 // right indent instead of leaking to an outer scope.
+//
+// Every statement is rendered before any is written, because whether an `if`
+// or `match` statement keeps its `;` depends on the text of the statement after
+// it (see continuesExpression). Rendering stays strictly in source order, which
+// the comment cursor relies on; only the assembly waits for the whole list.
 func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) string {
-	var b strings.Builder
+	type rendered struct {
+		lead      string // comments and the blank line before the statement
+		text      string
+		terminate bool // the statement's canonical form ends with `;`
+		open      bool // an expression statement that ends without one
+		tail      string
+	}
+
+	var out []rendered
+	var lead strings.Builder
 
 	for _, stmt := range stmts {
 		if stmt == nil {
@@ -113,8 +144,8 @@ func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) s
 
 		rng, hasRange := p.program.RangeOf(stmt)
 		if hasRange {
-			b.WriteString(p.flushCommentsBefore(rng.Start.Offset, level))
-			b.WriteString(p.blankLineBefore(rng.Start.Line))
+			lead.WriteString(p.flushCommentsBefore(rng.Start.Offset, level))
+			lead.WriteString(p.blankLineBefore(rng.Start.Line))
 		}
 
 		text := p.statement(stmt, level)
@@ -122,22 +153,66 @@ func (p *printer) statements(stmts []mast.Statement, level int, endOffset int) s
 			continue
 		}
 
-		b.WriteString(text)
-		if stmt.RequiresSemicolon() {
-			b.WriteString(";")
+		_, isExpression := stmt.(*mast.ExpressionStatement)
+		r := rendered{
+			lead:      lead.String(),
+			text:      text,
+			terminate: stmt.RequiresSemicolon(),
+			open:      isExpression && !stmt.RequiresSemicolon(),
 		}
+		lead.Reset()
 
 		if hasRange {
 			p.lastLine = rng.End.Line
-			b.WriteString(p.trailingCommentOn(rng.End.Line))
+			r.tail = p.trailingCommentOn(rng.End.Line)
 		}
+		out = append(out, r)
+	}
+
+	var b strings.Builder
+	for i, r := range out {
+		b.WriteString(r.lead)
+		b.WriteString(r.text)
+		// An if or match statement is written bare, except where the next
+		// statement would continue it: there the `;` is what keeps them two
+		// statements (M26-LSP-049).
+		if r.terminate || (r.open && i+1 < len(out) && continuesExpression(out[i+1].text)) {
+			b.WriteString(";")
+		}
+		b.WriteString(r.tail)
 		b.WriteString("\n")
 	}
+	b.WriteString(lead.String())
 
 	// Comments sitting after the last statement but still inside this scope.
 	b.WriteString(p.flushCommentsBefore(endOffset, level))
 
 	return b.String()
+}
+
+// continuesExpression reports whether a statement whose canonical text is text
+// would be read as the continuation of an expression statement written before
+// it with no `;` between them.
+//
+// Mutant has no automatic semicolon insertion. An `if` or `match` statement is
+// an expression, and its canonical form ends with a `}` and no `;`, so the
+// parser goes on looking for an infix operator after that brace. Four tokens
+// can both begin a statement and continue an expression: `(` (a call on the
+// if's value), `[` (an index into it), `-` (a subtraction from it) and `{` (a
+// struct literal, which leaves the hash literal behind it unparseable). Text
+// rather than the tree's first token is checked, because the text is what the
+// parser will read: a bracket the printer adds is a bracket all the same.
+// Comments are not tokens, so one between the two statements changes nothing.
+func continuesExpression(text string) bool {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	switch trimmed[0] {
+	case '(', '[', '-', '{':
+		return true
+	}
+	return false
 }
 
 // flushCommentsBefore emits every pending comment that starts before offset
@@ -240,11 +315,60 @@ func (p *printer) returnValues(node *mast.ReturnStatement, level int) string {
 	return " " + p.expression(node.ReturnValue, level)
 }
 
+// expression prints expr with the brackets its author wrote around it, and no
+// others. The parser keeps no node for a pair of brackets -- precedence is
+// already in the tree's shape -- so which ones were written comes from the
+// program's side table. The formatter used to bracket every operator
+// expression, which turned `putf("a=" + b + "\n")` into
+// `putf((("a=" + b) + "\n"))`.
 func (p *printer) expression(expr mast.Expression, level int) string {
 	if expr == nil {
 		return ""
 	}
+	text := p.bareExpression(expr, level)
+	if p.program.IsParenthesized(expr) {
+		return "(" + text + ")"
+	}
+	return text
+}
 
+// operand prints an operator's operand. Brackets the author wrote come with it;
+// beyond those it is bracketed only if the tree says it must be, which a
+// parsed program never needs, since its source already had them. A tree built
+// without the side table -- by a test, or by hand -- still prints as source
+// that parses back to the same tree.
+func (p *printer) operand(expr mast.Expression, parent int, right bool, level int) string {
+	text := p.expression(expr, level)
+	if p.program.IsParenthesized(expr) {
+		return text
+	}
+	own := bindingOf(expr)
+	// Every infix operator is left-associative, so an operand of the same
+	// precedence needs brackets on the right only: a - (b - c).
+	if own < parent || (right && own == parent) {
+		return "(" + text + ")"
+	}
+	return text
+}
+
+// bindingOf is how tightly expr holds together as an operand. Only an operator
+// with an operand on its right can be pulled apart by a tighter neighbour;
+// calls, indexes, fields and literals are complete as they stand.
+func bindingOf(expr mast.Expression) int {
+	switch node := expr.(type) {
+	case *mast.InfixExpression:
+		return parser.Precedence(node.Token.Type)
+	case *mast.PrefixExpression:
+		return parser.PREFIX
+	case *mast.AssignExpression:
+		if node.Postfix == "" {
+			return parser.ASSIGNMENT
+		}
+	}
+	return math.MaxInt
+}
+
+func (p *printer) bareExpression(expr mast.Expression, level int) string {
 	switch node := expr.(type) {
 	case *mast.Identifier:
 		return node.Value
@@ -270,21 +394,27 @@ func (p *printer) expression(expr mast.Expression, level int) string {
 		}
 		return node.String()
 	case *mast.PrefixExpression:
-		// Mutant's canonical form parenthesises every operator expression, so
-		// precedence is always explicit in the printed text.
-		return "(" + node.Operator + p.expression(node.Right, level) + ")"
+		// Not right-hand in operand's sense: a prefix operator applies to
+		// whatever follows it, so `!-a` needs no brackets.
+		operand := p.operand(node.Right, parser.PREFIX, false, level)
+		// `- -a` keeps its space: without it the two signs lex as `--`.
+		if node.Operator == "-" && strings.HasPrefix(operand, "-") {
+			return node.Operator + " " + operand
+		}
+		return node.Operator + operand
 	case *mast.InfixExpression:
-		return "(" + p.expression(node.Left, level) + " " + node.Operator + " " + p.expression(node.Right, level) + ")"
+		prec := parser.Precedence(node.Token.Type)
+		return p.operand(node.Left, prec, false, level) + " " + node.Operator + " " + p.operand(node.Right, prec, true, level)
 	case *mast.AssignExpression:
 		if node.Postfix != "" {
-			return p.expression(node.Left, level) + node.Postfix
+			return p.operand(node.Left, parser.CALL, false, level) + node.Postfix
 		}
 		if node.Operator != "" {
 			return p.expression(node.Left, level) + " " + node.Operator + "= " + p.expression(node.Value, level)
 		}
 		return p.expression(node.Left, level) + " = " + p.expression(node.Value, level)
 	case *mast.CallExpression:
-		return p.expression(node.Function, level) + "(" + p.expressionList(node.Arguments, level) + ")"
+		return p.operand(node.Function, parser.CALL, false, level) + "(" + p.expressionList(node.Arguments, level) + ")"
 	case *mast.FunctionLiteral:
 		return "fn(" + joinIdents(node.Parameters, ", ") + ") " + p.block(node.Body, level)
 	case *mast.MacroLiteral:
@@ -300,9 +430,9 @@ func (p *printer) expression(expr mast.Expression, level int) string {
 	case *mast.ArrayLiteral:
 		return "[" + p.expressionList(node.Elements, level) + "]"
 	case *mast.IndexExpression:
-		return p.expression(node.Left, level) + "[" + p.expression(node.Index, level) + "]"
+		return p.operand(node.Left, parser.INDEX, false, level) + "[" + p.expression(node.Index, level) + "]"
 	case *mast.FieldExpression:
-		return p.expression(node.Left, level) + "." + identValue(node.Field)
+		return p.operand(node.Left, parser.FIELD, false, level) + "." + identValue(node.Field)
 	case *mast.StructLiteral:
 		return p.structLiteral(node, level)
 	case *mast.HashLiteral:
@@ -365,11 +495,11 @@ func (p *printer) matchArm(arm *mast.MatchArm, level int) string {
 
 // matchPattern prints one pattern, which is not quite printing an expression.
 //
-// The canonical form parenthesises every operator expression so precedence is
-// explicit, and a negated number is one -- but a pattern has no precedence to
-// make explicit, and the pattern grammar admits a literal, a dotted path and a
-// leading `-`, nothing else. Printing `(-1)` would emit source the parser then
-// rejects, which is the one thing a formatter must never do.
+// A negated number is an operator expression, and the pattern grammar admits a
+// literal, a dotted path and a leading `-`, nothing else. A pattern is therefore
+// never bracketed, whatever a printer might decide for an expression: `(-1)`
+// would be source the parser rejects, which is the one thing a formatter must
+// never emit.
 func (p *printer) matchPattern(pattern mast.Expression, level int) string {
 	if prefix, ok := pattern.(*mast.PrefixExpression); ok && prefix != nil {
 		return prefix.Operator + p.matchPattern(prefix.Right, level)
@@ -414,53 +544,32 @@ func (p *printer) structLiteral(node *mast.StructLiteral, level int) string {
 	return name + "{" + strings.Join(fields, ", ") + "}"
 }
 
-// hashLiteral emits entries in the order the author wrote them.
+// hashLiteral emits entries in the order the author wrote them, which is the
+// order HashLiteral.Pairs holds them in.
 //
-// HashLiteral.Pairs is a Go map, so ranging over it yields a random order —
-// printing that directly would make the formatter non-deterministic and break
-// idempotency outright. Recovering the authored order from each key's source
-// range fixes that without reordering anyone's code; keys the parser did not
-// record fall back to their rendered text so the result is still total.
+// It used to recover that order from each key's source range, because the pairs
+// were a Go map and ranging it yielded a random one -- printing that directly
+// would have made the formatter non-deterministic and broken idempotency
+// outright. That was never quite the authored order either: a key the parser
+// had recorded no range for fell back to its rendered text, so the result was
+// total but not always what was written.
 func (p *printer) hashLiteral(node *mast.HashLiteral, level int) string {
-	type entry struct {
-		text     string
-		offset   int
-		hasRange bool
-	}
-
-	entries := make([]entry, 0, len(node.Pairs))
-	for key, value := range node.Pairs {
-		e := entry{text: p.expression(key, level) + ": " + p.expression(value, level)}
-		if rng, ok := p.program.RangeOf(key); ok {
-			e.offset = rng.Start.Offset
-			e.hasRange = true
-		}
-		entries = append(entries, e)
-	}
-
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].hasRange != entries[j].hasRange {
-			return entries[i].hasRange
-		}
-		if entries[i].hasRange && entries[i].offset != entries[j].offset {
-			return entries[i].offset < entries[j].offset
-		}
-		return entries[i].text < entries[j].text
-	})
-
-	parts := make([]string, 0, len(entries))
-	for _, e := range entries {
-		parts = append(parts, e.text)
+	parts := make([]string, 0, len(node.Pairs))
+	for _, pair := range node.Pairs {
+		parts = append(parts, p.expression(pair.Key, level)+": "+p.expression(pair.Value, level))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
+// condition prints the brackets `if`, `while` and `match` require around their
+// condition. They belong to the statement, so they are always written, whatever
+// the condition looks like. The first and last characters are no guide: this
+// used to skip them for any text starting with '(' and ending with ')', and
+// `(fs + more)[0](true)` or `(-f)(1)` came out as source that does not parse
+// (M26-LSP-008). A pair the author wrote around the whole condition is theirs,
+// and is kept as a second pair.
 func (p *printer) condition(expr mast.Expression, level int) string {
-	formatted := p.expression(expr, level)
-	if strings.HasPrefix(formatted, "(") && strings.HasSuffix(formatted, ")") {
-		return formatted
-	}
-	return "(" + formatted + ")"
+	return "(" + p.expression(expr, level) + ")"
 }
 
 // block renders a brace-delimited body. The opening brace stays on the
@@ -537,8 +646,6 @@ func (p *printer) whileStatement(stmt *mast.WhileStatement, level int) string {
 		return "while () " + p.block(stmt.Body, level)
 	}
 
-	// condition() rather than expression(): an infix condition already prints
-	// its own parentheses, and wrapping it again gives `while ((i < 10))`.
 	return "while " + p.condition(stmt.Condition, level) + " " + p.block(stmt.Body, level)
 }
 
@@ -649,26 +756,4 @@ func quoteString(value string) string {
 	}
 	out.WriteByte('"')
 	return out.String()
-}
-
-// normalizeDocumentWhitespace is the degraded path used when the document
-// does not parse: strip trailing whitespace, normalise line endings, and
-// guarantee a single trailing newline, without touching structure.
-func normalizeDocumentWhitespace(input string) string {
-	normalized := strings.ReplaceAll(strings.ReplaceAll(input, "\r\n", "\n"), "\r", "\n")
-	if normalized == "" {
-		return ""
-	}
-
-	lines := strings.Split(normalized, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-
-	joined := strings.Join(lines, "\n")
-	joined = strings.TrimRight(joined, "\n")
-	if joined == "" {
-		return ""
-	}
-	return joined + "\n"
 }

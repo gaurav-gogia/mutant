@@ -10,6 +10,10 @@ WASM_REPL=1
 # value this line can see. --output-dir foo used to leave the wasm artifacts,
 # and now their SHA256SUMS, sitting under dist/ next to nothing.
 WASM_OUT_DIR=""
+# How the Go toolchain is spelled on this machine. Nothing is read from the
+# environment: pass --go go1.26.9 to use a golang.org/dl shim. The version is
+# NOT checked here -- see the note above GO_BUILD_FLAGS.
+GO_NAME="go"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       WASM_OUT_DIR="$2"
       shift 2
       ;;
+    --go)
+      GO_NAME="$2"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage: ./scripts/build.sh [options]
@@ -53,6 +61,8 @@ Options:
   --wasm-repl         Build browser REPL wasm artifact and copy wasm_exec.js (default: enabled)
   --no-wasm-repl      Skip browser REPL wasm build
   --wasm-out-dir <d>  Output directory for wasm artifacts (default: dist/wasm-repl)
+  --go <command>      Go toolchain to build with (default: go). go.mod names the
+                      version a release is meant to use, e.g. --go go1.26.9
 
 Writes a SHA256SUMS beside the binaries, and another beside the wasm
 artifacts, each checkable with `cd <dir> && sha256sum -c SHA256SUMS`.
@@ -109,9 +119,47 @@ ps_quote() {
   printf "'%s'" "$value"
 }
 
+# A POSIX path means nothing to PowerShell, and the three shells this script
+# runs under spell the same drive three ways: Git Bash and MSYS2 use /o/...,
+# WSL uses /mnt/o/..., and a native shell already has O:. Converting only the
+# WSL form left run_tool handing PowerShell '/o/project/mutant/dist/...',
+# which it reported as a command it could not find -- so build.sh could not
+# finish on Windows in Git Bash (M26-TOOL-041).
 to_windows_path() {
   local value="$1"
+
+  # Only an absolute POSIX path needs converting. A flag, a relative path or
+  # an already-Windows path is passed through untouched, which is what keeps
+  # arguments like --release-assets and -out intact.
+  if [[ "$value" != /* ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  # WSL mounts Windows drives under /mnt/<letter>. This is matched before
+  # cygpath because under Git Bash `cygpath -w /mnt/o/x` resolves /mnt
+  # against the MSYS root and answers wrongly rather than failing, which
+  # would leave the wrong path unnoticed.
   if [[ "$value" =~ ^/mnt/([a-zA-Z])/(.*)$ ]]; then
+    local drive="${BASH_REMATCH[1]^^}"
+    local rest="${BASH_REMATCH[2]//\//\\}"
+    printf '%s:\%s\n' "$drive" "$rest"
+    return 0
+  fi
+
+  # cygpath ships with Git for Windows and MSYS2 and knows the real mapping,
+  # including a drive mounted somewhere other than /<letter> and a subst'd
+  # drive, neither of which a pattern can work out.
+  if command -v cygpath >/dev/null 2>&1; then
+    local converted
+    if converted="$(cygpath -w -- "$value" 2>/dev/null)" && [[ -n "$converted" ]]; then
+      printf '%s\n' "$converted"
+      return 0
+    fi
+  fi
+
+  # Git Bash and MSYS2 without cygpath put the drives at /<letter>.
+  if [[ "$value" =~ ^/([a-zA-Z])/(.*)$ ]]; then
     local drive="${BASH_REMATCH[1]^^}"
     local rest="${BASH_REMATCH[2]//\//\\}"
     printf '%s:\%s\n' "$drive" "$rest"
@@ -151,7 +199,7 @@ run_tool() {
   "$tool_path" "$@"
 }
 
-GO_BIN="$(resolve_tool go || true)"
+GO_BIN="$(resolve_tool "$GO_NAME" || true)"
 POWERSHELL_BIN="$(resolve_tool powershell.exe || true)"
 
 if [[ -z "$POWERSHELL_BIN" ]]; then
@@ -159,9 +207,19 @@ if [[ -z "$POWERSHELL_BIN" ]]; then
 fi
 
 if [[ -z "$GO_BIN" ]]; then
-  echo "go toolchain not found. Install Go or make sure the Go shim is visible to bash." >&2
+  echo "go toolchain '$GO_NAME' not found. Install Go or make sure the shim is visible to bash." >&2
   exit 1
 fi
+
+# This script does NOT check the toolchain version. Owner decision 2026-10-09:
+# the refusal made compiling difficult and came out of both build scripts.
+# go.mod still names the version a release is meant to be built with, and
+# release_gate.sh still refuses a mismatch, so the pin is enforced where a
+# release is gated rather than on every build. Worth knowing if the two ever
+# disagree: go1.27.0 turns the jsonv2 experiment on by default, so encoding/json
+# compiles from its v2_*.go sources and the v1 files are not built at all, and
+# `go env GOEXPERIMENT` will not show it -- `go list -f '{{.GoFiles}}'
+# encoding/json` is the check that does.
 
 GO_BUILD_FLAGS=(
   -trimpath

@@ -566,8 +566,11 @@ func buildOCSFEvent(event *object.Hash, config emitConfig) (object.Object, *obje
 }
 
 // ocsfActivity picks the activity within a class. For a file event the
-// timestamp's meaning is the activity -- a creation time records a create -- so
-// the description is read before the action.
+// timestamp's meaning is the activity -- a creation time records a create, a
+// deletion time a delete -- so the description is read before the action. Only
+// when the description names no activity does the action decide: a delete
+// action is 4 Delete, because OCSF 1001 has its own activity for that and 99
+// Other would hide it from a consumer looking for deletions.
 //
 // Anything else is 99 Other with the envelope's action as the name, or 0 Unknown
 // when the artifact did not say what happened. Both are OCSF's own answers for
@@ -585,8 +588,13 @@ func ocsfActivity(class ocsfClass, action, description string) (int64, string) {
 			return 2, "Read"
 		case "Metadata Modification Time", "Written Time":
 			return 6, "Set Attributes"
+		case "Deletion Time":
+			return 4, "Delete"
 		}
-		if action == "open" {
+		switch action {
+		case "delete":
+			return 4, "Delete"
+		case "open":
 			return 2, "Read"
 		}
 	case 6001:
@@ -662,13 +670,22 @@ var timesketchDataTypes = map[string]string{
 	"jumplist":  "olecf:dest_list:entry",
 	"syslog":    "syslog:line",
 	"bodyfile":  "fs:mactime:line",
+	"fs_report": "fs:stat",
 	"mactime":   "fs:mactime:line",
 }
 
-// timesketchBrowserDataTypes are the kinds whose plaso type depends on which
-// browser the entry came out of. The envelope carries that in `dataset`, which
-// is the whole reason `dataset` exists: the emitters never reach into `extra`.
-var timesketchBrowserDataTypes = map[string]map[string]string{
+// timesketchDataTypesByDataset are the kinds whose plaso type depends on which
+// source the entry came out of -- which browser wrote the history, which
+// filesystem the volume was. The envelope carries that in `dataset`, which is
+// the whole reason `dataset` exists: the emitters never reach into `extra`.
+//
+// A kind listed here still falls through to timesketchDataTypes for a dataset
+// it does not name, which is how one entry covers NTFS and the five
+// filesystems plaso has no separate type for.
+var timesketchDataTypesByDataset = map[string]map[string]string{
+	"fs_report": {
+		"ntfs": "fs:stat:ntfs",
+	},
 	"browser_history": {
 		"chrome":  "chrome:history:page_visited",
 		"firefox": "firefox:places:page_visited",
@@ -684,8 +701,8 @@ var timesketchBrowserDataTypes = map[string]map[string]string{
 }
 
 func timesketchDataType(kind, dataset string) string {
-	if byBrowser, ok := timesketchBrowserDataTypes[kind]; ok {
-		if dataType, ok := byBrowser[strings.ToLower(dataset)]; ok {
+	if byDataset, ok := timesketchDataTypesByDataset[kind]; ok {
+		if dataType, ok := byDataset[strings.ToLower(dataset)]; ok {
 			return dataType
 		}
 	}

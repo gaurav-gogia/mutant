@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"io"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"sort"
 	"strconv"
@@ -22,7 +23,48 @@ import (
 	"mutant/object"
 )
 
-const maxHTTPBodyBytes = 32 << 20 // 32 MiB cap so a hostile stream can't OOM us.
+// maxHTTPBodyBytes bounds the body an HTTP builtin hands back as one string:
+// http_conn_read_request, http_conn_read_response, http_parse_request and
+// http_parse_response, and also http_get, http_post and http_request, whose
+// read had no bound of its own until M26-NET-021. A body past it is refused
+// rather than cut. The peer at the other end decides how much it sends and is
+// not trusted to be reasonable, and the body arrives as a VM variable, which is
+// re-encrypted on every store. Refusing is what makes the answer honest: a
+// clipped body returned as a whole one is a wrong result a script has no way to
+// detect, which is what this cap used to produce (M26-NET-031). An intercepted
+// message whose body may be larger is read with http_conn_read_request_head or
+// http_conn_read_response_head plus net_conn_read, which leave the body on the
+// connection and stream it in pieces; the three fetching builtins have no such
+// streaming form, so a larger download is refused outright and the figure is
+// what they are refused at.
+//
+//mutant:limit bytes
+const maxHTTPBodyBytes = 32 << 20
+
+// maxHTTPHeaderBytes bounds the request line and header block of one message.
+// The body was capped and the head was not, so a peer could send a single
+// header field of any length and have it read in full: an 8 MiB field grew the
+// heap by 12 MiB and a 32 MiB field by 69 MiB, and both were accepted. A head
+// is metadata about a body, and no real one is large.
+//
+// The value is net/http's own DefaultMaxHeaderBytes, so a message these
+// builtins accept is one Go's HTTP server would accept too -- nginx and Apache
+// both stop well below it. It is enforced on the socket beneath the buffered
+// reader and released as soon as the head is parsed, because the two _head
+// builtins deliberately leave the body on the connection for net_conn_read to
+// stream and that read must not inherit a head's budget.
+//
+//mutant:limit bytes
+const maxHTTPHeaderBytes = 1 << 20
+
+// httpHeadReadSlack is what the socket is allowed beyond maxHTTPHeaderBytes
+// while a head is being read. The parser draws through a bufio.Reader, which
+// fills a whole buffer at a time, so the last fill can legitimately carry the
+// start of a body past the end of the head. The figure is one bufio buffer,
+// which is what net/http's own server adds to MaxHeaderBytes for this reason.
+//
+//mutant:limit bytes
+const httpHeadReadSlack = 4096
 
 // HTTPParseRequest parses a raw HTTP request into a structured hash.
 // http_parse_request(raw STRING) -> HASH {method, url, path, host, proto, query, headers, body}
@@ -41,17 +83,23 @@ func HTTPParseRequest(args ...object.Object) object.Object {
 	return resultAndError(requestToHash(BuiltinNameHttpParseRequest, req))
 }
 
-// HTTPParseResponse parses a raw HTTP response into a structured hash.
-// http_parse_response(raw STRING) -> HASH {status, status_text, proto, headers, body}
+// HTTPParseResponse parses a raw HTTP response into a structured hash. The
+// optional second argument is the method of the request this answers, which is
+// needed for a response to HEAD and for nothing else -- see httpResponseMethod.
+// http_parse_response(raw STRING, method STRING?) -> HASH {status, status_text, proto, headers, body}
 func HTTPParseResponse(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
+	if len(args) != 1 && len(args) != 2 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
 	}
 	raw, ok := args[0].(*object.String)
 	if !ok {
 		return resultAndError(nil, newError("argument 1 to `http_parse_response` must be STRING, got %s", args[0].Type()))
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw.Value)), nil)
+	method, errObj := httpResponseMethod(BuiltinNameHttpParseResponse, args, 2)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw.Value)), httpRequestForMethod(method))
 	if err != nil {
 		return resultAndError(nil, newError("http_parse_response: %s", err.Error()))
 	}
@@ -67,23 +115,38 @@ func HTTPConnReadRequest(args ...object.Object) object.Object {
 		return resultAndError(nil, errObj)
 	}
 	applyReadDeadline(mc, timeoutMs)
+	mc.setReadLimit(maxHTTPHeaderBytes + httpHeadReadSlack)
 	req, err := http.ReadRequest(mc.buffered())
+	headTooLarge := mc.readLimitReached()
+	mc.clearReadLimit()
 	if err != nil {
+		if headTooLarge {
+			return resultAndError(nil, newError("http_conn_read_request: request head exceeds %d bytes", maxHTTPHeaderBytes))
+		}
 		return resultAndError(nil, newError("http_conn_read_request: %s", err.Error()))
 	}
 	return resultAndError(requestToHash(BuiltinNameHttpConnReadRequest, req))
 }
 
 // HTTPConnReadResponse reads exactly one HTTP response from a connection handle.
-// http_conn_read_response(handle INTEGER, timeout_ms INTEGER) -> HASH
+// The optional third argument is the method of the request this answers, which
+// a relay already read with http_conn_read_request one call earlier, and which
+// is needed for a response to HEAD -- see httpResponseMethod.
+// http_conn_read_response(handle INTEGER, timeout_ms INTEGER, method STRING?) -> HASH
 func HTTPConnReadResponse(args ...object.Object) object.Object {
-	mc, timeoutMs, errObj := connAndTimeout(BuiltinNameHttpConnReadResponse, args)
+	mc, timeoutMs, method, errObj := connTimeoutAndMethod(BuiltinNameHttpConnReadResponse, args)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
 	}
 	applyReadDeadline(mc, timeoutMs)
-	resp, err := http.ReadResponse(mc.buffered(), nil)
+	mc.setReadLimit(maxHTTPHeaderBytes + httpHeadReadSlack)
+	resp, err := http.ReadResponse(mc.buffered(), httpRequestForMethod(method))
+	headTooLarge := mc.readLimitReached()
+	mc.clearReadLimit()
 	if err != nil {
+		if headTooLarge {
+			return resultAndError(nil, newError("http_conn_read_response: response head exceeds %d bytes", maxHTTPHeaderBytes))
+		}
 		return resultAndError(nil, newError("http_conn_read_response: %s", err.Error()))
 	}
 	return resultAndError(responseToHash(BuiltinNameHttpConnReadResponse, resp))
@@ -102,9 +165,18 @@ func HTTPConnReadRequestHead(args ...object.Object) object.Object {
 		return resultAndError(nil, errObj)
 	}
 	applyReadDeadline(mc, timeoutMs)
+	mc.setReadLimit(maxHTTPHeaderBytes + httpHeadReadSlack)
 	req, err := http.ReadRequest(mc.buffered())
+	headTooLarge := mc.readLimitReached()
+	mc.clearReadLimit()
 	if err != nil {
+		if headTooLarge {
+			return resultAndError(nil, newError("http_conn_read_request_head: request head exceeds %d bytes", maxHTTPHeaderBytes))
+		}
 		return resultAndError(nil, newError("http_conn_read_request_head: %s", err.Error()))
+	}
+	if fieldErr := checkHTTPHeaderFields(req.Header); fieldErr != nil {
+		return resultAndError(nil, newError("http_conn_read_request_head: %s", fieldErr.Error()))
 	}
 
 	host := req.Host
@@ -131,27 +203,55 @@ func HTTPConnReadRequestHead(args ...object.Object) object.Object {
 
 // HTTPConnReadResponseHead reads a response's status line + headers WITHOUT
 // consuming the body, leaving it on the connection for streaming via
-// net_conn_read. See HTTPConnReadRequestHead.
-// http_conn_read_response_head(handle, timeout_ms) -> HASH {status,status_text,
+// net_conn_read. See HTTPConnReadRequestHead. The optional third argument is
+// the method of the request this answers; see httpResponseMethod, and below for
+// what it changes here.
+// http_conn_read_response_head(handle, timeout_ms, method?) -> HASH {status,status_text,
 //
 //	proto,headers,content_length,chunked}
 func HTTPConnReadResponseHead(args ...object.Object) object.Object {
-	mc, timeoutMs, errObj := connAndTimeout(BuiltinNameHttpConnReadResponseHead, args)
+	mc, timeoutMs, method, errObj := connTimeoutAndMethod(BuiltinNameHttpConnReadResponseHead, args)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
 	}
 	applyReadDeadline(mc, timeoutMs)
-	resp, err := http.ReadResponse(mc.buffered(), nil)
+	mc.setReadLimit(maxHTTPHeaderBytes + httpHeadReadSlack)
+	resp, err := http.ReadResponse(mc.buffered(), httpRequestForMethod(method))
+	headTooLarge := mc.readLimitReached()
+	mc.clearReadLimit()
 	if err != nil {
+		if headTooLarge {
+			return resultAndError(nil, newError("http_conn_read_response_head: response head exceeds %d bytes", maxHTTPHeaderBytes))
+		}
 		return resultAndError(nil, newError("http_conn_read_response_head: %s", err.Error()))
 	}
+	if fieldErr := checkHTTPHeaderFields(resp.Header); fieldErr != nil {
+		return resultAndError(nil, newError("http_conn_read_response_head: %s", fieldErr.Error()))
+	}
+
+	// These two fields say what to read off the connection next, which for a
+	// response to HEAD is nothing: its Content-Length describes the
+	// representation the request asked about and no body follows it (RFC 9110
+	// section 9.3.2). net/http reports the declared number in ContentLength
+	// there -- 50000 for a HEAD response that declares 50000, measured -- so a
+	// relay that streamed it waited for bytes that are never sent. The declared
+	// length is still in headers, which is where the evidence belongs. For a
+	// status that carries no body net/http already answers this way by itself:
+	// a 304 declaring 1234 arrives here with ContentLength 0.
+	contentLength := resp.ContentLength
+	chunked := isChunked(resp.TransferEncoding)
+	if method == http.MethodHead {
+		contentLength = 0
+		chunked = false
+	}
+
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"status":         intObj(int64(resp.StatusCode)),
 		"status_text":    stringObj(http.StatusText(resp.StatusCode)),
 		"proto":          stringObj(resp.Proto),
 		"headers":        headerToHash(resp.Header),
-		"content_length": intObj(resp.ContentLength),
-		"chunked":        boolObj(isChunked(resp.TransferEncoding)),
+		"content_length": intObj(contentLength),
+		"chunked":        boolObj(chunked),
 	}), nil)
 }
 
@@ -207,6 +307,9 @@ func HTTPBuildRequest(args ...object.Object) object.Object {
 	b.WriteString("\r\n")
 
 	headers := headersToOrdered(req)
+	if errObj := checkDeclaredLength(BuiltinNameHttpBuildRequest, headers, body); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
 	hasHost := false
 	hasContentLength := false
 	for _, h := range headers {
@@ -237,18 +340,24 @@ func HTTPBuildRequest(args ...object.Object) object.Object {
 }
 
 // HTTPBuildResponse serialises a response hash back into wire bytes.
-// http_build_response(response HASH) -> STRING
+// http_build_response(response HASH, method STRING?) -> STRING
 // Fields: status (default 200), status_text, proto (default HTTP/1.1),
-// headers (HASH), body (STRING). A Content-Length header is added when absent.
+// headers (HASH), body (STRING). A Content-Length header is added when absent,
+// unless the message carries no body: see the gate on bodyAllowed below, and
+// httpResponseMethod for what the optional method is for.
 func HTTPBuildResponse(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
+	if len(args) != 1 && len(args) != 2 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
 	}
 	resp := args[0]
 	if _, ok := resp.(*object.Hash); !ok {
 		if _, ok := resp.(*object.Struct); !ok {
 			return resultAndError(nil, newError("argument 1 to `http_build_response` must be HASH or STRUCT, got %s", resp.Type()))
 		}
+	}
+	method, errObj := httpResponseMethod(BuiltinNameHttpBuildResponse, args, 2)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	status := optInt(resp, "status", 200)
@@ -268,6 +377,31 @@ func HTTPBuildResponse(args ...object.Object) object.Object {
 	b.WriteString("\r\n")
 
 	headers := headersToOrdered(resp)
+	// A message with no body has no length to agree or disagree with, and must
+	// not be given one. See responseBodyAllowed, and httpResponseMethod for why
+	// the method is the only thing that can say a 200 is such a message: the
+	// response to a HEAD request declares the length of the representation that
+	// was asked about, and no body follows it (RFC 9110 section 9.3.2). Without
+	// the method the length check refused to rebuild a HEAD response the read
+	// side can now parse, which would have left a HEAD exchange unrelayable
+	// through a different door than before.
+	bodyAllowed := responseBodyAllowed(status) && method != http.MethodHead
+	if bodyAllowed {
+		if errObj := checkDeclaredLength(BuiltinNameHttpBuildResponse, headers, body); errObj != nil {
+			return resultAndError(nil, errObj)
+		}
+	} else if body != "" {
+		if method == http.MethodHead {
+			return resultAndError(nil, newError(
+				"%s: the response to a HEAD request carries no body, and this one holds %d bytes; "+
+					"bytes after it are read as the start of the next message",
+				BuiltinNameHttpBuildResponse, len(body)))
+		}
+		return resultAndError(nil, newError(
+			"%s: a %d response carries no body, and this one holds %d bytes; "+
+				"bytes after a bodyless status are read as the start of the next message",
+			BuiltinNameHttpBuildResponse, status, len(body)))
+	}
 	hasContentLength := false
 	for _, h := range headers {
 		if strings.EqualFold(h.key, "Content-Length") {
@@ -275,7 +409,7 @@ func HTTPBuildResponse(args ...object.Object) object.Object {
 		}
 	}
 	writeHeaderLines(&b, headers)
-	if !hasContentLength {
+	if !hasContentLength && bodyAllowed {
 		b.WriteString("Content-Length: ")
 		b.WriteString(strconv.Itoa(len(body)))
 		b.WriteString("\r\n")
@@ -293,6 +427,87 @@ func HTTPBuildResponse(args ...object.Object) object.Object {
 type orderedHeader struct {
 	key   string
 	value string
+}
+
+// httpResponseMethod reads the optional argument that says which request a
+// response answers, and returns "" when it is absent.
+//
+// net/http reads exactly one thing off that request: whether the method is the
+// four bytes "HEAD" (noResponseBodyExpected, net/http/transfer.go in go1.26.6).
+// A response to HEAD carries the Content-Length of the representation and no
+// body at all, and only the method says so, so with no request net/http waited
+// for bytes that never arrive and the parse failed with "unexpected EOF"
+// (M26-NET-039). Nothing else about the request is consulted, which is why one
+// string is the whole argument.
+//
+// The comparison over there is byte-for-byte, so "head" would have been framed
+// as a GET -- measured, not assumed -- and the method is upper-cased here, as
+// http_request already upper-cases its own. A method that is not a token is
+// refused rather than quietly treated as a GET, because quietly treating it as
+// a GET is the defect this argument exists to end.
+func httpResponseMethod(opName string, args []object.Object, position int) (string, *object.Error) {
+	if len(args) < position {
+		return "", nil
+	}
+	arg, ok := args[position-1].(*object.String)
+	if !ok {
+		return "", newError("argument %d to `%s` must be STRING, got %s", position, opName, args[position-1].Type())
+	}
+	method := strings.ToUpper(strings.TrimSpace(arg.Value))
+	if !httpIsMethodToken(method) {
+		return "", newError(
+			"%s: %q is not a request method; pass the method the response answers, such as \"HEAD\" or \"GET\"",
+			opName, arg.Value)
+	}
+	return method, nil
+}
+
+// httpIsMethodToken reports whether every byte of s is a token character, which
+// is what a method is -- RFC 9110 section 9.1, and the grammar net/http quotes
+// in its own validMethod (net/http/request.go:844-856 in go1.26.6, which is
+// unexported).
+func httpIsMethodToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// httpRequestForMethod is the request handed to http.ReadResponse so it can
+// frame the body. It is nil when no method was given, which is what every call
+// written before the argument existed passes, and keeps exactly the old
+// behaviour for those.
+func httpRequestForMethod(method string) *http.Request {
+	if method == "" {
+		return nil
+	}
+	return &http.Request{Method: method}
+}
+
+// connTimeoutAndMethod is connAndTimeout plus the optional method argument of
+// the two response readers.
+func connTimeoutAndMethod(opName string, args []object.Object) (*managedConn, int64, string, *object.Error) {
+	if len(args) != 2 && len(args) != 3 {
+		return nil, 0, "", newError("wrong number of arguments. got=%d, want=2 or 3", len(args))
+	}
+	method, errObj := httpResponseMethod(opName, args, 3)
+	if errObj != nil {
+		return nil, 0, "", errObj
+	}
+	mc, timeoutMs, errObj := connAndTimeout(opName, args[:2])
+	if errObj != nil {
+		return nil, 0, "", errObj
+	}
+	return mc, timeoutMs, method, nil
 }
 
 func connAndTimeout(opName string, args []object.Object) (*managedConn, int64, *object.Error) {
@@ -323,10 +538,31 @@ func applyReadDeadline(mc *managedConn, timeoutMs int64) {
 }
 
 func requestToHash(opName string, req *http.Request) (object.Object, *object.Error) {
-	bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxHTTPBodyBytes))
+	// Refused ahead of the body read, and without closing the body: Close()
+	// on a net/http body fully consumes what is left of it
+	// (net/http/transfer.go:1003-1006 in go1.26.6), so closing here would
+	// drain the body of a message just refused -- and against a peer that
+	// declares a body and never sends it, that drain waits for the deadline.
+	// The connection stays the script's to close, as it is on every other
+	// error return in this file (M26-NET-028).
+	if fieldErr := checkHTTPHeaderFields(req.Header); fieldErr != nil {
+		return nil, newError("%s: %s", opName, fieldErr.Error())
+	}
+
+	// The cap plus one is what separates a body that fits from one that does
+	// not. io.LimitReader returns EOF at its bound and io.ReadAll turns EOF
+	// into nil, so reading at exactly maxHTTPBodyBytes gave back the first
+	// 32 MiB of a larger body with no error and no flag, indistinguishable
+	// from the whole of a smaller one (M26-NET-031). Asking for one more byte
+	// makes the overflow observable, and then it is refused: see the cap's own
+	// comment for why a refusal and not a flag.
+	bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxHTTPBodyBytes+1))
 	_ = req.Body.Close()
 	if err != nil {
 		return nil, newError("%s: reading body: %s", opName, err.Error())
+	}
+	if len(bodyBytes) > maxHTTPBodyBytes {
+		return nil, newError("%s: body exceeds %d bytes", opName, maxHTTPBodyBytes)
 	}
 
 	host := req.Host
@@ -353,10 +589,20 @@ func requestToHash(opName string, req *http.Request) (object.Object, *object.Err
 }
 
 func responseToHash(opName string, resp *http.Response) (object.Object, *object.Error) {
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes))
+	// Ahead of the body read and without closing it, for the reason written
+	// out in requestToHash above (M26-NET-028).
+	if fieldErr := checkHTTPHeaderFields(resp.Header); fieldErr != nil {
+		return nil, newError("%s: %s", opName, fieldErr.Error())
+	}
+
+	// The cap plus one, for the reason given in requestToHash.
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBodyBytes+1))
 	_ = resp.Body.Close()
 	if err != nil {
 		return nil, newError("%s: reading body: %s", opName, err.Error())
+	}
+	if len(bodyBytes) > maxHTTPBodyBytes {
+		return nil, newError("%s: body exceeds %d bytes", opName, maxHTTPBodyBytes)
 	}
 
 	return makeHashObject(map[string]object.Object{
@@ -379,16 +625,58 @@ func responseStatusText(resp *http.Response) string {
 	return http.StatusText(resp.StatusCode)
 }
 
+// headerToHash turns a header block into a hash.
+//
+// A field that arrived on more than one line is combined into one
+// comma-separated value, which RFC 9110 section 5.3 permits for any field whose
+// value is defined as a comma-separated list -- and which it names exactly one
+// exception to: Set-Cookie, which does not use list syntax and may not be
+// folded. RFC 6265 section 3 says the same from the other side.
+//
+// Joining it was not a cosmetic loss. A cookie's Expires date carries a comma
+// of its own ("Expires=Wed, 21 Oct 2026 07:28:00 GMT"), so two cookies joined
+// with ", " cannot be split back apart by anything, and a response that arrived
+// with two Set-Cookie lines was rebuilt with one holding both -- one malformed
+// cookie where the server sent two, with the second silently gone. For an
+// interception proxy that is a session the client never receives; for a
+// recorded response it is evidence that says the server sent something it did
+// not.
+//
+// So Set-Cookie is a list here, one element per line, and it is a list whether
+// there is one cookie or five: a field whose type depended on how many values
+// happened to arrive would need every script to handle both. Every other field
+// stays a string, so nothing that reads headers["Content-Type"] changes.
 func headerToHash(header http.Header) *object.Hash {
 	pairs := make(map[string]object.Object, len(header))
 	for k, vals := range header {
+		if headerMustNotBeCombined(k) {
+			// stringListObj and not stringArrayObj: cookie order is meaning.
+			// Two Set-Cookie lines naming the same cookie leave the last one
+			// standing, so sorting them could change which.
+			pairs[k] = stringListObj(vals)
+			continue
+		}
 		pairs[k] = stringObj(strings.Join(vals, ", "))
 	}
 	return makeHashObject(pairs)
 }
 
+// headerMustNotBeCombined reports whether a field's lines have to stay apart.
+//
+// One field, and it is named rather than guessed at: RFC 9110 section 5.3 gives
+// the rule and the sole exception to it. The name is canonicalised first,
+// because a peer may have spelled it "set-cookie" and http.Header's own keys
+// are canonical.
+func headerMustNotBeCombined(name string) bool {
+	return textproto.CanonicalMIMEHeaderKey(name) == "Set-Cookie"
+}
+
 // headersToOrdered extracts a deterministic, sorted header list from a request
 // or response hash so serialisation is reproducible.
+//
+// An entry holding a list stands for one field line per element, which is how a
+// Set-Cookie that arrived on two lines goes back out on two -- see
+// headerToHash for why that field cannot be folded into one.
 func headersToOrdered(obj object.Object) []orderedHeader {
 	val, ok := objField(obj, "headers")
 	if !ok {
@@ -403,16 +691,91 @@ func headersToOrdered(obj object.Object) []orderedHeader {
 			if !ok {
 				continue
 			}
-			out = append(out, orderedHeader{key: key.Value, value: headerValueString(pair.Value)})
+			out = append(out, orderedHeaderLines(key.Value, pair.Value)...)
 		}
 	case *object.Struct:
 		for k, v := range h.Fields {
-			out = append(out, orderedHeader{key: k, value: headerValueString(v)})
+			out = append(out, orderedHeaderLines(k, v)...)
 		}
 	}
 
-	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
+	// SliceStable, not Slice. Two lines of the same field sort equal, and an
+	// unstable sort is free to swap them -- which for Set-Cookie decides which
+	// of two cookies of the same name the client keeps.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].key < out[j].key })
 	return out
+}
+
+// orderedHeaderLines turns one hash entry into the field lines it stands for.
+func orderedHeaderLines(key string, value object.Object) []orderedHeader {
+	arr, ok := value.(*object.Array)
+	if !ok {
+		return []orderedHeader{{key: key, value: headerValueString(value)}}
+	}
+	out := make([]orderedHeader, 0, len(arr.Elements))
+	for _, element := range arr.Elements {
+		out = append(out, orderedHeader{key: key, value: headerValueString(element)})
+	}
+	return out
+}
+
+// responseBodyAllowed reports whether a response with this status may carry a
+// body at all.
+//
+// The three cases are RFC 9110's and net/http's alike: every 1xx, a 204 and a
+// 304. For those, Content-Length is not a statement about this message's body
+// and the two cannot be compared -- a 304's Content-Length describes the cached
+// representation the recipient already holds, which an interception proxy never
+// sees, so it parses to an empty body with the header intact and that is
+// correct. RFC 9110 section 8.6 also forbids sending Content-Length at all in a
+// 1xx or a 204, which is why nothing is added for these either.
+func responseBodyAllowed(status int64) bool {
+	return status >= 200 && status != 204 && status != 304
+}
+
+// checkDeclaredLength refuses a Content-Length that disagrees with the body it
+// is about.
+//
+// http_build_request and http_build_response write the caller's headers out as
+// they are and add a Content-Length only when none is there, which meant the
+// one thing these builtins exist for broke them: parse a message, change the
+// body, rebuild it. The parsed hash carries the original Content-Length, so a
+// body of any other length produced a message declaring the old one -- a 12-byte
+// body under "Content-Length: 5". A receiver believes the header, so the next
+// hop reads five bytes of this message and then starts parsing the remaining
+// seven as the beginning of another one. That is a desynchronised connection,
+// and it is the kind that request smuggling is built out of (M26-NET-016).
+//
+// It refuses rather than quietly rewriting the number. The header is the
+// caller's explicit instruction about this message and silently replacing it
+// would be a different answer than the one asked for; the refusal says what to
+// do instead, and dropping the header is a one-line change that gets a correct
+// length computed. A deliberately inconsistent message -- which is a real thing
+// to want to send, for smuggling research against a host under test -- is
+// written with net_conn_write and a string, which these builtins are not in the
+// way of.
+func checkDeclaredLength(opName string, headers []orderedHeader, body string) *object.Error {
+	seen := false
+	for _, h := range headers {
+		if !strings.EqualFold(h.key, "Content-Length") {
+			continue
+		}
+		if seen {
+			return newError("%s: two Content-Length headers; a message declares its length once", opName)
+		}
+		seen = true
+		declared, err := strconv.Atoi(strings.TrimSpace(h.value))
+		if err != nil {
+			return newError("%s: Content-Length %q is not a number", opName, h.value)
+		}
+		if declared != len(body) {
+			return newError(
+				"%s: Content-Length declares %d bytes and the body holds %d; "+
+					"drop the header and a correct one is written for you",
+				opName, declared, len(body))
+		}
+	}
+	return nil
 }
 
 func headerValueString(v object.Object) string {

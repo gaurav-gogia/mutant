@@ -9,6 +9,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	saferpe "github.com/saferwall/pe"
 
@@ -241,9 +243,10 @@ func BinEntropy(args ...object.Object) object.Object {
 }
 
 // BinYaraScan is NOT a YARA engine (a real one requires cgo/libyara, which this
-// project forbids). It performs literal multi-string matching, reporting every
-// offset of each rule string. Matching is case-sensitive by default; pass a third
-// boolean argument to match case-insensitively.
+// project forbids). It performs literal multi-string matching, reporting the start
+// of every non-overlapping match of each rule string as a byte offset into the
+// file. Matching is case-sensitive by default; pass a third boolean argument to
+// match case-insensitively (caseFoldMatcher says what that matches).
 func BinYaraScan(args ...object.Object) object.Object {
 	if len(args) != 2 && len(args) != 3 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=2 or 3", len(args)))
@@ -270,9 +273,17 @@ func BinYaraScan(args ...object.Object) object.Object {
 	if err != nil {
 		return resultAndError(nil, newError("bin_yara_scan: %s", err.Error()))
 	}
-	haystack := string(data)
+	// Case-insensitive matching does not lower the whole file with
+	// strings.ToLower. That writes the three bytes of U+FFFD for every byte that
+	// is not valid UTF-8, and a lowered rune can be longer or shorter than the
+	// original, so an offset found in the lowered text is not an offset into the
+	// file. caseFoldMatcher reports offsets into the file itself.
+	var haystack string
+	var folder *caseFoldMatcher
 	if caseInsensitive {
-		haystack = strings.ToLower(haystack)
+		folder = &caseFoldMatcher{data: data}
+	} else {
+		haystack = string(data)
 	}
 
 	hits := make([]object.Object, 0)
@@ -283,13 +294,15 @@ func BinYaraScan(args ...object.Object) object.Object {
 			return resultAndError(nil, newError("argument 2 to `bin_yara_scan` must contain STRING rules. element %d got %s", i, ruleObj.Type()))
 		}
 		pattern := ruleStr.Value
-		if caseInsensitive {
-			pattern = strings.ToLower(pattern)
-		}
 		if pattern == "" {
 			continue
 		}
-		offsets := allSubstringOffsets(haystack, pattern)
+		var offsets []int
+		if caseInsensitive {
+			offsets = folder.offsets(pattern)
+		} else {
+			offsets = allSubstringOffsets(haystack, pattern)
+		}
 		if len(offsets) == 0 {
 			continue
 		}
@@ -332,6 +345,214 @@ func allSubstringOffsets(haystack, needle string) []int {
 		start += idx + len(needle)
 	}
 	return out
+}
+
+// caseFoldMatcher finds the case-insensitive matches of bin_yara_scan rules in
+// one file.
+//
+// What matches: a rune of the rule matches a valid UTF-8 sequence in the file
+// whose rune lowers, by unicode.ToLower (the mapping strings.ToLower applies), to
+// the rune the rule's own rune lowers to. A byte of the rule that is not part of a
+// valid UTF-8 sequence matches only that same byte, wherever it is in the file,
+// so a rule matches at every offset where its own bytes are. A byte of the file
+// that is not part of a valid sequence is never matched by a rune, not even by
+// U+FFFD. A match can span a different number of bytes from the rule: the
+// three-byte KELVIN SIGN (U+212A) lowers to, and so matches, "k".
+//
+// Every offset reported is a byte offset into the file. Matches do not overlap:
+// the search for the next one starts where the last one ended, as in
+// allSubstringOffsets.
+type caseFoldMatcher struct {
+	data    []byte
+	lowered *foldedHaystack // built by the first rule that is valid UTF-8
+}
+
+// offsets returns the file offset of every non-overlapping match of rule, which
+// must not be empty. A rule that is valid UTF-8 -- every text rule -- is found
+// with bytes.Index in a lowered copy of the file, built once and shared by every
+// such rule. A rule holding any other byte is walked against the file itself,
+// because that byte has to be compared with the file's own byte, which the
+// lowered copy does not always hold (a lowered rune is not the bytes it came
+// from).
+func (m *caseFoldMatcher) offsets(rule string) []int {
+	if !utf8.ValidString(rule) {
+		return caseFoldWalk(m.data, rule)
+	}
+	if m.lowered == nil {
+		m.lowered = foldHaystack(m.data)
+	}
+	return m.lowered.offsets(strings.ToLower(rule))
+}
+
+// foldedHaystack is a file lowered for case-insensitive matching of rules that
+// are valid UTF-8. Each valid UTF-8 sequence is replaced by the encoding of its
+// rune lowered by unicode.ToLower, and each byte that is not part of one is kept
+// as it is, where strings.ToLower would write the three bytes of U+FFFD.
+//
+// That makes a match in the lowered copy a match of whole lowered runes. A valid
+// rule's first byte is never a continuation byte, so a match starts where a
+// lowered rune or a kept byte starts. It never covers a kept byte: a lowered rune
+// never starts with a continuation byte, so in the copy a kept byte is followed by
+// continuation bytes only when the file had them right after it too, and a kept
+// byte that began a valid sequence of the rule would have begun the same sequence
+// in the file and been decoded with it, not kept. U+FFFD in a rule therefore only
+// matches a U+FFFD that is in the file.
+//
+// What the copy does not keep is the offsets: a lowered rune can be longer or
+// shorter than the original (U+212A, three bytes, lowers to the one-byte "k";
+// U+023A, two bytes, lowers to the three-byte U+2C65). So the copy carries marks,
+// pairs of positions known to line up, and a position is mapped back to the file
+// by walking forward, a rune or a byte at a time, from the nearest point at or
+// before it where the two line up. Marks are spaced by the file, not by how many
+// runes change length, so what they cost stays a small fraction of the file
+// however it was written.
+type foldedHaystack struct {
+	data    []byte
+	lowered []byte
+	// marks[k] is where the first rune or byte to start at or after file
+	// offset k*foldMarkStride starts in both.
+	marks []foldMark
+}
+
+// foldMark is a place where the file and its lowered copy line up: the rune or
+// byte that starts at offset file starts at offset lowered of the copy.
+type foldMark struct {
+	file    int
+	lowered int
+}
+
+// foldMarkStride is how many bytes of the file lie between two marks of a
+// foldedHaystack: about the most that mapping one match back to the file walks.
+// The marks cost two ints per stride of the file.
+const foldMarkStride = 1024
+
+func foldHaystack(data []byte) *foldedHaystack {
+	h := &foldedHaystack{data: data, lowered: make([]byte, 0, len(data))}
+	for i := 0; i < len(data); {
+		if i >= len(h.marks)*foldMarkStride {
+			h.marks = append(h.marks, foldMark{file: i, lowered: len(h.lowered)})
+		}
+		lower, width, valid := foldUnit(data, i)
+		if valid {
+			h.lowered = utf8.AppendRune(h.lowered, lower)
+		} else {
+			h.lowered = append(h.lowered, data[i])
+		}
+		i += width
+	}
+	return h
+}
+
+// foldUnit reads the rune or byte of data that starts at offset i: a valid UTF-8
+// sequence, which it returns lowered by unicode.ToLower with valid set, or one byte
+// that is not part of a valid sequence, which is kept as it is (valid unset). A
+// U+FFFD written in the file is a valid sequence like any other, lowered to
+// itself. width is how many bytes of data it took up.
+func foldUnit(data []byte, i int) (lower rune, width int, valid bool) {
+	if c := data[i]; c < utf8.RuneSelf {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		return rune(c), 1, true
+	}
+	r, width := utf8.DecodeRune(data[i:])
+	if r == utf8.RuneError && width == 1 {
+		return 0, 1, false
+	}
+	return unicode.ToLower(r), width, true
+}
+
+// offsets returns the file offset of every non-overlapping match of rule, a
+// non-empty valid UTF-8 string already lowered by strings.ToLower.
+func (h *foldedHaystack) offsets(rule string) []int {
+	needle := []byte(rule)
+	out := make([]int, 0)
+	var at foldMark // where the last match was mapped; the start lines up too
+	for start := 0; start <= len(h.lowered)-len(needle); {
+		idx := bytes.Index(h.lowered[start:], needle)
+		if idx < 0 {
+			break
+		}
+		at = h.walkTo(at, start+idx)
+		out = append(out, at.file)
+		start += idx + len(needle)
+	}
+	return out
+}
+
+// walkTo maps pos, a position of the lowered copy at which a lowered rune or a
+// kept byte starts, back to the file: it walks forward from from, a point at or
+// before pos where the two line up, or from the last mark at or before pos when
+// that is nearer.
+func (h *foldedHaystack) walkTo(from foldMark, pos int) foldMark {
+	k := sort.Search(len(h.marks), func(k int) bool { return h.marks[k].lowered > pos }) - 1
+	if k >= 0 && h.marks[k].lowered > from.lowered {
+		from = h.marks[k]
+	}
+	for from.lowered < pos {
+		lower, width, valid := foldUnit(h.data, from.file)
+		from.file += width
+		if valid {
+			from.lowered += utf8.RuneLen(lower)
+		} else {
+			from.lowered++
+		}
+	}
+	return from
+}
+
+// caseFoldWalk returns the file offset of every non-overlapping
+// caseFoldMatcher match of rule, a non-empty string that is not valid UTF-8,
+// trying each offset of data in turn.
+func caseFoldWalk(data []byte, rule string) []int {
+	first, firstWidth := utf8.DecodeRuneInString(rule)
+	firstIsByte := first == utf8.RuneError && firstWidth == 1
+	out := make([]int, 0)
+	for at := 0; at < len(data); {
+		if firstIsByte {
+			// The rule starts with a byte that matches only itself, so no
+			// match starts anywhere else.
+			idx := bytes.IndexByte(data[at:], rule[0])
+			if idx < 0 {
+				break
+			}
+			at += idx
+		}
+		if end, ok := caseFoldMatchAt(data, at, rule); ok {
+			out = append(out, at)
+			at = end
+			continue
+		}
+		at++
+	}
+	return out
+}
+
+// caseFoldMatchAt reports whether rule matches data at offset at, and the offset
+// in data at which the match ends.
+func caseFoldMatchAt(data []byte, at int, rule string) (int, bool) {
+	pos := at
+	for k := 0; k < len(rule); {
+		if pos >= len(data) {
+			return 0, false
+		}
+		r, width := utf8.DecodeRuneInString(rule[k:])
+		if r == utf8.RuneError && width == 1 {
+			if data[pos] != rule[k] {
+				return 0, false
+			}
+			pos++
+			k++
+			continue
+		}
+		lower, dataWidth, valid := foldUnit(data, pos)
+		if !valid || lower != unicode.ToLower(r) {
+			return 0, false
+		}
+		pos += dataWidth
+		k += width
+	}
+	return pos, true
 }
 
 func BinImports(args ...object.Object) object.Object {

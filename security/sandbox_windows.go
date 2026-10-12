@@ -25,16 +25,17 @@ const (
 	windowsSandboxTypeKVMQEMU    = "KVM/QEMU"
 	windowsSandboxTypeHyperV     = "Hyper-V"
 	windowsSandboxTypeVM         = "VM"
+	windowsSandboxTypePosixShell = "MSYS/Cygwin or legacy WSL"
 
 	windowsConfidenceFileDriver        = 80
 	windowsConfidenceSandboxieFile     = 85
 	windowsConfidenceSandboxieEnv      = 85
 	windowsConfidenceCuckooEnv         = 85
-	windowsConfidenceVboxEnv           = 70
 	windowsConfidenceWslContextEnv     = 95
 	windowsConfidenceWslEnvOnly        = 35
 	windowsConfidenceWslCwd            = 90
 	windowsConfidenceWslParent         = 90
+	windowsConfidenceBashParent        = 90
 	windowsConfidenceWdagSignals       = 95
 	windowsConfidenceVmProcessTools    = 70
 	windowsConfidenceHyperVIntegration = 80
@@ -55,7 +56,6 @@ const (
 
 	windowsEnvSandboxie     = "SANDBOXIE"
 	windowsEnvCuckoo        = "CUCKOO"
-	windowsEnvVBoxInstall   = "VBOX_INSTALL_PATH"
 	windowsEnvUsername      = "USERNAME"
 	windowsEnvUserProfile   = "USERPROFILE"
 	windowsEnvWSLInterop    = "WSL_INTEROP"
@@ -72,13 +72,13 @@ const (
 	windowsIndicatorFileSandboxieDLL  = "windows:file:sbiedll.dll"
 	windowsIndicatorEnvSandboxie      = "windows:env:sandboxie"
 	windowsIndicatorEnvCuckoo         = "windows:env:cuckoo"
-	windowsIndicatorEnvVboxInstall    = "windows:env:vbox_install_path"
 	windowsIndicatorEnvWSLContext     = "windows:env:wsl_context"
 	windowsIndicatorEnvWSLEnvOnly     = "windows:env:wslenv_only"
 	windowsIndicatorEnvWdagUser       = "windows:env:wdag_utility_account"
 	windowsIndicatorEnvWdagProfile    = "windows:env:userprofile_wdag"
 	windowsIndicatorCwdWSLUNC         = "windows:cwd:wsl_unc_path"
 	windowsIndicatorParentWSL         = "windows:process_parent:wsl"
+	windowsIndicatorParentBash        = "windows:process_parent:bash"
 	windowsIndicatorProcVMwareTools   = "windows:process:vmware_tools"
 	windowsIndicatorProcVboxTools     = "windows:process:virtualbox_tools"
 	windowsIndicatorProcXenService    = "windows:process:xenservice"
@@ -126,7 +126,8 @@ var (
 		"vmickvpexchange.exe",
 	}
 	windowsHyperVHostProcesses = []string{"vmcompute.exe", "vmwp.exe", "vmms.exe"}
-	windowsWSLParentNames      = []string{"wsl.exe", "wslhost.exe", "bash.exe"}
+	windowsWSLParentNames      = []string{"wsl.exe", "wslhost.exe"}
+	windowsBashParentNames     = []string{"bash.exe"}
 
 	modkernel32                = syscall.NewLazyDLL("kernel32.dll")
 	procGetSystemFirmwareTable = modkernel32.NewProc("GetSystemFirmwareTable")
@@ -158,30 +159,33 @@ func detectSandboxWindows() (sandboxDetection, error) {
 	if envSet(windowsEnvCuckoo) {
 		add(windowsSandboxTypeCuckoo, windowsConfidenceCuckooEnv, windowsIndicatorEnvCuckoo)
 	}
-	if envSet(windowsEnvVBoxInstall) {
-		add(windowsSandboxTypeVirtualBox, windowsConfidenceVboxEnv, windowsIndicatorEnvVboxInstall)
-	}
+	// VBOX_INSTALL_PATH and VBOX_MSI_INSTALL_PATH are not read. VirtualBox's
+	// installers set them, older ones the first and the current one the second,
+	// on the machine they install VirtualBox on: a host that runs guests rather
+	// than one of them. The first scored a VirtualBox guest at the threshold on
+	// its own, so secure mode refused to run on such a host (M26-TMP-012). A
+	// VirtualBox guest is recognised by the drivers and processes of its Guest
+	// Additions instead.
 	addWindowsEnvIndicators(os.LookupEnv, add)
 	if wd, err := os.Getwd(); err == nil {
 		addWindowsWSLCwdIndicators(wd, add)
 	}
 	if parent, err := getWindowsParentProcessName(os.Getppid); err == nil {
-		addWindowsWSLParentIndicators(parent, add)
+		addWindowsParentProcessIndicators(parent, add)
 	}
 
 	if user, ok := os.LookupEnv(windowsEnvUsername); ok && strings.EqualFold(strings.TrimSpace(user), windowsWdagUtilityAccount) {
 		add(windowsSandboxTypeWindowsSB, windowsConfidenceWdagSignals, windowsIndicatorEnvWdagUser)
 	}
 	if profile, ok := os.LookupEnv(windowsEnvUserProfile); ok {
-		profile = strings.ToLower(strings.TrimSpace(profile))
-		if strings.Contains(profile, windowsPathWdagProfile) {
+		if isWindowsWdagProfilePath(profile) {
 			add(windowsSandboxTypeWindowsSB, windowsConfidenceWdagSignals, windowsIndicatorEnvWdagProfile)
 		}
 	}
 
 	hyperVHostRoleDetected := false
-	if out, err := exec.Command("tasklist").CombinedOutput(); err == nil {
-		procs := strings.ToLower(string(out))
+	if out, err := exec.Command("tasklist", "/fo", "csv", "/nh").CombinedOutput(); err == nil {
+		procs := windowsImageNames(string(out))
 		addWindowsProcessIndicators(procs, add)
 		hyperVHostRoleDetected = hasWindowsHyperVHostProcesses(procs)
 	}
@@ -303,8 +307,26 @@ func isWindowsHyperVPnPOutput(pnpOutput string) bool {
 	return strings.Contains(out, "vmbus") || strings.Contains(out, "virtual machine bus") || strings.Contains(out, "hyper-v heartbeat") || strings.Contains(out, "hyper-v guest shutdown")
 }
 
-func hasWindowsHyperVHostProcesses(procs string) bool {
-	return containsAny(strings.ToLower(procs), windowsHyperVHostProcesses)
+// isWindowsWdagProfilePath reports whether a USERPROFILE is the Windows Sandbox
+// account's own profile directory, which is C:\Users\WDAGUtilityAccount.
+//
+// The path has to end there. One that merely holds the fragment is a different
+// directory -- a copy of that profile kept somewhere, say -- and this signal is
+// worth 95 on its own, so reading a folder name as the sandbox halts the run.
+func isWindowsWdagProfilePath(profile string) bool {
+	path := strings.ToLower(strings.TrimSpace(profile))
+	return strings.HasSuffix(strings.TrimRight(path, `\/`), windowsPathWdagProfile)
+}
+
+// hasWindowsHyperVHostProcesses reports whether the Hyper-V host's own service
+// processes are running, which means this machine is the host rather than one
+// of its guests.
+//
+// It gates three guest signals off, so a name that merely holds one of these --
+// notvmwp.exe would do it -- is not a false alarm but its opposite: every
+// Hyper-V guest signal the detector has, suppressed, on a machine that is one.
+func hasWindowsHyperVHostProcesses(procs map[string]struct{}) bool {
+	return hasAnyImageName(procs, windowsHyperVHostProcesses)
 }
 
 func isWindowsRegistryVirtualMachineKeyOutput(out string) bool {
@@ -318,27 +340,32 @@ func isWindowsHyperVRegistryBIOSOutput(systemManufacturerOut string, systemProdu
 	return strings.Contains(manufacturer, "microsoft corporation") && strings.Contains(product, "virtual machine")
 }
 
-func addWindowsProcessIndicators(procs string, add func(kind string, confidence int, indicator string)) {
-	procs = strings.ToLower(procs)
+// windowsProcessSignals are the guest tools and integration services that a
+// hypervisor installs inside the machines it runs, and the type each one names.
+//
+// Every name is compared exactly against the listing's own image names, and
+// every confidence here is at or above the threshold, so a name that merely
+// holds one of these is not a near miss: it is a halt. They are a table rather
+// than a run of ifs so that the rule they share is stated once.
+var windowsProcessSignals = []struct {
+	names      []string
+	kind       string
+	confidence int
+	mark       string
+}{
+	{[]string{"vmtoolsd.exe", "vmwaretray.exe"}, windowsSandboxTypeVMware, windowsConfidenceVmProcessTools, windowsIndicatorProcVMwareTools},
+	{[]string{"vboxservice.exe", "vboxtray.exe"}, windowsSandboxTypeVirtualBox, windowsConfidenceVmProcessTools, windowsIndicatorProcVboxTools},
+	{[]string{"xenservice.exe"}, windowsSandboxTypeXen, windowsConfidenceVmProcessTools, windowsIndicatorProcXenService},
+	{[]string{"qemu-ga.exe"}, windowsSandboxTypeKVMQEMU, windowsConfidenceVmProcessTools, windowsIndicatorProcQemuAgent},
+	{[]string{"sbiectrl.exe", "sandboxiedcomlaunch.exe"}, windowsSandboxTypeSandboxie, windowsConfidenceSandboxieEnv, windowsIndicatorProcSandboxie},
+	{windowsHyperVProcesses, windowsSandboxTypeHyperV, windowsConfidenceHyperVIntegration, windowsIndicatorProcHyperVGuest},
+}
 
-	if strings.Contains(procs, "vmtoolsd.exe") || strings.Contains(procs, "vmwaretray.exe") {
-		add(windowsSandboxTypeVMware, windowsConfidenceVmProcessTools, windowsIndicatorProcVMwareTools)
-	}
-	if strings.Contains(procs, "vboxservice.exe") || strings.Contains(procs, "vboxtray.exe") {
-		add(windowsSandboxTypeVirtualBox, windowsConfidenceVmProcessTools, windowsIndicatorProcVboxTools)
-	}
-	if strings.Contains(procs, "xenservice.exe") {
-		add(windowsSandboxTypeXen, windowsConfidenceVmProcessTools, windowsIndicatorProcXenService)
-	}
-	if strings.Contains(procs, "qemu-ga.exe") {
-		add(windowsSandboxTypeKVMQEMU, windowsConfidenceVmProcessTools, windowsIndicatorProcQemuAgent)
-	}
-	if strings.Contains(procs, "sbiectrl.exe") || strings.Contains(procs, "sandboxiedcomlaunch.exe") {
-		add(windowsSandboxTypeSandboxie, windowsConfidenceSandboxieEnv, windowsIndicatorProcSandboxie)
-	}
-
-	if containsAny(procs, windowsHyperVProcesses) {
-		add(windowsSandboxTypeHyperV, windowsConfidenceHyperVIntegration, windowsIndicatorProcHyperVGuest)
+func addWindowsProcessIndicators(procs map[string]struct{}, add func(kind string, confidence int, indicator string)) {
+	for _, signal := range windowsProcessSignals {
+		if hasAnyImageName(procs, signal.names) {
+			add(signal.kind, signal.confidence, signal.mark)
+		}
 	}
 }
 
@@ -364,10 +391,32 @@ func addWindowsWSLCwdIndicators(cwd string, add func(kind string, confidence int
 	}
 }
 
-func addWindowsWSLParentIndicators(parentName string, add func(kind string, confidence int, indicator string)) {
+// addWindowsParentProcessIndicators scores the parent process image name.
+//
+// Two names mean WSL: wsl.exe and wslhost.exe. bash.exe is scored separately,
+// under a type that names both of the things it can be, because it cannot be
+// narrowed any further here -- getWindowsParentProcessName returns tasklist's
+// image-name column, which is a basename and never a path, so an MSYS, Git for
+// Windows or Cygwin shell and the legacy WSL launcher are the same string at
+// this point. Scoring it as WSL told a plain Windows host with no WSL installed
+// that it was running under WSL. The halt that follows is intended: an emulated
+// shell is one of the environments this detector exists to notice.
+//
+// A real WSL run is still reported as WSL rather than under the ambiguous type.
+// It scores WSL from its context environment (95) and its UNC working directory
+// (90) as well, and finalizeWindowsDetection prefers WSL where those tie with
+// this 90.
+//
+// Each name is compared whole, and not as a substring: a parent named
+// notwsl.exe or mywsl.exe holds "wsl.exe" and gitbash.exe holds "bash.exe", so
+// each of them scored 90 as WSL without being WSL (M26-TMP-003).
+func addWindowsParentProcessIndicators(parentName string, add func(kind string, confidence int, indicator string)) {
 	parent := strings.ToLower(strings.TrimSpace(parentName))
-	if containsAny(parent, windowsWSLParentNames) {
+	if equalsAny(parent, windowsWSLParentNames) {
 		add(windowsSandboxTypeWSL, windowsConfidenceWslParent, windowsIndicatorParentWSL)
+	}
+	if equalsAny(parent, windowsBashParentNames) {
+		add(windowsSandboxTypePosixShell, windowsConfidenceBashParent, windowsIndicatorParentBash)
 	}
 }
 
@@ -439,6 +488,7 @@ func finalizeWindowsDetection(typeScore map[string]int, indicators []string) san
 		windowsSandboxTypeSandboxie:  80,
 		windowsSandboxTypeCuckoo:     80,
 		windowsSandboxTypeWSL:        70,
+		windowsSandboxTypePosixShell: 65,
 		windowsSandboxTypeVM:         60,
 	}
 

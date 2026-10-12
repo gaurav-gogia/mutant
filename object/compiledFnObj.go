@@ -3,6 +3,7 @@ package object
 import (
 	"fmt"
 	"mutant/code"
+	"strings"
 )
 
 type CompiledFunction struct {
@@ -78,4 +79,41 @@ type CompiledFunction struct {
 }
 
 func (cf *CompiledFunction) Type() ObjectType { return COMPILED_FN_OBJ }
-func (cf *CompiledFunction) Inspect() string  { return fmt.Sprintf("Compiled Function[%p]", cf) }
+
+// Inspect renders the function as its source declared it: `fn mean(values)`
+// for one bound to a name, `fn(values)` for an anonymous literal. It never
+// prints an address: one made a program that ends on a function print
+// something different on every run, and told a reader nothing about which
+// function it was (M26-EVL-002).
+//
+// Name and Params are debug info, and a release build strips both -- see
+// compiler.ByteCode.StripDebugInfo. The parameter count survives, so such a
+// function renders as `fn(<2 parameters>)`; the angle brackets keep that from
+// reading as a parameter list a source file could have written.
+//
+// This names a function for a reader and is not its identity: two closures
+// over one function render alike, and so do two anonymous literals that take
+// the same parameters.
+func (cf *CompiledFunction) Inspect() string {
+	if cf == nil {
+		return "fn()"
+	}
+
+	var out strings.Builder
+	out.WriteString("fn")
+	if cf.Name != "" {
+		out.WriteString(" ")
+		out.WriteString(cf.Name)
+	}
+	out.WriteString("(")
+	switch {
+	case len(cf.Params) > 0:
+		out.WriteString(strings.Join(cf.Params, ", "))
+	case cf.NumParams == 1:
+		out.WriteString("<1 parameter>")
+	case cf.NumParams > 1:
+		fmt.Fprintf(&out, "<%d parameters>", cf.NumParams)
+	}
+	out.WriteString(")")
+	return out.String()
+}

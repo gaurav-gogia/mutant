@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,9 +188,9 @@ func TestCollectMutantTestFilesFiltersSuffix(t *testing.T) {
 		"notes.txt":  "let a = 1;\n",
 	})
 
-	files, err := collectMutantTestFiles([]string{dir})
-	if err != nil {
-		t.Fatal(err)
+	files, problems := collectMutantTestFiles([]string{dir})
+	if len(problems) != 0 {
+		t.Fatalf("collection reported problems on a clean tree: %v", problems)
 	}
 	if len(files) != 2 {
 		t.Fatalf("expected 2 *_test.mut files, got %d: %v", len(files), files)
@@ -271,5 +272,43 @@ test("third", fn() { assert(true); });
 	want := "first:pass second:fail third:skip"
 	if got := strings.Join(outcomes(report, "f_test.mut"), " "); got != want {
 		t.Errorf("--fail-fast produced %q, want %q", got, want)
+	}
+}
+
+// Every count in a --json totals object is written even when it is zero, which
+// is what the comment on testEvent.Totals says and what files, files_failed and
+// files_not_run did not do: a passing run carried no files_failed, so a CI
+// check reading it got the absent-or-none puzzle the nesting exists to avoid.
+//
+// The keys are read out of the encoded object rather than compared against a
+// struct, because the defect was in the tags and nothing else would see it.
+// (M26-TOOL-029)
+func TestJSONSummaryAlwaysCarriesFileCounts(t *testing.T) {
+	encoded, err := json.Marshal(testTotals{}.event())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"files", "files_failed", "files_not_run", "tests", "tests_failed", "tests_skipped"}
+	for _, key := range want {
+		raw, present := decoded[key]
+		if !present {
+			t.Errorf("an all-zero totals object left out %q: %s", key, encoded)
+			continue
+		}
+		if string(raw) != "0" {
+			t.Errorf("totals[%q] = %s on an all-zero object, want 0", key, raw)
+		}
+	}
+
+	// A count added later is a decision about the documented shape, so it has
+	// to be made here rather than appear in the output unremarked.
+	if len(decoded) != len(want) {
+		t.Errorf("totals carries %d fields, want exactly %v: %s", len(decoded), want, encoded)
 	}
 }

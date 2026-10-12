@@ -55,6 +55,31 @@ func PrefetchParse(args ...object.Object) (result object.Object) {
 	return resultAndError(makeHashObject(parsed), nil)
 }
 
+// Where each version keeps its last run times and its run count, after libyal's
+// libscca and PECmd, which agree. The section offsets (0x54..0x77) are shared by
+// every version.
+//
+// Version 30 has two layouts of its file information. The first ends at 0x130
+// and keeps the run count at 0xD0. The second, which later Windows 10 builds and
+// Windows 11 write, leaves out eight bytes before the run count, so it ends at
+// 0x128 and keeps the run count at 0xC8. The file says which one it is: the
+// file metrics array starts where the file information ends, and the offset at
+// 0x54 says where that is.
+//
+//mutant:format libyal libscca, Windows Prefetch File (PF) format, file information
+const (
+	pfMetricsOffsetField = 0x54
+	pfV17RunTime         = 0x78
+	pfV17RunCount        = 0x90
+	pfV23RunTime         = 0x80
+	pfV23RunCount        = 0x98
+	pfRunTimes           = 0x80
+	pfRunTimeSlots       = 8
+	pfRunCount           = 0xD0
+	pfShortInfoEnd       = 0x128
+	pfShortInfoRunCount  = 0xC8
+)
+
 // parsePrefetch decodes an uncompressed SCCA prefetch buffer.
 func parsePrefetch(data []byte) (map[string]object.Object, error) {
 	if len(data) < 84 {
@@ -68,18 +93,22 @@ func parsePrefetch(data []byte) (map[string]object.Object, error) {
 	exeName := decodeUTF16Z(data[0x10:0x4C])
 	hash := binary.LittleEndian.Uint32(data[0x4C:0x50])
 
-	// Run-time / run-count offsets are the only version-specific pieces; the
-	// section-offset table (0x54..0x77) is shared across v17/v23/v26/v30.
+	// Run-time / run-count offsets are the only version-specific pieces.
 	var runTimesOff, runTimesCount, runCountOff int
 	switch version {
 	case 17: // Windows XP / 2003
-		runTimesOff, runTimesCount, runCountOff = 0x78, 1, 0x90
+		runTimesOff, runTimesCount, runCountOff = pfV17RunTime, 1, pfV17RunCount
 	case 23: // Windows Vista / 7
-		runTimesOff, runTimesCount, runCountOff = 0x80, 1, 0x98
+		runTimesOff, runTimesCount, runCountOff = pfV23RunTime, 1, pfV23RunCount
 	case 26: // Windows 8.1
-		runTimesOff, runTimesCount, runCountOff = 0x80, 8, 0xD0
+		runTimesOff, runTimesCount, runCountOff = pfRunTimes, pfRunTimeSlots, pfRunCount
 	case 30, 31: // Windows 10 / 11
-		runTimesOff, runTimesCount, runCountOff = 0x80, 8, 0xD0
+		runTimesOff, runTimesCount, runCountOff = pfRunTimes, pfRunTimeSlots, pfRunCount
+		// The shorter layout read at 0xD0 reported a field that is not the run
+		// count, on every file a current Windows writes (M26-ART-002).
+		if pfLE32(data, pfMetricsOffsetField) == pfShortInfoEnd {
+			runCountOff = pfShortInfoRunCount
+		}
 	default:
 		// Unknown version: still return the header fields we trust.
 		runTimesOff, runTimesCount, runCountOff = 0, 0, 0
@@ -127,6 +156,35 @@ func parsePrefetch(data []byte) (map[string]object.Object, error) {
 	}, nil
 }
 
+// prefetchVolumeStride is the size of one volume-information entry, which is
+// four different sizes across the five SCCA versions this package reads. The
+// values are libscca's, and PECmd reads the same three layouts (Version17.cs
+// steps 40, Version26.cs steps 104, Version30or31.cs steps 96).
+//
+// A version with no stride here returns 0 and its volumes are not read, rather
+// than read at a neighbouring version's stride. Stepping the wrong distance
+// does not produce an empty field: it produces a field read out of the middle
+// of another one, and a serial number that is really half of a FILETIME looks
+// exactly like a serial number.
+//
+// That path is reachable. prefetch_parse's version switch ends in a default
+// branch that returns the header fields it trusts and carries on, so a version
+// nothing here recognises arrives with its volume section intact. The empty
+// volumes array it gets is not a silent drop: the version this function
+// declined to read is in the same result, under "version", for a caller to see.
+func prefetchVolumeStride(version uint32) int {
+	switch version {
+	case 17:
+		return 40
+	case 23, 26:
+		return 104
+	case 30, 31:
+		return 96
+	default:
+		return 0
+	}
+}
+
 // parsePrefetchVolumes reads the volume-information section (offset @0x6C, count
 // @0x70). Each entry's stride is version-dependent; every field access is
 // bounds-checked so a bad entry is skipped rather than panicking.
@@ -137,9 +195,9 @@ func parsePrefetchVolumes(data []byte, version uint32) []object.Object {
 	if volOff <= 0 || volCount <= 0 || volCount > 256 || volOff >= len(data) {
 		return volumes
 	}
-	stride := 104 // v23
-	if version >= 26 {
-		stride = 96 // v26/v30/v31
+	stride := prefetchVolumeStride(version)
+	if stride == 0 {
+		return volumes
 	}
 	for i := 0; i < volCount; i++ {
 		base := volOff + i*stride
@@ -206,6 +264,12 @@ func xpressHuffmanDecompress(src []byte, outSize int) ([]byte, error) {
 		for len(dst) < blockEnd {
 			sym, ok := table.decode(bs)
 			if !ok {
+				if bs.exhausted() {
+					return nil, fmt.Errorf(
+						"truncated Xpress-Huffman stream: the input ran out after %d of the %d bytes "+
+							"its header declares, and the rest would be decoded from zeros rather than "+
+							"from the file", len(dst), outSize)
+				}
 				return nil, fmt.Errorf("invalid Huffman code at output offset %d", len(dst))
 			}
 			if sym < 256 {
@@ -224,9 +288,23 @@ func xpressHuffmanDecompress(src []byte, outSize int) ([]byte, error) {
 				}
 				length = b + 15
 				if b == 255 {
+					// These read the input directly through the same helpers
+					// that answer zero past its end, so a match length
+					// extension at the end of a cut stream was read out of
+					// nothing.
+					if bs.index+2 > len(src) {
+						return nil, fmt.Errorf(
+							"truncated Xpress-Huffman stream: a match length at output offset %d "+
+								"runs past the end of the input", len(dst))
+					}
 					v := int(xhU16(src, bs.index))
 					bs.index += 2
 					if v == 0 {
+						if bs.index+4 > len(src) {
+							return nil, fmt.Errorf(
+								"truncated Xpress-Huffman stream: a long match length at output "+
+									"offset %d runs past the end of the input", len(dst))
+						}
 						v = int(xhU32(src, bs.index))
 						bs.index += 4
 					}
@@ -262,12 +340,32 @@ type xhBitStream struct {
 	index int
 	sym   uint32
 	bits  int
+	// pad is how many of the bits in sym were not read from src. xhU16 answers
+	// zero past the end of the input instead of refusing, so a stream that
+	// stops mid-block refills the lookahead with zeros and the decoder goes on
+	// producing symbols out of them until it has made up the declared size
+	// (M26-ART-028).
+	//
+	// It cannot be a flag, because a valid stream overruns too: the window is
+	// 32 bits and refills 16 at a time, so the reader is up to four bytes ahead
+	// of the bits it has used, and the last of those bytes is routinely past
+	// the end. What distinguishes a cut stream is a symbol decoded out of bits
+	// that were invented, which is a question about this window and not about
+	// the file's length.
+	pad int
 }
 
 func newXHBitStream(src []byte, pos int) *xhBitStream {
 	bs := &xhBitStream{src: src, index: pos + 4}
 	bs.sym = xhU16(src, pos)<<16 | xhU16(src, pos+2)
 	bs.bits = 32
+	// The same two conditions xhU16 answers zero on.
+	if pos+2 > len(src) {
+		bs.pad += 16
+	}
+	if pos+4 > len(src) {
+		bs.pad += 16
+	}
 	return bs
 }
 
@@ -281,11 +379,26 @@ func (bs *xhBitStream) lookup(n int) uint32 {
 func (bs *xhBitStream) skip(n int) {
 	bs.sym = (bs.sym << uint(n)) & 0xFFFFFFFF
 	bs.bits -= n
+	// Bits are consumed from the high end and padding is appended at the low
+	// end, so consuming spends the real bits first. Once they are gone the
+	// window is all padding, which is what this clamp records.
+	if bs.pad > bs.bits {
+		bs.pad = bs.bits
+	}
 	if bs.bits < 16 {
+		if bs.index+2 > len(bs.src) {
+			bs.pad += 16
+		}
 		bs.sym |= xhU16(bs.src, bs.index) << (16 - uint(bs.bits))
 		bs.index += 2
 		bs.bits += 16
 	}
+}
+
+// exhausted reports that no bit left in the window came from the input, so any
+// further symbol would be decoded out of zeros the reader invented.
+func (bs *xhBitStream) exhausted() bool {
+	return bs.bits-bs.pad <= 0
 }
 
 func (bs *xhBitStream) byteAt() (int, bool) {
@@ -327,6 +440,13 @@ func buildXHTable(lengths []uint8) *xhTable {
 func (t *xhTable) decode(bs *xhBitStream) (int, bool) {
 	code, first, index := 0, 0, 0
 	for l := 1; l <= 15; l++ {
+		// Checked per bit rather than once per symbol, so a code that begins in
+		// the file and ends in the padding is refused too. The caller asks
+		// bs.exhausted() to tell this refusal from a code the table does not
+		// hold.
+		if bs.exhausted() {
+			return 0, false
+		}
 		code |= int(bs.lookup(1))
 		bs.skip(1)
 		cnt := t.count[l]

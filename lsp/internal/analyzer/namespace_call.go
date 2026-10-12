@@ -1,7 +1,14 @@
 package analyzer
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
+	lsp "github.com/tliron/glsp/protocol_3_16"
+
 	mast "mutant/ast"
+	"mutant/sema"
 )
 
 // This file holds the one thing every builtin-aware rule needs once a builtin
@@ -23,15 +30,34 @@ import (
 //
 // bound reports whether a name is already taken in the caller's own notion of
 // scope -- a let, a parameter, an import namespace. It decides whether
-// `fs.read` is a builtin call at all, and each rule models scope differently
-// (a declarationScope walk, a file-wide set, nothing), so it is a parameter
-// rather than something this helper works out. A nil bound models no
-// shadowing, which is what the rules with no scope model do today.
+// `fs.read` is a builtin call at all, and the rules model scope differently
+// (the graph at a position, a file-wide set of reassigned names, nothing), so
+// it is a parameter rather than something this helper works out. A nil bound
+// models no shadowing, which is what the rules with no scope model do today.
+//
+// Prefer builtinCalleeIn wherever the caller has a position. A predicate over
+// names cannot say that a name is an enum, and cannot say that a struct name is
+// not a binding -- and those are distinctions the compiler draws.
 //
 // anchor is what a diagnostic should hang its range on: the identifier for the
 // bare form, the whole field expression for the dotted one, so the squiggle
 // covers `fs.read` rather than just `fs`.
 func builtinCallee(fn mast.Expression, bound func(string) bool) (name string, anchor mast.Node, ok bool) {
+	return builtinCalleeIn(fn, sema.LocalScope{Bound: bound})
+}
+
+// builtinCalleeIn is builtinCallee for a caller holding everything this file has
+// bound at a position rather than a set of names.
+//
+// The difference is the enum arm. ResolveField decides an enum before it folds,
+// because `Colour.Red` was namespace-shaped before modules existed, and a caller
+// with only a name predicate cannot say "this name is an enum" -- so an enum
+// called `str` would make `str.upper(...)` fold to the builtin and be held to
+// its contract. Rules whose model of scope genuinely is a set of names, like the
+// security ones asking only whether an opener was reassigned, keep the narrower
+// entry point above.
+func builtinCalleeIn(fn mast.Expression, local sema.LocalScope) (name string, anchor mast.Node, ok bool) {
+	bound := local.Bound
 	switch node := fn.(type) {
 	case *mast.Identifier:
 		if node == nil || node.Value == "" {
@@ -56,23 +82,99 @@ func builtinCallee(fn mast.Expression, bound func(string) bool) (name string, an
 			// namespace.
 			return "", nil, false
 		}
-		if bound != nil && bound(namespace.Value) {
-			// A variable, parameter or import namespace called `fs` wins, the
-			// same way it wins in the compiler.
+		// Whether this is a builtin call at all is sema's decision, and asking
+		// it is the point: the fold used to be derived here, again in
+		// compiler.compileFieldExpression, and again in the evaluator, and the
+		// three disagreed. Each asked "is this name already taken?" of a
+		// different thing, so `rand.int` was painted as a builtin here, ran
+		// under the evaluator, and would not compile. One answer now serves all
+		// three.
+		//
+		// bound becomes sema's Bound unchanged, which keeps the gate this arm
+		// has always had: without it every `p.x(...)` in the file would be a
+		// call to a builtin named "p_x", and every rule downstream would be
+		// deciding about a name that does not exist. A variable, parameter or
+		// import namespace called `fs` still wins.
+		folded := semaResolver.ResolveField(
+			sema.ScopeCtx{Bound: local.Bound, Enums: local.Enums}, namespace.Value, node.Field.Value)
+		if folded.Kind != sema.FieldBuiltinFold {
 			return "", nil, false
 		}
-
-		derived := namespace.Value + "_" + node.Field.Value
-		// This gate is not optional. Without it every `p.x(...)` in the file
-		// becomes a call to a builtin named "p_x", and each rule would then be
-		// deciding on a name that does not exist.
-		if !isLiveBuiltin(derived) {
-			return "", nil, false
-		}
-		return derived, node, true
+		return folded.Builtin, node, true
 	}
 
 	return "", nil, false
+}
+
+// namespacedBuiltinAt resolves the builtin named by the dotted expression at
+// pos, whichever half of it the cursor is in.
+//
+// It finds the enclosing field expression the way NodeAt finds anything else --
+// the smallest ranged node containing the position -- because NodeAt itself
+// hands back the innermost node, which for `hash.blake2` is the bare identifier
+// `blake2` and carries no hint that there is a namespace in front of it.
+//
+// onField separates the two questions: the cursor on `blake2` is asking about
+// the function, the cursor on `hash` about the family.
+func (s *Snapshot) namespacedBuiltinAt(pos lsp.Position) (name string, onField bool, ok bool) {
+	if s == nil || s.Program == nil || s.Program.NodePositions == nil {
+		return "", false, false
+	}
+
+	var best *mast.FieldExpression
+	bestSize := int(^uint(0) >> 1)
+	line, column := s.TokenPosition(pos)
+	for node, rng := range s.Program.NodePositions {
+		field, isField := node.(*mast.FieldExpression)
+		if !isField || field == nil || !rng.IsValid() || !rangeContains(rng, line, column) {
+			continue
+		}
+		if size := rng.End.Offset - rng.Start.Offset; size < bestSize {
+			best, bestSize = field, size
+		}
+	}
+	if best == nil {
+		return "", false, false
+	}
+
+	resolved, _, found := builtinCalleeIn(best, s.localScopeAt(pos))
+	if !found {
+		return "", false, false
+	}
+
+	// The field's own range is the narrower of the two, so it is asked about
+	// first; anything else inside the expression is the namespace.
+	if best.Field != nil {
+		if rng, has := s.Program.NodePositions[mast.Node(best.Field)]; has && rng.IsValid() && rangeContains(rng, line, column) {
+			return resolved, true, true
+		}
+	}
+	return resolved, false, true
+}
+
+// builtinFamilyHoverText is the card for the other half: the cursor on `hash`
+// rather than on `blake2`.
+//
+// There is no builtin called `hash`, so without this the namespace hovered as a
+// bare identifier -- the answer that sends a reader looking for a variable that
+// does not exist. It lists what is in the family, because "what else is in
+// here" is what someone hovering a namespace is actually asking.
+func builtinFamilyHoverText(namespace string) (string, bool) {
+	members := builtinFamilyMembers(namespace)
+	if len(members) == 0 {
+		return "", false
+	}
+	sort.Strings(members)
+
+	var out strings.Builder
+	fmt.Fprintf(&out, "builtin family `%s`\n\n", namespace)
+	fmt.Fprintf(&out, "%d builtins. `%s.%s` and `%s_%s` are the same function.\n\n",
+		len(members), namespace, members[0], namespace, members[0])
+	out.WriteString("**Members**\n\n")
+	for _, member := range members {
+		fmt.Fprintf(&out, "- `%s.%s`\n", namespace, member)
+	}
+	return out.String(), true
 }
 
 // builtinNameSet is the registry as a set, built once.
@@ -82,6 +184,10 @@ func builtinCallee(fn mast.Expression, bound func(string) bool) (name string, an
 // struct rather than a namespace, and these rules ask about every call in the
 // file on every keystroke.
 var builtinNameSet = liveBuiltinNames()
+
+// semaResolver is the one decision procedure for what a name refers to.
+// It holds no state, so one instance serves the whole package.
+var semaResolver = sema.NewResolver()
 
 // isLiveBuiltin reports whether name is a builtin in this build.
 func isLiveBuiltin(name string) bool {

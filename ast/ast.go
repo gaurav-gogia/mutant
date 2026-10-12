@@ -6,6 +6,23 @@ import (
 	"mutant/token"
 )
 
+// Node is any node in the tree.
+//
+// String() is a debug rendering, and a lossy one. It is for reading a tree in a
+// test failure or a log, and it is not a source of truth about the tree: a
+// block prints its statements with no braces around them, a string literal
+// prints its decoded text with no quotes, and a `${...}` hole prints without
+// its delimiters. So distinct programs render to one string -- `if (c) { a; b; }`
+// and `if (c) { a; } b;` are the same text, and so are the string "1" and the
+// number 1.
+//
+// To ask whether two trees are the same program, use Equal. Comparing
+// renderings is the question it was being asked instead, and it could not
+// answer it: the formatter's structure test compared two renderings, which let
+// a statement move out of a loop body unnoticed (M26-LEX-011).
+//
+// For the same reason String() is not a formatter. Formatting a Mutant file is
+// lsp/internal/server's job, and it works from the tree and the token stream.
 type Node interface {
 	TokenLiteral() string
 	String() string
@@ -69,6 +86,13 @@ type Program struct {
 	// user wrote is not where the bug is -- so the definition site is kept
 	// here alongside it.
 	MacroExpansions map[Node]MacroOrigin
+
+	// Parenthesized records the expressions the author wrote inside brackets.
+	// The tree keeps no node for a pair of brackets, since precedence is
+	// already in its shape, so this fourth side table is the only record of
+	// the ones written for clarity. The formatter reads it to print back the
+	// brackets that were written, and no others.
+	Parenthesized map[Node]bool
 }
 
 // MacroOrigin locates a macro expansion at both of its sources: Call is the
@@ -103,6 +127,16 @@ func (p *Program) RangeOf(n Node) (Range, bool) {
 	return r, true
 }
 
+// IsParenthesized reports whether the author wrote n inside brackets. A node
+// inside two pairs, ((a + b)), is recorded once: the tree cannot tell two
+// pairs from one, and one pair is all the grouping means.
+func (p *Program) IsParenthesized(n Node) bool {
+	if p == nil || p.Parenthesized == nil || n == nil {
+		return false
+	}
+	return p.Parenthesized[n]
+}
+
 func (p *Program) TokenLiteral() string {
 	if len(p.Statements) > 0 {
 		return p.Statements[0].TokenLiteral()
@@ -110,11 +144,47 @@ func (p *Program) TokenLiteral() string {
 	return ""
 }
 
+// missingNode is what a String() prints where a child should be and is not.
+//
+// It is printed rather than the child being skipped because skipping is a
+// silent drop: `f(1, , 2)` rendered as `(1, 2)`, which reads as an honest call
+// of two arguments, and `1 + ;` would render as `(1 + )` whether the operand
+// was missing or the renderer dropped it. The marker is not valid source in any
+// position, so output holding one cannot be mistaken for a program.
+const missingNode = "<missing>"
+
+// render prints one child of a node.
+//
+// A tree that came back from a parse with errors has holes in it: when no
+// prefix function claims the current token parseExpression appends an error and
+// returns nil, and the node that asked for the operand keeps that nil as a
+// child. Dereferencing one was a nil panic in ten of this package's String()
+// methods -- `1 + ;`, `-;`, `!` and `f()[-,] = 1;` each produced one -- and the
+// language server died of it rather than reporting a diagnostic, because it
+// calls String() on an assignment's target to lint it and nothing between that
+// call and the jsonrpc2 reader goroutine recovers (M26-LEX-010).
+//
+// Every String() in this package also tolerates a nil receiver. That is the
+// other half of the same invariant and it is not redundant: a child field whose
+// type is a concrete pointer -- FunctionLiteral.Body, IfExpression.Consequence,
+// LetStatement.Name -- becomes a NON-nil interface holding a typed nil when it
+// is passed to a parameter of type Node, so the check here cannot see it. The
+// receiver guard is where that one is caught.
+func render(n Node) string {
+	if n == nil {
+		return missingNode
+	}
+	return n.String()
+}
+
 func (p *Program) String() string {
+	if p == nil {
+		return missingNode
+	}
 	var out bytes.Buffer
 
 	for _, s := range p.Statements {
-		out.WriteString(s.String())
+		out.WriteString(render(s))
 	}
 
 	return out.String()

@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"mutant/object"
+	"mutant/security"
 )
 
 // The reg_* family is a polymorphic registry front-end. reg_open dispatches on its
@@ -348,7 +349,7 @@ func (b *jsonRegistryBackend) getValue(path, name string) (regEntry, error) {
 	}
 	value, found := key.Values[name]
 	if !found {
-		return regEntry{}, fmt.Errorf("value not found: %s", name)
+		return regEntry{}, errRegValueNotFound(name)
 	}
 	valueObj, convErr := jsonValueToObject(value)
 	if convErr != nil {
@@ -426,7 +427,20 @@ func (b *hiveRegistryBackend) getValue(path, name string) (regEntry, error) {
 			return regEntry{name: vk.name, typ: tname, data: data, raw: raw}, nil
 		}
 	}
-	return regEntry{}, fmt.Errorf("value not found: %s", name)
+	return regEntry{}, errRegValueNotFound(name)
+}
+
+// errRegValueNotFound is the one answer every backend gives for a value that is
+// not there, so reg_get_value cannot say different things about the same
+// question depending on where it was asked.
+//
+// It was the same string typed twice until the live Windows backend turned out
+// not to give it at all: it mapped ERROR_FILE_NOT_FOUND to an entry of type
+// REG_NONE with empty data and returned it with a nil error, so "does this key
+// hold value X" came back yes, for any X (M26-NET-004). Three call sites and one
+// function is the cheapest guard against that happening again.
+func errRegValueNotFound(name string) error {
+	return fmt.Errorf("value not found: %s", name)
 }
 
 // deletedKeys/timeline aren't recovered from a raw hive (would need unallocated
@@ -448,6 +462,14 @@ func loadRegistryHiveFromJSON(path string) (*registryHive, *object.Error) {
 	var raw map[string]any
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, newError("reg_open: invalid hive JSON: %s", err.Error())
+	}
+	// A hive export holds one document, and reading the first while ignoring
+	// the rest is a silent drop of evidence: reg_keys, reg_value and the
+	// timeline would all answer from part of a file with nothing saying so.
+	// Not a sealed document, so this is not the row's own defect; it is the
+	// same wrong, and the check was already written (M26-BLT-026).
+	if err := security.RefuseTrailingContent(decoder, "the hive"); err != nil {
+		return nil, newError("reg_open: %s: %s", path, err.Error())
 	}
 
 	keysRaw, ok := raw["keys"].([]any)

@@ -240,3 +240,38 @@ putln(items);`,
 		}
 	}
 }
+
+// The last expression of a body is its value, so `r;` forwards the pair exactly
+// as `return r;` does -- confirmed by running both: the caller destructures
+// either into data and err. namesHeldAsPairs held only the ReturnStatement
+// spelling, so the rule warned on the implicit one. Its own header makes
+// "staying quiet on correct code the first requirement", and the advice it gave
+// (`let r, err = ...; r;`) would have broken the forwarding it was complaining
+// about.
+func TestAPairForwardedByAnImplicitReturnIsSilent(t *testing.T) {
+	implicit := `let read_it = fn(p) { let r = fs_read(p); r; };
+let data, err = read_it("x.txt");`
+
+	if messages := pairReturnMessages(t, implicit); len(messages) != 0 {
+		t.Fatalf("implicit return of a pair, want silence, got %v", messages)
+	}
+
+	// The explicit spelling it was already quiet on, kept as the comparison
+	// that makes the two forms one behaviour rather than two.
+	explicit := `let read_it = fn(p) { let r = fs_read(p); return r; };
+let data, err = read_it("x.txt");`
+
+	if messages := pairReturnMessages(t, explicit); len(messages) != 0 {
+		t.Fatalf("explicit return of a pair, want silence, got %v", messages)
+	}
+
+	// And a body whose last statement is a name that was never a pair is not
+	// turned into one by this: the rule still reports the mistake it is for,
+	// which is binding one name to a builtin that hands back two.
+	held := `let r = fs_read("x.txt");
+putln(r);`
+
+	if messages := pairReturnMessages(t, held); len(messages) == 0 {
+		t.Fatal("a pair bound to one name and then printed should still report")
+	}
+}

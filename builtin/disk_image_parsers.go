@@ -1,24 +1,37 @@
 package builtin
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	libewf "github.com/aoiflux/libewf"
+	"github.com/aoiflux/libewf/types"
 	libvhdi "github.com/aoiflux/libvhdi"
 
 	"mutant/object"
 )
 
 // maxInMemoryReadBytes caps how much image content a single builtin call will
-// materialise as a mutant string. Shared by the *_read_at builtins and by
-// xfat_read_file, which has to stage its content through a temp file.
+// materialise as a mutant string. Shared by the image *_read_at builtins, the
+// filesystems' *_read_file_at windows, and xfat_read_file, which refuses an
+// entry larger than this rather than reading it whole.
 const maxInMemoryReadBytes = 32 * 1024 * 1024
+
+// ewfLetterPairSegment is the first segment number an EWF extension spells with
+// a letter pair. Numbering runs .E01 to .E99 and then continues .EAA rather
+// than .E100, so 100 is where a two-digit extension stops being possible.
+const ewfLetterPairSegment = 100
 
 type vhdiMetadata struct {
 	Format           string
@@ -48,11 +61,28 @@ type vhdiSession interface {
 	ReadAt(offset int64, length int64) ([]byte, error)
 	Metadata() (vhdiMetadata, error)
 	MapOffset(virtualOffset int64) (int64, bool, error)
+
+	// Extents, Chain and the two change methods are the sparse-aware and
+	// differencing half of the format, implemented in disk_image_extents.go.
+	// MapOffset above answers where one byte lives and cannot answer these: it
+	// reports nothing mapped for every differencing disk, because one file
+	// offset cannot express an address space assembled from several files.
+	Extents(offset, length int64) (vhdiExtentScan, error)
+	Chain() (vhdiChainScan, error)
+	Changed(sinceChainIndex int64) (vhdiChangedScan, error)
+	ChangedSince(path string) (vhdiChangedScan, error)
+
 	Close() error
 }
 
 type vhdiBackend interface {
 	Open(imagePath string) (vhdiSession, error)
+
+	// Probe and Discover read headers and hand back no handle, so they sit on
+	// the backend rather than on a session. Neither opens a block allocation
+	// table, which is what makes surveying a directory of terabyte images cheap.
+	Probe(imagePath string) (vhdiProbeScan, error)
+	Discover(dir string) (vhdiDiscoverScan, error)
 }
 
 type realVHDIBackend struct{}
@@ -86,7 +116,16 @@ type ewfMetadata struct {
 	NumberOfChunks    uint64
 	TotalLogicalBytes uint64
 	SectorSize        int
-	CompressionMethod uint16
+	// EWF v1's file header has no compression-method field at all, so libewf
+	// fills the struct with CompressionMethodNone for every v1 image -- and in
+	// that enum 0 means "no compression" (libewf types/definitions.go: none 0,
+	// deflate 1, bzip2 2). The number alone therefore says an EnCase 6 image
+	// was stored uncompressed when its chunks may well be deflate, which on v1
+	// they always are when a chunk is flagged compressed. HasCompressionMethod
+	// says whether the number was read from the image or is that placeholder,
+	// the way HasMedia above guards the media fields.
+	HasCompressionMethod bool
+	CompressionMethod    uint16
 	// Chunk-table integrity. ChunkTablesInvalid counts groups where neither the
 	// primary table nor its table2 backup validated: their chunks were decoded
 	// unverified and the data they describe should be treated as suspect.
@@ -96,14 +135,117 @@ type ewfMetadata struct {
 	AcquisitionErrorCount int
 }
 
+// ewfBadRange is a span of the decoded device that could not be read. libewf
+// substitutes zero bytes for it and keeps hashing, so any entry here means the
+// computed digests describe something other than the acquired media.
+type ewfBadRange struct {
+	Offset int64
+	Length int64
+	Err    string
+}
+
+// ewfVerifyResult reports recomputing the acquisition digests over the decoded
+// device and comparing them against the ones the acquisition tool stored in the
+// image.
+//
+// OK is libewf's own verdict and is deliberately not re-derived here: an image
+// that stores no digest at all is *not* verified, because there is nothing to
+// verify against. Reporting "no mismatch" for such an image would be the exact
+// failure docs/EVIDENCE_HANDLING_POLICY.md warns about -- an assertion that
+// looks like verification and is not.
+type ewfVerifyResult struct {
+	Size          int64
+	BytesHashed   int64
+	HasStoredMD5  bool
+	StoredMD5     string
+	ComputedMD5   string
+	MD5Match      bool
+	HasStoredSHA1 bool
+	StoredSHA1    string
+	ComputedSHA1  string
+	SHA1Match     bool
+	BadRanges     []ewfBadRange
+	OK            bool
+}
+
+// ewfSegmentSet is one segment path expanded into the set it belongs to.
+//
+// Contiguous means the numbering has no holes. It deliberately does not mean
+// the set is whole: a set truncated at its end is indistinguishable from a
+// complete one by looking at a directory, because nothing there records how
+// many segments the acquisition wrote. That case is caught only when the
+// segments are read and the last one carries no done-section, which is what
+// ewf_metadata's has_done_section reports. Naming this field "complete" would
+// be the assertion docs/EVIDENCE_HANDLING_POLICY.md warns against.
+type ewfSegmentSet struct {
+	Paths          []string
+	Contiguous     bool
+	PresentCount   int
+	MissingNumbers []int64
+	MissingFiles   []string
+	// PathsError says why a set with a hole carries no Paths: its present
+	// segments could not be named consistently with libewf's own count.
+	PathsError string
+	// PresentNumbers is each of Paths' segment number, for a set with a hole.
+	PresentNumbers []int64
+}
+
+// ewfChecksumPolicy is what to do about a chunk table that fails its stored
+// Adler-32. A chunk table maps offsets to compressed chunks, so an unverified
+// one means the bytes being decoded may not be the bytes that were written --
+// which is why this is a decision an examiner makes explicitly rather than a
+// default buried in a library.
+type ewfChecksumPolicy int
+
+const (
+	// ewfChecksumWarn decodes the image and records the failure in
+	// ewf_metadata's chunk_tables_invalid. libewf's default, and Mutant's:
+	// damaged evidence should still yield whatever is readable, as long as the
+	// damage is reported rather than hidden.
+	ewfChecksumWarn ewfChecksumPolicy = iota
+	// ewfChecksumStrict refuses to open an image with an unverifiable chunk
+	// table, for when unverified chunk offsets are worse than no image at all.
+	ewfChecksumStrict
+	// ewfChecksumIgnore suppresses checksum accounting entirely. It makes
+	// chunk_tables_invalid report zero whether or not tables failed, so an
+	// image opened this way must never be the source of an integrity claim.
+	ewfChecksumIgnore
+)
+
+// ewfOpenOptions carries the evidentiary decisions an open is made under.
+//
+// It is a typed struct at the backend seam and never an options hash at the
+// language surface: each field changes what a subsequent digest or carve
+// actually describes, so each arrives as a named argument the editor can check
+// and a typo cannot silently turn into a default.
+type ewfOpenOptions struct {
+	ChecksumPolicy ewfChecksumPolicy
+	// AllowIncomplete permits a set that does not begin at segment 1 or whose
+	// final segment carries no done-section. Such a set decodes only part of
+	// the device -- Size reports the full declared size while reads past the
+	// supplied data return EOF -- so it is for triage, never for content that
+	// will be hashed or carved.
+	AllowIncomplete bool
+}
+
 type ewfSession interface {
 	ReadAt(offset int64, length int64) ([]byte, error)
 	Metadata() (ewfMetadata, error)
+	Verify(ctx context.Context) (ewfVerifyResult, error)
 	Close() error
 }
 
 type ewfBackend interface {
-	Open(segmentPaths []string) (ewfSession, error)
+	// Discover expands one segment path into the whole set it belongs to.
+	//
+	// It is separate from Open because the paths it returns are what the case
+	// manifest records: an examiner's report that names every file the image
+	// was decoded from is worth more than one asserting the set was complete.
+	// It is also separate because a hole in the numbering is a fact about the
+	// evidence rather than a failure of the call, so it comes back as data and
+	// the refusal to open on it is made here, not in the library.
+	Discover(segmentPath string) (ewfSegmentSet, error)
+	Open(segmentPaths []string, opts ewfOpenOptions) (ewfSession, error)
 }
 
 type realEWFBackend struct{}
@@ -362,23 +504,108 @@ func VHDIClose(args ...object.Object) object.Object {
 }
 
 func EWFOpen(args ...object.Object) object.Object {
-	if len(args) != 1 {
-		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
+	return ewfOpen(BuiltinNameEwfOpen, false, args...)
+}
+
+// EWFOpenPartial opens a segment set that ewf_open refuses.
+//
+// It is a separate builtin rather than a flag on ewf_open because an image
+// decoded from an incomplete set is not the image that was acquired, and the
+// difference has to be visible at the call site, in the audit trail and in the
+// returned hash -- not hidden in an argument that defaults to the safe thing
+// and is easy to leave set to the other one.
+func EWFOpenPartial(args ...object.Object) object.Object {
+	return ewfOpen(BuiltinNameEwfOpenPartial, true, args...)
+}
+
+func ewfOpen(op string, allowIncomplete bool, args ...object.Object) object.Object {
+	if len(args) < 1 || len(args) > 2 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
 	}
 
-	segmentPaths, errObj := parseEWFSegmentPaths(args[0], BuiltinNameEwfOpen)
+	segmentPaths, listed, errObj := parseEWFSegmentPaths(args[0], op)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
+	}
+
+	opts := ewfOpenOptions{AllowIncomplete: allowIncomplete}
+	if len(args) == 2 {
+		policy, errObj := parseEWFChecksumPolicy(args[1], op)
+		if errObj != nil {
+			return resultAndError(nil, errObj)
+		}
+		opts.ChecksumPolicy = policy
 	}
 
 	ewfStore.RLock()
 	backend := ewfStore.backend
 	ewfStore.RUnlock()
 
-	session, err := backend.Open(segmentPaths)
-	if err != nil {
-		return resultAndError(nil, newError("ewf_open: %s", err.Error()))
+	// Discovery runs before the open so that the segment list custody records,
+	// and the segments returned here, describe the set actually decoded rather
+	// than the one path the caller happened to name.
+	//
+	// A list is taken as given and not expanded -- one path in a list as much
+	// as five (M26-FS1-018): the caller named the files, and second-guessing
+	// that would make it impossible to open a set whose members were
+	// deliberately gathered from elsewhere.
+	var discovered ewfSegmentSet
+	var undecoded []string
+	if !listed {
+		set, err := backend.Discover(segmentPaths[0])
+		if err != nil {
+			return resultAndError(nil, newError("%s: %s", op, err.Error()))
+		}
+		discovered = set
+		if !set.Contiguous && !allowIncomplete {
+			// Refused rather than opened with a hole: decoding a set that is
+			// missing a segment yields an image that is not the one acquired,
+			// and every digest computed over it would describe something else.
+			return resultAndError(nil, newError(
+				"%s: segment set %s is incomplete: %d file(s) missing%s; ewf_segments reports which, ewf_open_partial proceeds anyway",
+				op, segmentPaths[0], len(set.MissingNumbers), formatMissingSegmentFiles(set.MissingFiles)))
+		}
+		if len(set.Paths) == 0 {
+			// Opening the one file named would decode a subset of what is
+			// present and call it the set.
+			return resultAndError(nil, newError(
+				"%s: segment set %s has a hole and its present segments could not be named: %s; "+
+					"pass the segment files as a list to open them as given",
+				op, segmentPaths[0], set.PathsError))
+		}
+		segmentPaths = set.Paths
+		if !set.Contiguous {
+			decodable, rest, errObj := ewfDecodablePrefix(op, set)
+			if errObj != nil {
+				return resultAndError(nil, errObj)
+			}
+			segmentPaths, undecoded = decodable, rest
+		}
+	} else if allowIncomplete {
+		if errObj := ewfListIsARun(op, segmentPaths); errObj != nil {
+			return resultAndError(nil, errObj)
+		}
 	}
+
+	session, err := backend.Open(segmentPaths, opts)
+	if err != nil {
+		return resultAndError(nil, newError("%s: %s", op, err.Error()))
+	}
+
+	// Discovery sees a hole in the numbering and nothing else. A set cut off
+	// after its last present segment, a list that leaves one out or starts
+	// past segment 1, and chunk tables that would not decode are all
+	// decodable under ewf_open_partial, and only the reader can tell -- so
+	// partial reads it as well (M26-FS1-009).
+	metadata, err := session.Metadata()
+	if err != nil {
+		_ = session.Close()
+		return resultAndError(nil, newError("%s: %s", op, err.Error()))
+	}
+	partial := len(discovered.MissingNumbers) > 0 || len(undecoded) > 0 ||
+		!metadata.HasDoneSection ||
+		metadata.SegmentNumber != 1 ||
+		(metadata.HasMedia && metadata.ObservedChunkCount < metadata.NumberOfChunks)
 
 	handleID := atomic.AddInt64(&ewfStore.nextID, 1)
 	handle := fmt.Sprintf("ewf-handle-%d", handleID)
@@ -387,12 +614,116 @@ func EWFOpen(args ...object.Object) object.Object {
 	ewfStore.handles[handle] = ewfHandleState{SegmentPaths: segmentPaths, Session: session}
 	ewfStore.Unlock()
 
-	custodyRecordOpen(BuiltinNameEwfOpen, handle, segmentPaths...)
+	custodyRecordOpen(op, handle, segmentPaths...)
+
+	missingNumbers := make([]object.Object, 0, len(discovered.MissingNumbers))
+	for _, number := range discovered.MissingNumbers {
+		missingNumbers = append(missingNumbers, intObj(number))
+	}
 
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"handle":        stringObj(handle),
 		"segment_count": intObj(int64(len(segmentPaths))),
-		"status":        stringObj("ok"),
+		// The paths travel back, not just their count, because a report that
+		// names the files an image was decoded from is worth more than one
+		// asserting a set was complete -- and after discovery the caller can no
+		// longer derive them from what it passed in.
+		"segments": stringArrayLiteral(segmentPaths),
+		// partial and missing_segments are on every open, not only the partial
+		// one, so that a report template reads the same field either way and
+		// cannot omit the caveat by having been written against ewf_open.
+		"partial":          boolObj(partial),
+		"missing_segments": &object.Array{Elements: missingNumbers},
+		// Present beside the set and not decoded: they follow a hole, and their
+		// chunks would land at the missing segment's offsets.
+		"undecoded_segments": stringArrayLiteral(undecoded),
+		"checksum_policy":    stringObj(ewfChecksumPolicyName(opts.ChecksumPolicy)),
+		"status":             stringObj("ok"),
+	}), nil)
+}
+
+// parseEWFChecksumPolicy reads the policy argument.
+//
+// The names are a closed set and an unknown one is an error rather than a
+// fallback to the default: silently treating "Strict" as warn would turn an
+// examiner's explicit decision into its opposite, and nothing downstream would
+// show that it had happened.
+func parseEWFChecksumPolicy(arg object.Object, op string) (ewfChecksumPolicy, *object.Error) {
+	nameObj, ok := arg.(*object.String)
+	if !ok {
+		return 0, newError("%s: checksum_policy must be STRING, got %s", op, arg.Type())
+	}
+
+	switch nameObj.Value {
+	case "warn":
+		return ewfChecksumWarn, nil
+	case "strict":
+		return ewfChecksumStrict, nil
+	case "ignore":
+		return ewfChecksumIgnore, nil
+	default:
+		return 0, newError("%s: unknown checksum_policy %q; want \"warn\", \"strict\" or \"ignore\"", op, nameObj.Value)
+	}
+}
+
+func ewfChecksumPolicyName(policy ewfChecksumPolicy) string {
+	switch policy {
+	case ewfChecksumStrict:
+		return "strict"
+	case ewfChecksumIgnore:
+		return "ignore"
+	default:
+		return "warn"
+	}
+}
+
+// formatMissingSegmentFiles renders the names to go and find, for the refusal
+// message. It returns an empty string when libewf could not express them, so
+// the message degrades to the count rather than to an empty parenthesis.
+func formatMissingSegmentFiles(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(files, ", ") + ")"
+}
+
+// EWFSegments reports the segment set a path belongs to without opening it.
+//
+// A hole in the numbering is returned as data rather than as an error: which
+// files are absent is a finding about the evidence, and an examiner needs it in
+// a report, not in an error string they have to parse.
+func EWFSegments(args ...object.Object) object.Object {
+	if len(args) != 1 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
+	}
+
+	pathObj, ok := args[0].(*object.String)
+	if !ok {
+		return resultAndError(nil, newError("ewf_segments: segment path must be STRING, got %s", args[0].Type()))
+	}
+
+	ewfStore.RLock()
+	backend := ewfStore.backend
+	ewfStore.RUnlock()
+
+	set, err := backend.Discover(pathObj.Value)
+	if err != nil {
+		return resultAndError(nil, newError("ewf_segments: %s", err.Error()))
+	}
+
+	missingNumbers := make([]object.Object, 0, len(set.MissingNumbers))
+	for _, number := range set.MissingNumbers {
+		missingNumbers = append(missingNumbers, intObj(number))
+	}
+
+	return resultAndError(makeHashObject(map[string]object.Object{
+		"path":             stringObj(pathObj.Value),
+		"segments":         stringArrayLiteral(set.Paths),
+		"segment_count":    intObj(int64(len(set.Paths))),
+		"present_count":    intObj(int64(set.PresentCount)),
+		"contiguous":       boolObj(set.Contiguous),
+		"missing_segments": &object.Array{Elements: missingNumbers},
+		"missing_files":    stringArrayLiteral(set.MissingFiles),
 	}), nil)
 }
 
@@ -432,11 +763,52 @@ func EWFMetadata(args ...object.Object) object.Object {
 		"total_logical_bytes": intObj(int64(metadata.TotalLogicalBytes)),
 
 		"sector_size":             intObj(int64(metadata.SectorSize)),
+		"has_compression_method":  boolObj(metadata.HasCompressionMethod),
 		"compression_method":      intObj(int64(metadata.CompressionMethod)),
 		"chunk_tables_invalid":    intObj(int64(metadata.ChunkTablesInvalid)),
 		"chunk_tables_recovered":  intObj(int64(metadata.ChunkTablesRecovered)),
 		"observed_chunk_count":    intObj(int64(metadata.ObservedChunkCount)),
 		"acquisition_error_count": intObj(int64(metadata.AcquisitionErrorCount)),
+	}), nil)
+}
+
+func EWFVerify(args ...object.Object) object.Object {
+	if len(args) != 1 {
+		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1", len(args)))
+	}
+
+	state, errObj := resolveEWFHandle(args[0], BuiltinNameEwfVerify)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+
+	result, err := state.Session.Verify(context.Background())
+	if err != nil {
+		return resultAndError(nil, newError("%s: %s", BuiltinNameEwfVerify, err.Error()))
+	}
+
+	badRanges := make([]object.Object, 0, len(result.BadRanges))
+	for _, br := range result.BadRanges {
+		badRanges = append(badRanges, makeHashObject(map[string]object.Object{
+			"offset": intObj(br.Offset),
+			"length": intObj(br.Length),
+			"error":  stringObj(br.Err),
+		}))
+	}
+
+	return resultAndError(makeHashObject(map[string]object.Object{
+		"size":            intObj(result.Size),
+		"bytes_hashed":    intObj(result.BytesHashed),
+		"has_stored_md5":  boolObj(result.HasStoredMD5),
+		"stored_md5":      stringObj(result.StoredMD5),
+		"computed_md5":    stringObj(result.ComputedMD5),
+		"md5_match":       boolObj(result.MD5Match),
+		"has_stored_sha1": boolObj(result.HasStoredSHA1),
+		"stored_sha1":     stringObj(result.StoredSHA1),
+		"computed_sha1":   stringObj(result.ComputedSHA1),
+		"sha1_match":      boolObj(result.SHA1Match),
+		"bad_ranges":      &object.Array{Elements: badRanges},
+		"ok":              boolObj(result.OK),
 	}), nil)
 }
 
@@ -721,7 +1093,304 @@ func (realVHDIBackend) Open(imagePath string) (vhdiSession, error) {
 	return &realVHDISession{disk: disk}, nil
 }
 
-func (realEWFBackend) Open(segmentPaths []string) (ewfSession, error) {
+// Discover expands one segment path into its whole set.
+//
+// An E01 set numbers .E01 to .E99 and then continues .EAA rather than .E100, so
+// a caller that enumerates segments by hand gets it wrong at the 100th -- which
+// is why libewf exposes the progression and this asks it rather than walking the
+// directory here. The path need not be the first segment: the set is identified
+// by the stem and family of the name and then enumerated from segment 1, so an
+// image named by its .E03 still decodes from its .E01.
+//
+// A hole in the numbering comes back as MissingNumbers/MissingFiles rather than
+// as an error, because which files are absent is a finding about the evidence
+// and belongs in a report. Whether to proceed on a holed set is a decision for
+// the caller; EWFOpen refuses, ewf_segments reports.
+func (realEWFBackend) Discover(segmentPath string) (ewfSegmentSet, error) {
+	discovered, err := libewf.SegmentPaths(segmentPath)
+	if err == nil {
+		return ewfSegmentSet{
+			Paths:        discovered,
+			Contiguous:   true,
+			PresentCount: len(discovered),
+		}, nil
+	}
+
+	var missing *libewf.MissingSegmentsError
+	if !errors.As(err, &missing) {
+		return ewfSegmentSet{}, err
+	}
+
+	// A lone file whose extension parses as a letter-pair segment is not
+	// segment 100-or-beyond of a set; it is a file that happens to be named
+	// that way. libewf states the rule itself -- a letter-pair extension names
+	// segment 100 or more, "which cannot exist unless all 99 numeric segments
+	// do" -- and applies it to the files its directory scan turns up, but not
+	// to the path it was handed. So acquired.ewf, an entirely ordinary name for
+	// a single-file image, reads as segment 676 with 675 segments missing.
+	//
+	// Refusing it would be worse than the bug being fixed here: a whole image
+	// would become unopenable because of its file extension. A numbered segment
+	// standing alone is a different matter and stays a hole -- opening .E05
+	// without .E01 through .E04 yields four segments of nothing.
+	if len(missing.Present) == 1 && missing.Present[0] >= ewfLetterPairSegment {
+		return ewfSegmentSet{
+			Paths:        []string{segmentPath},
+			Contiguous:   true,
+			PresentCount: 1,
+		}, nil
+	}
+
+	numbers := make([]int64, 0, len(missing.Missing))
+	for _, number := range missing.Missing {
+		numbers = append(numbers, int64(number))
+	}
+	set := ewfSegmentSet{
+		Contiguous:     false,
+		PresentCount:   len(missing.Present),
+		MissingNumbers: numbers,
+		// Expected is empty when the naming family cannot express the missing
+		// numbers, so it is carried as libewf gives it rather than back-filled
+		// with names that would be wrong.
+		MissingFiles: missing.Expected,
+	}
+	// The present segments are the ones a partial open decodes. Without them
+	// ewf_open_partial opened only the file it was named by -- E01 of a set
+	// holding 1 and 3 decoded E01 alone and called segment 2 the only gap,
+	// and named by E03 it read nothing at all (M26-FS1-010).
+	if paths, err := ewfPresentPaths(segmentPath, missing.Present); err == nil {
+		set.Paths = paths
+		for _, number := range missing.Present {
+			set.PresentNumbers = append(set.PresentNumbers, int64(number))
+		}
+	} else {
+		set.PathsError = err.Error()
+	}
+	return set, nil
+}
+
+// ewfDecodablePrefix splits a set with a hole into the segments that can be
+// decoded -- segment 1 and every one after it up to the first missing -- and
+// the present ones after that, which cannot.
+//
+// libewf places a chunk by its position in the concatenated chunk tables of the
+// segments it is given, not by a number of its own. A segment after a hole
+// therefore lands where the missing segment's chunks belong: a set holding
+// segments 1 and 3 decoded segment 3's first chunk at segment 2's offset, so a
+// read there returned bytes from the wrong part of the device. Up to the first
+// gap every chunk is where it was acquired, and past it a read reaches the end
+// of the device as the partial open documents.
+func ewfDecodablePrefix(op string, set ewfSegmentSet) ([]string, []string, *object.Error) {
+	if len(set.PresentNumbers) != len(set.Paths) {
+		return nil, nil, newError("%s: the set's present segments are not numbered", op)
+	}
+	run := 0
+	for run < len(set.PresentNumbers) && set.PresentNumbers[run] == int64(run+1) {
+		run++
+	}
+	if run == 0 {
+		return nil, nil, newError("%s: the set has no segment 1, which holds the volume section and the "+
+			"device's first chunks, so nothing in it can be placed on the device", op)
+	}
+	return set.Paths[:run], set.Paths[run:], nil
+}
+
+// ewfListIsARun refuses a list for a partial open unless its segments are 1
+// to k with none missing, read from each file's own header with libewf's
+// definitions of it. A list is opened as given, so a list with a hole is
+// refused rather than cut short -- the chunks after the hole would land at
+// the missing segment's offsets. A file whose header names no EWF segment is
+// left for libewf to refuse.
+func ewfListIsARun(op string, paths []string) *object.Error {
+	numbers := make([]uint32, 0, len(paths))
+	for _, p := range paths {
+		number, ok := ewfHeaderSegmentNumber(p)
+		if !ok {
+			return nil
+		}
+		numbers = append(numbers, number)
+	}
+	sort.Slice(numbers, func(i, j int) bool { return numbers[i] < numbers[j] })
+	for i, number := range numbers {
+		if number != uint32(i+1) {
+			return newError("%s: the files listed hold segments %v, and segment %d is not among them: "+
+				"libewf places a segment's chunks by the order it is given them, so every chunk after a "+
+				"missing segment would land at the wrong offset; list segments 1 to %d only", op, numbers, i+1, i)
+		}
+	}
+	return nil
+}
+
+// ewfHeaderSegmentNumber reads the segment number a file's EWF header records.
+func ewfHeaderSegmentNumber(path string) (uint32, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = f.Close() }()
+	header := make([]byte, binary.Size(types.FileHeaderV2{}))
+	n, _ := io.ReadFull(f, header)
+	header = header[:n]
+
+	var signature [8]uint8
+	if len(header) < len(signature) {
+		return 0, false
+	}
+	copy(signature[:], header)
+	switch signature {
+	case types.SignatureEVFv1, types.SignatureLVFv1:
+		var h types.FileHeaderV1
+		if binary.Read(bytes.NewReader(header), binary.LittleEndian, &h) != nil {
+			return 0, false
+		}
+		return uint32(h.SegmentNumberValue(binary.LittleEndian)), true
+	case types.SignatureEVFv2, types.SignatureLEFv2:
+		var h types.FileHeaderV2
+		if binary.Read(bytes.NewReader(header), binary.LittleEndian, &h) != nil {
+			return 0, false
+		}
+		return h.SegmentNumberValue(binary.LittleEndian), true
+	}
+	return 0, false
+}
+
+// ewfPresentPaths names the files of the segments libewf found present in a
+// set with a hole. libewf reports a hole as the numbers present and the names
+// of the ones missing, never the paths of the present ones, so they are found
+// here the way its own discovery finds them: the regular files beside path
+// whose name has path's stem, compared without regard to case, and whose
+// extension counts to a segment number in path's naming family. path itself
+// stands for its own number, spelled as given. The files are used only when
+// they name exactly the numbers libewf reported present; anything else is an
+// error rather than a guess.
+func ewfPresentPaths(path string, present []uint32) ([]string, error) {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	family, self, ok := ewfParseFamily(ext)
+	if !ok {
+		return nil, fmt.Errorf("%s names no EWF segment family", name)
+	}
+
+	wanted := make(map[uint32]bool, len(present))
+	for _, number := range present {
+		wanted[number] = true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[uint32]string, len(present))
+	for _, entry := range entries {
+		candidate := entry.Name()
+		candidateExt := filepath.Ext(candidate)
+		if !strings.EqualFold(strings.TrimSuffix(candidate, candidateExt), stem) {
+			continue
+		}
+		number, ok := family.number(candidateExt)
+		if !ok || !wanted[number] {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, candidate)); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if previous, clash := found[number]; clash {
+			return nil, fmt.Errorf("%s and %s both name segment %d", previous, candidate, number)
+		}
+		found[number] = candidate
+	}
+	found[self] = name
+
+	paths := make([]string, 0, len(present))
+	for _, number := range present {
+		file, ok := found[number]
+		if !ok {
+			return nil, fmt.Errorf("libewf counts segment %d present and no file beside %s names it", number, name)
+		}
+		paths = append(paths, filepath.Join(dir, file))
+	}
+	if len(found) != len(present) {
+		return nil, fmt.Errorf("the files beside %s name %d segments and libewf counts %d", name, len(found), len(present))
+	}
+	return paths, nil
+}
+
+// ewfFamily is an EWF segment naming family -- the letter every extension in
+// a set starts with, and whether it is spelled the EWF2 way (.Ex01) -- with
+// libewf's counting rules: .E01 to .E99, then letter pairs from segment 100,
+// then the leading letter carries (.FAA is segment 776 of an E set).
+type ewfFamily struct {
+	base byte
+	v2   bool
+}
+
+// ewfParseFamily reads the family and segment number from an extension, which
+// includes its dot. The base letter must be E, L or s, in either case.
+func ewfParseFamily(ext string) (ewfFamily, uint32, bool) {
+	family, field, ok := ewfSplitExt(ext)
+	if !ok {
+		return ewfFamily{}, 0, false
+	}
+	switch family.base | 0x20 {
+	case 'e', 'l', 's':
+	default:
+		return ewfFamily{}, 0, false
+	}
+	number, ok := ewfFieldNumber(field, 0)
+	return family, number, ok
+}
+
+// number is the segment ext denotes in family f, if it denotes one.
+func (f ewfFamily) number(ext string) (uint32, bool) {
+	other, field, ok := ewfSplitExt(ext)
+	if !ok || other.v2 != f.v2 {
+		return 0, false
+	}
+	carry := int(other.base&^0x20) - int(f.base&^0x20)
+	if carry < 0 {
+		return 0, false
+	}
+	return ewfFieldNumber(field, uint32(carry))
+}
+
+func ewfSplitExt(ext string) (ewfFamily, string, bool) {
+	if len(ext) < 4 || len(ext) > 5 || ext[0] != '.' || !ewfIsLetter(ext[1]) {
+		return ewfFamily{}, "", false
+	}
+	family := ewfFamily{base: ext[1]}
+	field := ext[2:]
+	if len(ext) == 5 {
+		if ext[2]|0x20 != 'x' {
+			return ewfFamily{}, "", false
+		}
+		family.v2 = true
+		field = ext[3:]
+	}
+	return family, field, true
+}
+
+// ewfFieldNumber decodes a two-character counting field; carry is how far the
+// leading letter has advanced past the family's.
+func ewfFieldNumber(field string, carry uint32) (uint32, bool) {
+	if len(field) != 2 {
+		return 0, false
+	}
+	if field[0] >= '0' && field[0] <= '9' && field[1] >= '0' && field[1] <= '9' {
+		n := uint32(field[0]-'0')*10 + uint32(field[1]-'0')
+		if carry != 0 || n == 0 {
+			return 0, false
+		}
+		return n, true
+	}
+	if ewfIsLetter(field[0]) && ewfIsLetter(field[1]) {
+		return ewfLetterPairSegment + carry*26*26 + 26*uint32(field[0]&^0x20-'A') + uint32(field[1]&^0x20-'A'), true
+	}
+	return 0, false
+}
+
+func ewfIsLetter(c byte) bool { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') }
+
+func (realEWFBackend) Open(segmentPaths []string, opts ewfOpenOptions) (ewfSession, error) {
 	files := make([]*os.File, 0, len(segmentPaths))
 	sources := make([]io.ReaderAt, 0, len(segmentPaths))
 
@@ -737,14 +1406,27 @@ func (realEWFBackend) Open(segmentPaths []string) (ewfSession, error) {
 		sources = append(sources, f)
 	}
 
+	libewfOpts := make([]libewf.Option, 0, 2)
+	switch opts.ChecksumPolicy {
+	case ewfChecksumStrict:
+		libewfOpts = append(libewfOpts, libewf.WithChecksumPolicy(libewf.ChecksumStrict))
+	case ewfChecksumIgnore:
+		libewfOpts = append(libewfOpts, libewf.WithChecksumPolicy(libewf.ChecksumIgnore))
+	default:
+		libewfOpts = append(libewfOpts, libewf.WithChecksumPolicy(libewf.ChecksumWarn))
+	}
+	if opts.AllowIncomplete {
+		libewfOpts = append(libewfOpts, libewf.AllowIncompleteSegmentSet())
+	}
+
 	var (
 		reader libewf.Reader
 		err    error
 	)
 	if len(sources) == 1 {
-		reader, err = libewf.Open(sources[0])
+		reader, err = libewf.OpenWithOptions(sources[0], libewfOpts...)
 	} else {
-		reader, err = libewf.OpenSegments(sources)
+		reader, err = libewf.OpenSegmentsWithOptions(sources, libewfOpts...)
 	}
 	if err != nil {
 		for _, f := range files {
@@ -856,6 +1538,25 @@ func (s *realEWFSession) ReadAt(offset int64, length int64) ([]byte, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	// An offset the media declares but this handle cannot serve is refused
+	// rather than answered with an empty buffer, because empty is already how
+	// a caller walks off the end of the media. Answering a hole the same way
+	// makes a set missing its later segments look like a shorter disk: a walk
+	// that reads windows until one comes back empty stops at the first absent
+	// segment and reports the image as that long, with nothing anywhere
+	// saying otherwise. ext_read_file_at settles this for the house -- an
+	// offset inside the recorded size but past what the library could locate
+	// is an error naming both numbers, because "a short buffer or a run of
+	// zeroes would hide it".
+	//
+	// A short answer is left alone: a window that starts inside located data
+	// and runs past it returns what is there, which is what
+	// TestAHoledEWFSetDecodesUpToItsFirstGap requires for M26-FS1-010.
+	if n == 0 {
+		if size := s.reader.Size(); offset < size {
+			return nil, fmt.Errorf("offset %d is inside the %d bytes of media this image declares, but no data for it was located in the segments this handle opened", offset, size)
+		}
+	}
 	return buf[:n], nil
 }
 
@@ -876,6 +1577,7 @@ func (s *realEWFSession) Metadata() (ewfMetadata, error) {
 		// two media fields that are absent on some images.
 		TotalLogicalBytes:     uint64(s.reader.Size()),
 		SectorSize:            s.reader.SectorSize(),
+		HasCompressionMethod:  meta.MajorVersion >= 2,
 		CompressionMethod:     meta.CompressionMethod,
 		ChunkTablesInvalid:    meta.ChunkTablesInvalid,
 		ChunkTablesRecovered:  meta.ChunkTablesRecovered,
@@ -895,6 +1597,54 @@ func (s *realEWFSession) Metadata() (ewfMetadata, error) {
 		out.SectorsPerChunk = meta.Media.SectorsPerChunk
 		out.NumberOfSectors = meta.Media.NumberOfSectors
 		out.NumberOfChunks = meta.Media.NumberOfChunks
+	}
+
+	return out, nil
+}
+
+// Verify recomputes MD5 and SHA-1 over the whole decoded device and compares
+// them against the digests stored at acquisition time. It reads the entire
+// image, so it is O(image size) -- the one builtin here that is not a seek.
+func (s *realEWFSession) Verify(ctx context.Context) (ewfVerifyResult, error) {
+	res, err := libewf.Verify(ctx, s.reader)
+	if err != nil {
+		return ewfVerifyResult{}, err
+	}
+
+	// MD5Match and SHA1Match are passed through rather than re-derived, and
+	// they are only ever true where the image stored that digest: libewf
+	// computes each as HasStored && equal (verify.go). So a false match field
+	// means either a digest that failed to reproduce or no digest to compare
+	// against, and only the HasStored flag beside it says which -- which is
+	// what ewf_verify's documented contract now tells a caller to read.
+	out := ewfVerifyResult{
+		Size:          res.Size,
+		BytesHashed:   res.BytesHashed,
+		HasStoredMD5:  res.HasStoredMD5,
+		MD5Match:      res.MD5Match,
+		HasStoredSHA1: res.HasStoredSHA1,
+		SHA1Match:     res.SHA1Match,
+		OK:            res.OK(),
+	}
+
+	// A stored digest is only rendered when the image actually carries one, so
+	// an absent digest reads as "" rather than as a string of zeroes that looks
+	// like a value.
+	if res.HasStoredMD5 {
+		out.StoredMD5 = hex.EncodeToString(res.StoredMD5)
+	}
+	if res.HasStoredSHA1 {
+		out.StoredSHA1 = hex.EncodeToString(res.StoredSHA1)
+	}
+	out.ComputedMD5 = hex.EncodeToString(res.ComputedMD5)
+	out.ComputedSHA1 = hex.EncodeToString(res.ComputedSHA1)
+
+	for _, br := range res.BadRanges {
+		out.BadRanges = append(out.BadRanges, ewfBadRange{
+			Offset: br.Offset,
+			Length: br.Length,
+			Err:    br.Err,
+		})
 	}
 
 	return out, nil
@@ -943,33 +1693,35 @@ func (s *realRawSession) Close() error {
 	return s.file.Close()
 }
 
-func parseEWFSegmentPaths(arg object.Object, op string) ([]string, *object.Error) {
+// parseEWFSegmentPaths reads the segment argument, and says whether it was a
+// list: a list is the files the caller chose, and is opened as given.
+func parseEWFSegmentPaths(arg object.Object, op string) ([]string, bool, *object.Error) {
 	if pathObj, ok := arg.(*object.String); ok {
 		if pathObj.Value == "" {
-			return nil, newError("argument 1 to `%s` must not be empty", op)
+			return nil, false, newError("argument 1 to `%s` must not be empty", op)
 		}
-		return []string{pathObj.Value}, nil
+		return []string{pathObj.Value}, false, nil
 	}
 
 	arrObj, ok := arg.(*object.Array)
 	if !ok {
-		return nil, newError("argument 1 to `%s` must be STRING or ARRAY of STRING, got %s", op, arg.Type())
+		return nil, false, newError("argument 1 to `%s` must be STRING or ARRAY of STRING, got %s", op, arg.Type())
 	}
 	if len(arrObj.Elements) == 0 {
-		return nil, newError("argument 1 to `%s` must not be an empty ARRAY", op)
+		return nil, false, newError("argument 1 to `%s` must not be an empty ARRAY", op)
 	}
 
 	paths := make([]string, 0, len(arrObj.Elements))
 	for i, elem := range arrObj.Elements {
 		s, ok := elem.(*object.String)
 		if !ok {
-			return nil, newError("argument 1 to `%s` index %d must be STRING, got %s", op, i, elem.Type())
+			return nil, false, newError("argument 1 to `%s` index %d must be STRING, got %s", op, i, elem.Type())
 		}
 		if s.Value == "" {
-			return nil, newError("argument 1 to `%s` index %d must not be empty", op, i)
+			return nil, false, newError("argument 1 to `%s` index %d must not be empty", op, i)
 		}
 		paths = append(paths, s.Value)
 	}
 
-	return paths, nil
+	return paths, true, nil
 }

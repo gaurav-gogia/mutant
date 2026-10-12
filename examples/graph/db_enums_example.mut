@@ -1,84 +1,71 @@
-let check = fn(pair, op) {
-    let result, err = pair;
+// Uses enums as graph node and edge types.
+let check = fn(err, op) {
     if (err) {
         putln("[error] ", op, ": ", err);
-    };
-    return result;
+    }
 };
 
-let check_err = fn(err, op) {
-    if (err) {
-        putln("[error] ", op, ": ", err);
-    };
-};
-enum NodeType { DATA, PERSON, DOCUMENT, HOST };
-enum EdgeType { DATA, KNOWS, AUTHORED, CONNECTS_TO };
+enum NodeType { DATA, PERSON, DOCUMENT, HOST }
+enum EdgeType { DATA, KNOWS, AUTHORED, CONNECTS_TO }
 
 putln("=== GrapheneDB Example With Enums ===");
 
 let db, err = db_open();
-check_err(err, "db_open");
-putf("opened graph db, handle: ", db);
-putln("");
+check(err, "db_open");
+putf("opened graph db, handle: %v\n", db);
 
-let alice, err = db_add_node(db, NodeType.PERSON);
-let bob, err = db_add_node(db, NodeType.PERSON);
-let carol, err = db_add_node(db, NodeType.PERSON);
+let alice, _ = db_add_node(db, NodeType.PERSON);
+let bob, _ = db_add_node(db, NodeType.PERSON);
+let carol, _ = db_add_node(db, NodeType.PERSON);
 let doc, err = db_add_node(db, NodeType.DOCUMENT);
-check_err(err, "db_add_node DOCUMENT");
+check(err, "db_add_node DOCUMENT");
+putf("added nodes: alice=%v bob=%v carol=%v doc=%v\n", alice, bob, carol, doc);
 
-putf("added nodes: alice=", alice, " bob=", bob, " carol=", carol, " doc=", doc);
-putln("");
+let e1, _ = db_add_edge(db, alice, bob, EdgeType.KNOWS);
+let e2, _ = db_add_edge(db, bob, carol, EdgeType.KNOWS);
+let e3, err = db_add_edge(db, alice, doc, EdgeType.AUTHORED);
+check(err, "db_add_edge AUTHORED");
+putf("added edges: %v %v %v\n", e1, e2, e3);
 
-let e1, err = db_add_edge(db, alice, bob,   EdgeType.KNOWS);
-let e2, err = db_add_edge(db, bob,   carol, EdgeType.KNOWS);
-let e3, err = db_add_edge(db, alice, doc,   EdgeType.AUTHORED);
-check_err(err, "db_add_edge AUTHORED");
+let _, err = db_index_prop(db, alice, "name", "Alice");
+check(err, "db_index_prop");
+let _, err = db_index_prop(db, bob, "name", "Bob");
+check(err, "db_index_prop");
+let _, err = db_index_prop(db, carol, "name", "Carol");
+check(err, "db_index_prop");
 
-putf("added edges: ", e1, " ", e2, " ", e3);
-putln("");
-
-check(db_index_prop(db, alice, "name", "Alice"), "db_index_prop");
-check(db_index_prop(db, bob,   "name", "Bob"), "db_index_prop");
-check(db_index_prop(db, carol, "name", "Carol"), "db_index_prop");
-
-let people, err = db_query_nodes(db, NodeType.PERSON);
+let people, _ = db_query_nodes(db, NodeType.PERSON);
 let docs, err = db_query_nodes(db, NodeType.DOCUMENT);
-check_err(err, "db_query_nodes DOCUMENT");
-let people_count = len(people);
-let docs_count = len(docs);
-putf("person nodes: ", people_count, " document nodes: ", docs_count);
-putln("");
+check(err, "db_query_nodes DOCUMENT");
+putf("person nodes: %d document nodes: %d\n", len(people), len(docs));
 
 let stats, err = db_stats(db);
-check_err(err, "db_stats");
-putf("graph stats — nodes: ", stats["nodes"], " edges: ", stats["edges"]);
-putln("");
+check(err, "db_stats");
+putf("graph stats — nodes: %v edges: %v\n", stats["nodes"], stats["edges"]);
 
 let closed, err = db_close(db);
-check_err(err, "db_close");
+check(err, "db_close");
 if (closed) {
     putln("graph closed cleanly");
-};
+}
 
 putln("");
 putln("=== Default DATA Type Demo ===");
 
 let disk_db, err = db_open_disk("./example_graph_data_enums");
-check_err(err, "db_open_disk");
-let h1, err = db_add_node(disk_db);
+check(err, "db_open_disk");
+let h1, _ = db_add_node(disk_db);
 let h2, err = db_add_node(disk_db);
-check_err(err, "db_add_node default");
-check(db_add_edge(disk_db, h1, h2), "db_add_edge");
+check(err, "db_add_node default");
+let _, err = db_add_edge(disk_db, h1, h2);
+check(err, "db_add_edge");
 
 let default_nodes, err = db_query_nodes(disk_db);
-check_err(err, "db_query_nodes default");
-let default_node_count = len(default_nodes);
-putf("default DATA nodes: ", default_node_count);
-putln("");
+check(err, "db_query_nodes default");
+putf("default DATA nodes: %d\n", len(default_nodes));
 
 let disk_closed, err = db_close(disk_db);
-check_err(err, "db_close disk");
+check(err, "db_close disk");
 if (disk_closed) {
     putln("disk graph closed cleanly");
-};
+}

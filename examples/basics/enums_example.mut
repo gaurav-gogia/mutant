@@ -1,21 +1,17 @@
-enum Color { Red, Blue, Green };
+// Enums: printing a variant, truthiness and comparison.
+
+enum Color { Red, Blue, Green }
 
 let active = Color.Green;
-
 putln("enum value demo:");
-putf("active = ", active);
-putln("");
-
+putf("active = %v\n", active);
 if (active) {
     putln("enum values are truthy in conditionals");
-} else {
-    putln("this branch should not run");
 }
 
 putln("");
 active = Color.Red;
 putln(active);
-
 if (active == Color.Blue) {
     putln("blue found");
 } else {

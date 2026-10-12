@@ -1,59 +1,39 @@
+// mutant:sweep needs-input -- reports this machine's debugger and VM state, which differs from host to host
+
 putln("=== Security Diagnostics Example ===");
 putln("Tip: run with --dev --security-log-level=debug (or --log-level=debug) to see detailed stderr logs.");
 putln("");
 
-let diagnostics, err = security_diagnostics();
-let debugger_status = diagnostics["debugger"];
-let sandbox_status = diagnostics["sandbox"];
+let diagnostics, _ = security_diagnostics();
+let debugger = diagnostics["debugger"];
+let sandbox = diagnostics["sandbox"];
 
-let print_list_items = fn(items, index) {
-    let item_count = len(items);
-    let reached_end = index == item_count;
-    if (reached_end) {
-        return 0;
+let print_items = fn(items) {
+    if (len(items) == 0) {
+        putln("  - none");
     }
-    putf("  - ", items[index]);
-    putln("");
-    return print_list_items(items, index + 1);
+    for (item in items) {
+        putf("  - %s\n", item);
+    }
 };
 
 putln("[Debugger]");
-putf("detected: ", debugger_status["detected"]);
-putln("");
-putf("event_count: ", debugger_status["event_count"]);
-putln("");
-let method_count = len(debugger_status["methods"]);
-putf("method_count: ", method_count);
-putln("");
-if (method_count == 0) {
-    putln("  - none");
-} else {
-    print_list_items(debugger_status["methods"], 0);
-};
+putf("detected: %t\n", debugger["detected"]);
+putf("event_count: %d\n", debugger["event_count"]);
+putf("method_count: %d\n", len(debugger["methods"]));
+print_items(debugger["methods"]);
 
 putln("");
 putln("[Sandbox]");
-putf("detected: ", sandbox_status["detected"]);
-putln("");
-putf("type: ", sandbox_status["type"]);
-putln("");
-putf("confidence: ", sandbox_status["confidence"]);
-putln("");
-putf("event_count: ", sandbox_status["event_count"]);
-putln("");
-let indicator_count = len(sandbox_status["indicators"]);
-putf("indicator_count: ", indicator_count);
-putln("");
-if (indicator_count == 0) {
-    putln("  - none");
-} else {
-    print_list_items(sandbox_status["indicators"], 0);
-};
-
-if (sandbox_status["error"] != "") {
-    putf("error: ", sandbox_status["error"]);
-    putln("");
-};
+putf("detected: %t\n", sandbox["detected"]);
+putf("type: %s\n", sandbox["type"]);
+putf("confidence: %d\n", sandbox["confidence"]);
+putf("event_count: %d\n", sandbox["event_count"]);
+putf("indicator_count: %d\n", len(sandbox["indicators"]));
+print_items(sandbox["indicators"]);
+if (sandbox["error"] != "") {
+    putf("error: %s\n", sandbox["error"]);
+}
 
 putln("");
 putln("Run this same script in Windows Terminal and PowerShell to compare outputs.");

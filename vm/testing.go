@@ -358,9 +358,9 @@ func testErrorFailure(err error) TestFailure {
 	var runtime *RuntimeError
 	if errors.As(err, &runtime) && len(runtime.Frames) > 0 {
 		innermost := runtime.Frames[0]
-		return TestFailure{File: innermost.File, Line: innermost.Line, Message: runtime.Err.Error()}
+		return TestFailure{File: innermost.File, Line: innermost.Line, Message: withoutInstructionMetadata(runtime.Err)}
 	}
-	return TestFailure{Message: err.Error()}
+	return TestFailure{Message: withoutInstructionMetadata(err)}
 }
 
 // mustNotCatch reports whether an error that ended a test must also end the run.
@@ -406,7 +406,7 @@ func (vm *VM) hoAssert(args []object.Object) (object.Object, error) {
 	if errObj != nil {
 		return errObj, nil
 	}
-	if isTruthy(args[0]) {
+	if object.IsTruthy(args[0]) {
 		return global.True, nil
 	}
 	return vm.recordFailure(note, "assert: %s is not true", renderTestValue(args[0])), nil
@@ -629,11 +629,21 @@ func testArgCount(op, want string, got int) *object.Error {
 }
 
 // testValuesEqual is the comparison the assertions use: scalars by value,
-// everything else by its rendered form.
+// functions by identity, arrays, hashes and structs as `==` compares them,
+// errors by Error.Equals, everything else by its rendered form.
 //
-// Rendering is not a shortcut. Hash.Inspect sorts its keys, so two hashes built
-// in different orders compare equal, which is the answer a test wants and the
-// one pointer identity would get wrong.
+// Errors do not compare by their render because Error.Inspect includes the
+// position the VM stamps onto every error, so the same failure raised on two
+// lines rendered differently: assert_eq failed, assert_ne passed and
+// assert_contains missed where `==` -- which excludes the position on purpose --
+// said the two were equal. Equals is what `==` compares.
+//
+// Arrays, hashes and structs go through object.ValuesEqual, part by part.
+// Their renders keep six decimals of a float, so assert_eq([7.9999991],
+// [7.9999994]) passed, and so did assert_eq on two structs whose float fields
+// differed only past the sixth decimal. ValuesEqual matches a hash key by key,
+// so two hashes built in different orders still compare equal, which is the
+// answer a test wants and the one pointer identity would get wrong.
 func testValuesEqual(a, b object.Object) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -642,6 +652,12 @@ func testValuesEqual(a, b object.Object) bool {
 		return false
 	}
 	switch left := a.(type) {
+	case *object.Closure, *object.Function, *builtin.BuiltIn:
+		// As `==` compares them. A function renders as its signature, which
+		// two distinct functions share, and every builtin as "builtin
+		// function", so by its render assert_eq passed for two different
+		// functions and assert_ne failed for them (M26-EVL-002).
+		return object.ValuesEqual(a, b)
 	case *object.Integer:
 		return left.Value == b.(*object.Integer).Value
 	case *object.Float:
@@ -652,6 +668,10 @@ func testValuesEqual(a, b object.Object) bool {
 		return left.Value == b.(*object.Boolean).Value
 	case *object.Null:
 		return true
+	case *object.Array, *object.Hash, *object.Struct:
+		return object.ValuesEqual(a, b)
+	case *object.Error:
+		return left.Equals(b.(*object.Error))
 	default:
 		return a.Inspect() == b.Inspect()
 	}

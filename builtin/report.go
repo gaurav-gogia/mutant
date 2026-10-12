@@ -186,6 +186,12 @@ func ReportList(args ...object.Object) object.Object {
 	if len(args) < 2 || len(args) > 3 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=2 or 3", len(args)))
 	}
+	// Refused here, where the buffer goes in: the item is rendered to text as
+	// it is added, so by report_render or report_write there is no marked
+	// buffer left for their own check to find.
+	if errObj := refuseClassified(BuiltinNameReportList, args...); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
 	report, errObj := requireHashArg(BuiltinNameReportList, args[0], 1)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
@@ -235,6 +241,10 @@ var reportTableOptions = []string{"columns", "caption", "header"}
 func ReportTable(args ...object.Object) object.Object {
 	if len(args) < 2 || len(args) > 3 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=2 or 3", len(args)))
+	}
+	// Refused where the buffer goes in, for the reason report_list gives.
+	if errObj := refuseClassified(BuiltinNameReportTable, args...); errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 	report, errObj := requireHashArg(BuiltinNameReportTable, args[0], 1)
 	if errObj != nil {
@@ -301,6 +311,9 @@ func ReportRender(args ...object.Object) object.Object {
 	}
 	reportHash, errObj := requireHashArg(BuiltinNameReportRender, args[0], 1)
 	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	if errObj := refuseClassified(BuiltinNameReportRender, args...); errObj != nil {
 		return resultAndError(nil, errObj)
 	}
 	format, errObj := requireStringArg(BuiltinNameReportRender, args[1], 2)
@@ -874,7 +887,19 @@ func renderMarkdownBlock(out *bytes.Buffer, block reportDocBlock) {
 	case reportBlockText:
 		// A newline inside a paragraph is a hard break rather than something
 		// Markdown may fold away, so the shape the examiner wrote survives.
-		fmt.Fprintf(out, "%s\n", strings.ReplaceAll(markdownText(block.text), "\n", "\\\n"))
+		// A hard break before nothing but blank lines is not a break: CommonMark
+		// prints its backslash. So the text's trailing blank lines go first.
+		text := strings.TrimRight(markdownText(block.text), " \t\n")
+		paragraph := strings.ReplaceAll(text, "\n", "\\\n")
+		// The hard break gives a line of only spaces a character, so it is no
+		// longer a blank line and its indent can open a code block like any
+		// other line's; markdownText leaves such a line alone because
+		// everywhere else it is blank.
+		lines := strings.Split(paragraph, "\n")
+		for i, line := range lines {
+			lines[i] = markdownIndent(line)
+		}
+		fmt.Fprintf(out, "%s\n", strings.Join(lines, "\n"))
 
 	case reportBlockList:
 		for i, item := range block.items {
@@ -882,7 +907,7 @@ func renderMarkdownBlock(out *bytes.Buffer, block reportDocBlock) {
 			if block.ordered {
 				marker = strconv.Itoa(i+1) + "."
 			}
-			fmt.Fprintf(out, "%s %s\n", marker, markdownCell(item))
+			fmt.Fprintf(out, "%s %s\n", marker, markdownListItem(item))
 		}
 
 	case reportBlockTable:
@@ -938,25 +963,73 @@ var markdownInline = strings.NewReplacer(
 )
 
 // markdownBlockStarters are the characters that, at the start of a line, turn a
-// paragraph into something else.
-const markdownBlockStarters = "#>-+=|"
+// paragraph into something else. The "~" is there for the "~~~" code fence,
+// which would swallow every heading and finding after it; the backtick fence
+// needs no entry because markdownInline escapes every backtick.
+const markdownBlockStarters = "#>-+=|~"
+
+// markdownLineEndings turns every line ending CommonMark recognises into "\n".
+// A lone "\r" ends a line there just as "\n" does, so a line split on "\n"
+// alone would leave "note\r~~~" looking like one line that starts with "n"
+// while the renderer reads a "~~~" fence that swallows the rest of the report.
+var markdownLineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")
 
 func markdownText(text string) string {
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(markdownLineEndings.Replace(text), "\n")
 	for i, line := range lines {
-		escaped := markdownInline.Replace(line)
-		trimmed := strings.TrimLeft(escaped, " \t")
-		indent := escaped[:len(escaped)-len(trimmed)]
-		switch {
-		case trimmed == "":
-		case strings.ContainsRune(markdownBlockStarters, rune(trimmed[0])):
-			escaped = indent + `\` + trimmed
-		case markdownOrderedPrefix(trimmed):
-			escaped = indent + `\` + trimmed
-		}
-		lines[i] = escaped
+		lines[i] = markdownLineStart(markdownInline.Replace(line))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// markdownLineStart escapes what an already inline-escaped line would open at
+// the place a block can start: a block starter or a numbered-list prefix after
+// the line's indent, and an indent that reaches an indented code block.
+//
+// A numbered-list prefix is escaped at its "." or ")": a backslash escapes only
+// punctuation, so one before the digit would print as a backslash.
+func markdownLineStart(escaped string) string {
+	trimmed := strings.TrimLeft(escaped, " \t")
+	indent := escaped[:len(escaped)-len(trimmed)]
+	switch {
+	case trimmed == "":
+	case strings.ContainsRune(markdownBlockStarters, rune(trimmed[0])):
+		escaped = indent + `\` + trimmed
+	case markdownOrderedPrefix(trimmed):
+		digits := strings.IndexAny(trimmed, ".)")
+		escaped = indent + trimmed[:digits] + `\` + trimmed[digits:]
+	}
+	return markdownIndent(escaped)
+}
+
+// markdownIndent keeps a line's indent from opening an indented code block.
+//
+// A line whose leading spaces and tabs reach column 4 (a tab advancing to the
+// next multiple of 4) starts a code block wherever a block can start, and there
+// the backslash escapes above stop being escapes and print as backslashes. The
+// first indent character becomes its numeric character reference: CommonMark
+// renders "&#32;" and "&#9;" as the space or tab they name, but a reference is
+// never indentation, so the line stays text and keeps the rest of its indent. A
+// line of only spaces and tabs is left alone, because it is a blank line.
+func markdownIndent(line string) string {
+	column := 0
+	for i := 0; i < len(line) && column < 4; i++ {
+		switch line[i] {
+		case ' ':
+			column++
+		case '\t':
+			column += 4 - column%4
+		default:
+			return line
+		}
+	}
+	if column < 4 || strings.TrimLeft(line, " \t") == "" {
+		return line
+	}
+	if line[0] == '\t' {
+		return "&#9;" + line[1:]
+	}
+	return "&#32;" + line[1:]
 }
 
 // markdownOrderedPrefix reports whether a line begins with digits followed by
@@ -981,6 +1054,19 @@ func markdownCell(text string) string {
 	cell = strings.ReplaceAll(cell, "\n", " ")
 	cell = strings.ReplaceAll(cell, "\r", " ")
 	return cell
+}
+
+// markdownListItem escapes a list item. It is flattened to one line like a
+// cell, but unlike a cell its text is parsed as blocks: after "- " or "1. " a
+// "~~~" opens a fence, a "#" a heading, and an indent of four columns an
+// indented code block, any of which would hide the item's text. So the start of
+// that line gets the same escapes as the start of a paragraph line. The indent
+// is measured from the item's first character. One that falls short of column
+// 4 there is at most three spaces and no tab, which after any marker and its
+// space is short of a code block too; a longer one gets its first character
+// escaped whatever the marker's width.
+func markdownListItem(text string) string {
+	return markdownLineStart(markdownCell(text))
 }
 
 // --- CSV ---

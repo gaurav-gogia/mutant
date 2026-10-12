@@ -1,9 +1,9 @@
 package object
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"hash/fnv"
 
 	"mutant/security"
 )
@@ -22,18 +22,90 @@ import (
 //
 // The type is what lets a builtin declare which one it wants, and the analyzer
 // warn when the two are mixed.
-type Bytes struct{ Value []byte }
+type Bytes struct {
+	Value []byte
+
+	// Classified is set on plaintext read out of a classified record, and nil
+	// on every other buffer. It is checked where a value leaves the process --
+	// printing, writing a file, sending on a socket, writing a report, a note,
+	// a cache entry or a ledger node -- and nowhere else.
+	//
+	// It is deliberately NOT consulted by Inspect, nor by equality. Two buffers
+	// are equal when their contents are (ValuesEqual, and `==` in both
+	// engines), and Inspect is still the key unique files a buffer under (see
+	// below), so a classification-aware Inspect would make two different
+	// buffers one element there.
+	//
+	// It survives being held: a variable is stored encrypted at rest, and
+	// Encrypted.Classified carries the mark beside the ciphertext so that
+	// reading the variable back returns a buffer that still has it.
+	//
+	// Its limits, stated as loudly as its existence: it travels through
+	// bytes_slice and concatenation (`a + b` of two buffers) and nothing else,
+	// so any conversion -- to a string, to hex, to JSON, a loop that rebuilds
+	// the buffer byte by byte -- produces a value without it. It catches
+	// accidents, not adversaries.
+	Classified *Classification
+}
+
+// Classification says where classified plaintext came from: the record it was
+// read out of, and the classes of the segments the read touched. It names the
+// classes by tag and, where the reading case could, by label; it never holds
+// any of the plaintext.
+type Classification struct {
+	RecordUID string
+	Tags      []string
+	Labels    []string
+}
+
+// JoinClassification is the mark of a buffer built from two others: nil when
+// neither was marked, the one mark when only one was, and when both were, one
+// mark naming every record and every class either came from. Classified
+// plaintext joined to anything is classified plaintext, whichever side it was
+// on, and a later release must record all of what it let go.
+//
+// A class is identified by its tag, so a class both sides carry is named
+// once. Neither mark is modified: a Classification is shared, never mutated.
+func JoinClassification(a, b *Classification) *Classification {
+	switch {
+	case a == nil:
+		return b
+	case b == nil || a == b:
+		return a
+	}
+	joined := &Classification{RecordUID: a.RecordUID}
+	if b.RecordUID != a.RecordUID {
+		joined.RecordUID = a.RecordUID + " and " + b.RecordUID
+	}
+	seen := map[string]bool{}
+	for _, c := range []*Classification{a, b} {
+		for i, tag := range c.Tags {
+			if seen[tag] {
+				continue
+			}
+			seen[tag] = true
+			label := ""
+			if i < len(c.Labels) {
+				label = c.Labels[i]
+			}
+			joined.Tags = append(joined.Tags, tag)
+			joined.Labels = append(joined.Labels, label)
+		}
+	}
+	return joined
+}
 
 func (b *Bytes) Type() ObjectType { return BYTES_OBJ }
 
 // Inspect renders the buffer as contiguous lowercase hex.
 //
 // It is deliberately lossless and deliberately untruncated, because Inspect is
-// not only a display function here: it is the de-facto identity function for
-// equality in both engines, for unique's dedup key, for contains and index_of,
-// and for hash-key ordering. A preview -- "bytes(4096) 4d5a..." -- would make
-// two distinct buffers sharing a prefix compare equal, and would do it silently
-// in six subsystems at once.
+// not only a display function here: unique files a buffer, alone or inside
+// another value, under its type and this render. A preview -- "bytes(4096)
+// 4d5a..." -- would make two distinct buffers sharing a prefix one element
+// there, silently. Equality, contains and index_of compare contents
+// (ValuesEqual), and hash keys order by bytes.Compare, so none of those reads
+// the render.
 //
 // The cost is that rendering a large buffer materialises twice its size. The one
 // caller that only ever wanted a preview, the traceback's argument renderer,
@@ -42,10 +114,15 @@ func (b *Bytes) Inspect() string { return hex.EncodeToString(b.Value) }
 
 // HashKey lets a bytes value be a hash key. The key carries the type, so bytes
 // and strings occupy disjoint keyspaces: {"4d5a": 1}[some_bytes] does not hit.
+//
+// The key is the buffer's SHA-256, not the buffer. A map key is an immutable Go
+// string nothing can zero, and a buffer may be classified plaintext, so the
+// buffer itself is never copied into one. A 64-bit digest was not enough: two
+// buffers with one FNV-1a-64 digest were one key, and such pairs take seconds
+// to find. No SHA-256 collision is known.
 func (b *Bytes) HashKey() HashKey {
-	h := fnv.New64a()
-	h.Write(b.Value)
-	return HashKey{Type: b.Type(), Value: h.Sum64()}
+	digest := sha256.Sum256(b.Value)
+	return HashKey{Type: b.Type(), Text: string(digest[:])}
 }
 
 // Preview renders at most limit bytes of the buffer, with the length in front,

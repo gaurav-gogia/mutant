@@ -1,0 +1,25 @@
+import "lib/quilldrop.mut";
+
+putln("QUILLDROP  the run keys");
+
+let hive = quilldrop.path("Users/r.mehta/NTUSER.DAT");
+let base = "Software\\Microsoft\\Windows\\CurrentVersion";
+let odd = "(?i)appdata|programdata|powershell|\\btemp\\b";
+
+if (quilldrop.ready(hive)) {
+    let reg, _ = hive_open(hive);
+    let keys, _ = hive_list_keys(reg["handle"], base);
+    for (key in keys) {
+        if (!str_starts_with(key, "Run")) {
+            continue;
+        }
+        let at = base + "\\" + key;
+        let info, _ = hive_key_info(reg["handle"], at);
+        let values, _ = hive_list_values(reg["handle"], at);
+        putln("  ", key, "written", info["last_write_iso"]);
+        for (v in values) {
+            putln("    ", v["name"], v["data"], "odd:", regex_match(odd, v["data"]));
+        }
+    }
+    let _, _ = hive_close(reg["handle"]);
+}

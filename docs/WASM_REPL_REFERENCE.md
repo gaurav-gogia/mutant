@@ -30,6 +30,67 @@ Source of truth:
 | Output model            | Supported     | buffered putf/putln + optional final expression append                         |
 | Error model             | Supported     | parser/runtime errors returned as ok=false                                     |
 
+## Building and serving
+
+Build the wasm bundle with the build scripts. By default it lands in
+`dist/wasm-repl/`:
+
+```bash
+./scripts/build.sh --host-only --wasm-repl
+```
+
+```powershell
+./scripts/build.ps1 -HostOnly -WasmRepl
+```
+
+`examples/wasm-repl/index.html` is a ready-made page. To build next to it, so the
+page, `mutant_repl.wasm` and `wasm_exec.js` sit side by side:
+
+```bash
+./scripts/build.sh --host-only --wasm-repl --wasm-out-dir examples/wasm-repl
+```
+
+```powershell
+./scripts/build.ps1 -HostOnly -WasmRepl -WasmOutDir examples/wasm-repl
+```
+
+Then serve that folder with any static server, or with the one in this
+repository:
+
+```bash
+go run ./cmd/wasmreplserve          # -addr 127.0.0.1:8123  -dir examples/wasm-repl
+```
+
+It maps `/` to `index.html` and serves `.wasm` as `application/wasm`. It also
+refreshes `wasm_exec.js` from your Go toolchain, and rebuilds
+`mutant_repl.wasm` if the file is missing or is not a real wasm binary.
+
+Loading it from your own page:
+
+```html
+<script src="./wasm_exec.js"></script>
+<script>
+  const go = new Go();
+
+  async function start() {
+    const response = await fetch("./mutant_repl.wasm");
+    const { instance } = await WebAssembly.instantiateStreaming(
+      response,
+      go.importObject,
+    );
+    go.run(instance);
+
+    const result = window.mutantReplEval("len([1, 2, 3])");
+    console.log(result.output);
+
+    const completions = window.mutantReplCompleteLine("text_", "supported");
+    console.log(completions.candidates);
+  }
+
+  start();
+</script>
+```
+
 ## CLI to WASM Migration Cheat Sheet
 
 | If your CLI REPL usage looks like this                                | In WASM REPL, do this                                                                                           | Why                                                                                       |
@@ -174,14 +235,21 @@ Response shape is the same as mutantReplComplete.
 
 ### 3.3 Truthiness
 
-Falsey values:
+Falsy values:
 
-- null
-- false
-- integer 0
-- empty or whitespace-only string
+- `null`, including a call that produced no value
+- `false`
+- integer `0`
+- float `0.0`
+- the empty string
+- an empty buffer
 
-All other values are truthy.
+All other values are truthy, including `[]`, `{}`, a function and an error value.
+A whitespace-only string is truthy: it is not empty.
+
+This is `object.IsTruthy`, which is the only implementation of the rule -- the REPL,
+the VM and the tree-walking evaluator all read it -- and `!x` is its negation and
+nothing else. See the truthiness section of the language reference.
 
 ### 3.4 Numeric behavior
 
@@ -227,7 +295,7 @@ Intentionally unsupported:
 
 ## 5) Builtin Support (Current)
 
-The full standard library is **497 builtins across 38 categories** — see the
+The full standard library is **694 builtins across 41 categories** — see the
 [Capability Reference](CAPABILITY_REFERENCE.md) for the complete catalog. In the
 browser WASM REPL, the **pure-compute** families run unchanged; the **host-facing**
 families (section 6) are unavailable because the WASM sandbox has no filesystem,

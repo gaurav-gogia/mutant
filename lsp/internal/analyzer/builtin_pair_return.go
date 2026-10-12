@@ -30,7 +30,6 @@ import (
 
 	mast "mutant/ast"
 	"mutant/builtin"
-	localprotocol "mutant/lsp/internal/protocol"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -46,11 +45,11 @@ type pairBindingCandidate struct {
 }
 
 // checkSingleNameBinding records `let x = f();` when f is a pair-returning
-// builtin. It shares builtinCallCollector's scope walk, so it inherits the
-// guards that make the other two rules false-positive-free: the callee must not
-// be shadowed by a binding in scope, must be live in builtin.Builtins, and must
-// carry a verified return contract.
-func (c *builtinCallCollector) checkSingleNameBinding(name *mast.Identifier, value mast.Expression, current *declarationScope) {
+// builtin. It shares builtinCallCollector's walk, so it inherits the guards that
+// make the other two rules false-positive-free: the callee must not be shadowed
+// by a binding in scope, must be live in builtin.Builtins, and must carry a
+// verified return contract.
+func (c *builtinCallCollector) checkSingleNameBinding(name *mast.Identifier, value mast.Expression) {
 	if c == nil || c.pairSeverity == nil || name == nil || value == nil {
 		return
 	}
@@ -64,7 +63,7 @@ func (c *builtinCallCollector) checkSingleNameBinding(name *mast.Identifier, val
 	if !ok || call.Function == nil {
 		return
 	}
-	calleeName, _, ok := builtinCallee(call.Function, c.boundIn(current))
+	calleeName, _, ok := c.calleeAt(call.Function)
 	if !ok {
 		return
 	}
@@ -106,7 +105,7 @@ func pairBindingDiagnostics(snapshot *Snapshot, severity *lsp.DiagnosticSeverity
 			continue
 		}
 		result = append(result, lsp.Diagnostic{
-			Range:    localprotocol.ToLSPRange(rng),
+			Range:    snapshot.Range(rng),
 			Severity: severity,
 			Source:   source,
 			Message: fmt.Sprintf(
@@ -195,6 +194,20 @@ func namesHeldAsPairs(statements []mast.Statement) map[string]struct{} {
 			if node == nil {
 				return
 			}
+			// `fn(p) { let r = fs_read(p); r; }` returns the pair exactly as
+			// `return r;` does -- the last expression of a body is its value --
+			// so the name is held for the same reason. Without this the rule
+			// warned on the implicit form while staying quiet on the explicit
+			// one, which is a warning on correct code, and its advice
+			// (`let r, err = ...`) would have broken the forwarding the caller
+			// destructures.
+			if node.Body != nil && len(node.Body.Statements) > 0 {
+				if last, ok := node.Body.Statements[len(node.Body.Statements)-1].(*mast.ExpressionStatement); ok && last != nil {
+					// hold takes a name and ignores anything else, so a body
+					// ending in a call or an index falls through untouched.
+					hold(last.Expression)
+				}
+			}
 			walkStatement(node.Body)
 		case *mast.MacroLiteral:
 			if node == nil {
@@ -241,9 +254,9 @@ func namesHeldAsPairs(statements []mast.Statement) map[string]struct{} {
 			if node == nil {
 				return
 			}
-			for key, value := range node.Pairs {
-				walkExpression(key)
-				walkExpression(value)
+			for _, pair := range node.Pairs {
+				walkExpression(pair.Key)
+				walkExpression(pair.Value)
 			}
 		case *mast.StructLiteral:
 			if node == nil {

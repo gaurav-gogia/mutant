@@ -13,8 +13,8 @@ import (
 // InlayHints returns parameter-name hints (`name:`) placed before each
 // positional argument of every call whose argument lies within rng. Parameter
 // names are resolved through the same machinery as signature help, so they cover
-// both user functions and builtins. Because Mutant is dynamically typed, these
-// name hints are the only inlay hints that carry real meaning.
+// both user functions and builtins. It also returns a type hint after each let
+// name whose type inference is sure of.
 func (s *Snapshot) InlayHints(rng lsp.Range) []localprotocol.InlayHint {
 	if s == nil || s.Program == nil || s.Program.NodePositions == nil {
 		return nil
@@ -49,10 +49,7 @@ func (s *Snapshot) InlayHints(rng lsp.Range) []localprotocol.InlayHint {
 			if !ok || !nameRange.IsValid() {
 				continue
 			}
-			pos := lsp.Position{
-				Line:      lsp.UInteger(nameRange.End.Line - 1),
-				Character: lsp.UInteger(nameRange.End.Column - 1),
-			}
+			pos := s.Position(nameRange.End)
 			if pos.Line < rng.Start.Line || pos.Line > rng.End.Line {
 				continue
 			}
@@ -80,23 +77,13 @@ func (s *Snapshot) InlayHints(rng lsp.Range) []localprotocol.InlayHint {
 			if i >= len(sig.Parameters) {
 				break // variadic tail / extra args: no name to show
 			}
-			// ParameterInformation.Label is `string | [uint, uint]`; we only emit
-			// hints for the plain-string form.
-			label, ok := sig.Parameters[i].Label.(string)
-			if !ok || label == "" {
-				continue
-			}
-			// A user function's label now carries the solved kinds
-			// (`host: STRING`), which belong in signature help but not in an
-			// inline hint: this annotates an argument with the name it binds to,
-			// and `host: STRING:` in the middle of a call reads as noise.
-			name, _, _ := strings.Cut(label, ":")
+			name := parameterHintName(sig, sig.Parameters[i])
 			if name == "" {
 				continue
 			}
 			// Noise reduction: skip when the argument is exactly the identifier
 			// with the same name as the parameter (e.g. push(list, list)).
-			if ident, ok := arg.(*mast.Identifier); ok && ident.Value == name {
+			if ident, ok := arg.(*mast.Identifier); ok && ident.Value == strings.TrimPrefix(name, "...") {
 				continue
 			}
 
@@ -104,10 +91,7 @@ func (s *Snapshot) InlayHints(rng lsp.Range) []localprotocol.InlayHint {
 			if !ok || !argRange.IsValid() {
 				continue
 			}
-			pos := lsp.Position{
-				Line:      lsp.UInteger(argRange.Start.Line - 1),
-				Character: lsp.UInteger(argRange.Start.Column - 1),
-			}
+			pos := s.Position(argRange.Start)
 			if pos.Line < rng.Start.Line || pos.Line > rng.End.Line {
 				continue
 			}
@@ -134,4 +118,31 @@ func (s *Snapshot) InlayHints(rng lsp.Range) []localprotocol.InlayHint {
 		return hints[i].Position.Character < hints[j].Position.Character
 	})
 	return hints
+}
+
+// parameterHintName is the name a hint shows for one parameter: its label up to
+// any `: KIND`, with an optional parameter's `?` dropped, since the hint names
+// the parameter an argument binds to and `step?: INTEGER:` in the middle of a
+// call reads as noise. A builtin's labels are offset pairs into the signature
+// label, which is how signature help highlights its typed signature parameter
+// by parameter; until they were read here, no builtin call had a hint at all
+// (M26-SEM-009). The offsets are bytes because a typed signature is ASCII. A
+// variadic parameter keeps its `...`: the hint sits before one element of it,
+// not before a value of that name.
+func parameterHintName(sig lsp.SignatureInformation, param lsp.ParameterInformation) string {
+	var label string
+	switch l := param.Label.(type) {
+	case string:
+		label = l
+	case [2]lsp.UInteger:
+		start, end := int(l[0]), int(l[1])
+		if start > end || end > len(sig.Label) {
+			return ""
+		}
+		label = sig.Label[start:end]
+	default:
+		return ""
+	}
+	name, _, _ := strings.Cut(label, ":")
+	return strings.TrimSuffix(strings.TrimSpace(name), "?")
 }

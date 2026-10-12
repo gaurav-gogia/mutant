@@ -1,26 +1,22 @@
+// Macros: quote returns code, unquote splices an argument into it.
+
 putln("== macro quote/unquote basics ==");
 
 let emit_literal = macro() {
-	quote(7);
+    quote(7);
 };
 
 let add_expr = macro(left, right) {
-	quote(unquote(left) + unquote(right));
+    quote(unquote(left) + unquote(right));
 };
 
 let negate_expr = macro(value) {
-	quote(-(unquote(value)));
+    quote(-unquote(value));
 };
 
-putf("emit_literal() => ", emit_literal());
-putln("");
-
-putf("add_expr(3, 9) => ", add_expr(3, 9));
-putln("");
-
 let dynamic = 12;
-putf("add_expr(dynamic, 5) => ", add_expr(dynamic, 5));
-putln("");
 
-putf("negate_expr(11) => ", negate_expr(11));
-putln("");
+putf("emit_literal() => %d\n", emit_literal());
+putf("add_expr(3, 9) => %d\n", add_expr(3, 9));
+putf("add_expr(dynamic, 5) => %d\n", add_expr(dynamic, 5));
+putf("negate_expr(11) => %d\n", negate_expr(11));

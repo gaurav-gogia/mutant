@@ -4,7 +4,6 @@
 package security
 
 import (
-	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -33,7 +32,6 @@ const (
 
 var (
 	suspiciousModuleNames = []string{"frida-gadget.dll", "frida-agent.dll", "easyhook64.dll", "detoured.dll", "scyllahide.dll"}
-	injectionEnvMarkers   = []string{"COR_ENABLE_PROFILING", "COR_PROFILER", "COR_PROFILER_PATH", "JAVA_TOOL_OPTIONS", "_NT_SYMBOL_PATH"}
 	injectionTaskMarkers  = []string{"processhacker", "x64dbg", "ollydbg", "cheat engine", "frida", "dnspy"}
 )
 
@@ -134,27 +132,22 @@ func detectTrampoline() AntiTamperSignal {
 	return makeSignal(ProbeTrampoline, true, confidence, "hooked_apis="+strings.Join(flagged, ","))
 }
 
+// detectProcessInjection looks for injection and debugging tools in the process
+// list, which is all it reads. Before 2.6.0 it also scored five environment
+// variables -- COR_ENABLE_PROFILING, COR_PROFILER, COR_PROFILER_PATH,
+// JAVA_TOOL_OPTIONS and _NT_SYMBOL_PATH -- at 90, or 95 beside a tool in the
+// list, enough to stop a secure-mode run as injection in this process. They
+// configure the .NET runtime, a Java VM and symbol handlers such as dbghelp's,
+// none of which runs in this process, so a symbol path set for WinDbg, or a
+// profiler set for .NET programs, stopped the run when nothing had been
+// injected (M26-TMP-004).
 func detectProcessInjection() AntiTamperSignal {
-	envHits := findInjectionEnvMarkers()
 	procHits := findInjectionProcessMarkers()
-	if len(envHits) == 0 && len(procHits) == 0 {
+	if len(procHits) == 0 {
 		return makeSignal(ProbeProcessInjection, false, ConfidenceNone, "no injection markers")
 	}
 
-	confidence := ConfidenceProcessInjectionDetected
-	detailParts := make([]string, 0, 2)
-	if len(envHits) > 0 {
-		detailParts = append(detailParts, "env="+strings.Join(envHits, ","))
-		confidence = ConfidenceProcessInjectionEnvDetected
-	}
-	if len(procHits) > 0 {
-		detailParts = append(detailParts, "processes="+strings.Join(procHits, ","))
-		if len(envHits) > 0 {
-			confidence = ConfidenceProcessInjectionCombined
-		}
-	}
-
-	return makeSignal(ProbeProcessInjection, true, confidence, strings.Join(detailParts, ";"))
+	return makeSignal(ProbeProcessInjection, true, ConfidenceProcessInjectionDetected, "processes="+strings.Join(procHits, ","))
 }
 
 func detectModuleIntegrity() AntiTamperSignal {
@@ -280,16 +273,6 @@ func readCurrentProcessMemory(addr uintptr, size int) ([]byte, bool) {
 	}
 
 	return buf[:bytesRead], true
-}
-
-func findInjectionEnvMarkers() []string {
-	out := make([]string, 0, len(injectionEnvMarkers))
-	for _, marker := range injectionEnvMarkers {
-		if value, ok := os.LookupEnv(marker); ok && strings.TrimSpace(value) != "" {
-			out = append(out, marker)
-		}
-	}
-	return out
 }
 
 func findInjectionProcessMarkers() []string {

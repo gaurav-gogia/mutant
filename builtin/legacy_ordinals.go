@@ -3,9 +3,18 @@ package builtin
 // legacyBuiltinOrdinals is the frozen ordinal->name table for bytecode compiled
 // before OpGetBuiltin carried a name. It is a verbatim snapshot of the Builtins
 // registry as of the v2.4.0 baseline, and it is FROZEN: nothing may be inserted,
-// reordered, renamed, or removed. A .mu built by any earlier release resolves
-// its OpGetBuiltin operands through this slice, so an edit here silently rebinds
-// every call in every artifact already in the wild.
+// reordered, renamed, or removed. A versionless .mu built by v2.4.x resolves its
+// OpGetBuiltin operands through this slice, and one built by v2.3.x through
+// this slice with the one slot legacyOrdinalDifferencesV23 records, so an edit
+// here silently rebinds every call in every artifact already in the wild.
+// Releases before v2.3.0 wrote a one-byte OpGetBuiltin operand, which this
+// runtime misreads before either table is consulted (compiler/bytecode_version.go
+// says how), and releases before v2.2.0 also ordered their registries
+// differently; neither table serves their artifacts.
+//
+// It stays for the whole 2.x line: dropping it stops every artifact built by
+// v2.3.0 to v2.4.x from running, which only a major release may do, and 3.0 is
+// the first that may. docs/BYTECODE_IR.md section 4.1 says the same.
 //
 // New builtins do not belong here. Bytecode from BytecodeVersionNamedBuiltins
 // onward carries the names it referenced and never consults this table, so the
@@ -420,4 +429,45 @@ var legacyBuiltinOrdinals = []string{
 	"chan_try_recv",                // 406
 	"chan_close",                   // 407
 	"help",                         // 408
+}
+
+// legacyOrdinalDifferencesV23 is the slot where the registry v2.3.x compiled
+// against differs from the v2.4.x snapshot above. Applied to the snapshot, it
+// gives the table that a versionless artifact whose container has no OpcodeMap
+// resolves through.
+//
+// help was appended to the registry in init(), after every literal entry, so its
+// ordinal was the registry's length at the time and moved whenever a release
+// added builtins. v2.3.0 shipped 399 entries with help last, at 398; v2.4.0's ten
+// new builtins put pmap at 398 and help at 408. v2.2.0 had no help builtin at all,
+// and its 211 entries are the first 211 of both tables. No release before v2.5.0
+// wrote ByteCode.Version, so which table an artifact needs is read from its
+// container instead: see compiler.LegacyRegistryOf.
+//
+// That table keeps the snapshot's entries from 399 on. No v2.3.x artifact holds
+// an ordinal that high, because its registry did not reach it. But
+// the two development commits between the v2.3.0 and v2.4.0 tags, 821bece and
+// 31182f3, registered v2.4.0's builtins before ByteCode had an OpcodeMap, so
+// their artifacts read as v2.3.x, and those entries keep resolving their calls
+// to the builtins v2.4.0 added. Only their pmap calls, at 398, reach help.
+// Artifacts from v2.2.x and earlier also read as v2.3.x, but their one-byte
+// operands are misread before this table is consulted, so its entries say
+// nothing about what their calls meant; compiler/bytecode_version.go says how.
+//
+// Frozen like the snapshot, and for the same reason.
+// TestLegacyOrdinalTablesMatchTheReleasedRegistries pins both tables to the
+// registries the release tags define.
+var legacyOrdinalDifferencesV23 = map[int]string{
+	398: "help", // pmap in v2.4.x
+}
+
+// legacyOrdinalNamesV23 spells out the ordinal->name table that versionless
+// artifacts without an OpcodeMap resolve through: v2.3.x's registry in its
+// first 399 entries, and the snapshot's from there on.
+func legacyOrdinalNamesV23() []string {
+	names := append([]string(nil), legacyBuiltinOrdinals...)
+	for ordinal, name := range legacyOrdinalDifferencesV23 {
+		names[ordinal] = name
+	}
+	return names
 }

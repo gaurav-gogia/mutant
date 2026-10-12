@@ -23,20 +23,47 @@ it — the surprises are where the half-hour actually goes.
 
 ## 1. Install, and the first surprise
 
-Clone and install:
+Clone and build:
 
 ```bash
 git clone https://github.com/aoiflux/mutant
 cd mutant
-go build ./...
-go install
+./scripts/build.sh --host-only --no-wasm-repl
 ```
 
-That puts `mutant` on your `PATH`. Check it:
+On Windows, the same build in PowerShell:
+
+```powershell
+.\scripts\build.ps1 -HostOnly -WasmRepl:$false
+```
+
+**Not `go install`.** It is the obvious thing to type, and it does produce a
+working `mutant` — which is exactly why it is worth saying plainly that it is
+not enough. Section 7's `mutant release` needs a set of embedded runtime
+binaries that the build script generates and that a plain `go build` has no
+way to produce, so a `go install` binary refuses that last step.
+
+Give it about ten minutes. Almost all of that is generating those runtime
+binaries, one for each of the seven platforms you could later release to, and
+`--host-only` does not shorten it: that flag narrows the final build, not the
+runtimes. Nothing needs watching, so section 2 is worth reading while it runs.
+
+The script also holds you to the Go version `go.mod` names, and refuses any
+other rather than building something the project was never tested against. If
+your `go` is a different version it says so, and says what to pass instead.
+
+The binary lands in `dist/`, named for the platform it was built for. Put it
+on your `PATH` under the name the rest of this page uses:
+
+```bash
+cp dist/mutant-linux-amd64 ~/.local/bin/mutant   # or anywhere on PATH
+```
+
+Check it:
 
 ```bash
 $ mutant --version
-Version: 2.5.0
+Version: 2.6.0
 ```
 
 Now write a first program. Call it `hello.mut`:
@@ -120,11 +147,17 @@ $ mutant prog.mu --compat
 and the artifact is still verified. `--dev` is the one that weakens the key.
 See [EXECUTION_MODES.md](EXECUTION_MODES.md).
 
-> **Known false positive.** On Windows, launching `mutant` from **Git Bash**
-> (or MSYS2/Cygwin) is scored as WSL at confidence 90, because the parent
-> process is named `bash.exe` — the same name as the real WSL launcher. The
-> same machine runs fine from PowerShell or `cmd`. If you see
-> `windows:process_parent:wsl` and you are not in WSL, this is why.
+> **Expected, and mislabelled before 2.6.0.** On Windows, launching `mutant`
+> straight from **Git Bash** (or MSYS2/Cygwin), so that its parent process is
+> `bash.exe`, is detected and secure mode halts. That is intended: an emulated
+> shell is one of the environments the detector exists to notice. The detector
+> looks at that one parent and no further, so a program in between — `timeout`,
+> `env`, `sh -c` or `cmd /c`, say — hides the shell, which then does not count
+> towards a halt. What was wrong is what it reported. Until 2.6.0 the type was
+> `WSL`, which was untrue on a machine with no WSL installed; it is now
+> `MSYS/Cygwin or legacy WSL`, which is everything a `bash.exe` parent can
+> prove. The behaviour is the same on every version: run from PowerShell or
+> `cmd`, or pass `--compat` to make the halt a warning.
 
 ---
 
@@ -229,8 +262,8 @@ form, not error handling. Given an array on the right, it takes the array apart:
 ```mutant
 let items = ["a", "b"];
 
-let updated, err = push(items, "c");   // WRONG. push returns ONE array.
-                                       // updated is "a"; err is "b"
+let wrong, err = push(items, "c");     // WRONG. push returns ONE array.
+                                       // wrong is "a"; err is "b"
 let updated = push(items, "c");        // right: ["a", "b", "c"]
 ```
 
@@ -375,7 +408,7 @@ hash with `"ok": false` rather than dropping out entirely is the idiom worth
 copying — a triage tool that silently skips a file is worse than one that says
 it failed.
 
-The whole forensic standard library is reached this way: 497 builtins across 38
+The whole forensic standard library is reached this way: 694 builtins across 41
 categories, catalogued in the [Capability Reference](CAPABILITY_REFERENCE.md).
 `fs_*` for files, `bin_*` for PE/ELF/Mach-O, `reg_*` for registry hives, `mft_*`
 and the filesystem parsers for disk images, `evtx_*` and `prefetch_*` for
@@ -438,11 +471,14 @@ argument types, the `let x, err =` mistake from
 builtins on an OS that does not support them.
 
 There is also `mutant fmt`, a canonical formatter in the gofmt tradition — one
-rendering per program, no options. Be aware before you run it on existing code:
-its canonical form **parenthesises every operator expression**, so
-`a + b * c` becomes `(a + (b * c))`, and it joins multi-line expressions back
-onto one line. Most of the bundled examples are not written that way. Use
-`--stdout` to see what it would do before letting it rewrite anything:
+rendering per program, no options. It keeps the brackets you wrote and adds
+none: `a + b * c` stays as it is, and so does `(a * b) + c`. Be aware before you
+run it on existing code: it joins multi-line expressions back onto one line,
+which most of the bundled examples do not do. Use `--stdout` to see what it
+would do before letting it rewrite anything.
+
+It will not touch a file it cannot parse: like `gofmt`, it prints the parse
+errors, leaves the bytes alone and exits non-zero.
 
 ```bash
 $ mutant fmt --stdout triage.mut
@@ -463,6 +499,13 @@ its line numbers stripped, so there is nothing in one to step through. See
 
 You have been using `--dev` and a public key. Two commands turn the same source
 into something you can actually hand over.
+
+> **On Windows, run this section from PowerShell or `cmd`.** Compiling is fine
+> anywhere, but the two commands here that *run* a program — the `.mu` and the
+> standalone binary — halt when their parent is Git Bash, which is one of the
+> things the detector exists to notice
+> ([section 1](#if-it-says-sandbox-detected-execution-halted) has the detail).
+> `--compat` makes the halt a warning if you would rather stay where you are.
 
 **An encrypted artifact.** This is the `.mu` from step 1, made properly:
 
@@ -502,7 +545,7 @@ line about "self-verification only" above is the runtime telling you honestly
 that nobody asked it to check a signer.
 
 **Never pass a password as a flag value.** `--password` puts the secret in the
-process table and your shell history; it warns, and it is going away. The three
+process table and your shell history, and since 2.6.0 it is refused. The three
 supported routes are an interactive prompt (the default), `--password-file`, and
 `--password-stdin` for pipelines:
 
@@ -522,7 +565,7 @@ $ printf '%s' "$SECRET" | mutant gen --src triage.mut --password-stdin
 - **[Language reference](MUTANT_LANGUAGE_REFERENCE.md)** — structs, enums,
   macros, concurrency (`spawn`, channels, `pmap`), and the `bytes` type for
   binary data.
-- **[`examples/`](../examples/)** — 116 runnable programs grouped by subject.
+- **[`examples/`](../examples/)** — 127 runnable programs grouped by subject.
   `examples/workshop/` is the closest thing to a continuation of this tutorial.
 - **[What is Mutant?](WHAT_IS_MUTANT.md)** — why the language exists and what it
   is for.

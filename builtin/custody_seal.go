@@ -170,10 +170,18 @@ func custodySeal(manifest map[string]any, sign bool) error {
 	return nil
 }
 
+// caseWriteOptions are the options case_write takes; {"signed": false} is
+// refused, not read as a request to sign.
+var caseWriteOptions = []string{"sign"}
+
 // CaseWrite writes the manifest to disk as a signed JSON document.
 func CaseWrite(args ...object.Object) object.Object {
 	if len(args) < 1 || len(args) > 2 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
+	}
+	opts, errObj := secretOptionsArg(BuiltinNameCaseWrite, args, 2, caseWriteOptions...)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	pathObj, ok := args[0].(*object.String)
@@ -184,9 +192,9 @@ func CaseWrite(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("case_write: the path must not be empty"))
 	}
 
-	sign := true
-	if len(args) == 2 {
-		sign = optBool(args[1], "sign", true)
+	sign, errObj := opts.boolean("sign", true)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	custodyStore.RLock()
@@ -250,9 +258,32 @@ func CaseManifestVerify(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("argument 1 to `case_manifest_verify` must be STRING, got %s", args[0].Type()))
 	}
 
-	raw, err := os.ReadFile(pathObj.Value)
+	document, errObj := custodyManifestDocument(BuiltinNameCaseManifestVerify, pathObj.Value)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+
+	result := custodyVerifyDocument(document)
+	if errText, failed := result["error"].(string); failed {
+		return resultAndError(nil, newError("case_manifest_verify: %s", errText))
+	}
+	delete(result, "error")
+	result["path"] = pathObj.Value
+	if caseInfo, ok := document["case"].(map[string]any); ok {
+		result["case_id"], _ = caseInfo["id"].(string)
+		result["examiner"], _ = caseInfo["examiner"].(string)
+	}
+	return custodyManifestResult(BuiltinNameCaseManifestVerify, result)
+}
+
+// custodyManifestDocument reads a written manifest for custodyVerifyDocument,
+// and refuses a file that is not one. It is how case_manifest_verify and a
+// review request read a manifest, so the two cannot come to differ about
+// which files are manifests.
+func custodyManifestDocument(op, path string) (map[string]any, *object.Error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return resultAndError(nil, newError("case_manifest_verify: %s", err.Error()))
+		return nil, newError("%s: %s", op, err.Error())
 	}
 
 	// UseNumber is what makes the round trip exact: without it every integer in
@@ -262,25 +293,58 @@ func CaseManifestVerify(args ...object.Object) object.Object {
 	decoder.UseNumber()
 	var document map[string]any
 	if err := decoder.Decode(&document); err != nil {
-		return resultAndError(nil, newError("case_manifest_verify: %s is not a manifest: %s", pathObj.Value, err.Error()))
+		return nil, newError("%s: %s is not a manifest: %s", op, path, err.Error())
 	}
 
-	seal, ok := document["seal"].(map[string]any)
-	if !ok {
-		return resultAndError(nil, newError(
-			"case_manifest_verify: %s has no seal; it was not written by `case_write`", pathObj.Value))
+	// The seal covers the document the decoder just read and nothing after
+	// it, so a file holding a second document is a file the seal does not
+	// cover -- and both readers of this function reported it verified
+	// (M26-CUS-026). Refused here rather than as a failed check inside
+	// custodyVerifyDocument, because what a seal says about the first of two
+	// documents is not a weaker claim about the file: it is a claim about
+	// something that is not the file.
+	if err := security.RefuseTrailingContent(decoder, "the manifest"); err != nil {
+		return nil, newError("%s: %s is not verified: %s", op, path, err.Error())
 	}
 
+	// The seal covers custodyCanonical's rebuild of what the decoder kept,
+	// and encoding/json keeps the LAST of two identically-named fields. So a
+	// second copy of any field, inserted in front of the real one, is a value
+	// a reader sees and no hash and no signature covers. Measured as a working
+	// forgery against a manifest this program sealed and signed itself: 98
+	// honest bytes and 119 forged ones produced the identical canonical form,
+	// the identical digest, and one signature that verified over both
+	// (M26-CUS-032).
+	if err := security.RefuseRepeatedKeys(raw, "the manifest"); err != nil {
+		return nil, newError("%s: %s is not verified: %s", op, path, err.Error())
+	}
+
+	if _, ok := document["seal"].(map[string]any); !ok {
+		return nil, newError("%s: %s has no seal; it was not written by `case_write`", op, path)
+	}
+	return document, nil
+}
+
+// custodyVerifyDocument checks a sealed document that has already been decoded
+// with UseNumber: that it hashes to its seal, and that the seal's signature
+// holds over it. It is the one implementation behind case_manifest_verify and
+// disclose_verify, so a case manifest and a disclosure manifest cannot come to
+// mean different things by "verified".
+//
+// A document that cannot be canonicalised is reported under "error"; every
+// other outcome is a value.
+func custodyVerifyDocument(document map[string]any) map[string]any {
+	seal, _ := document["seal"].(map[string]any)
 	canonical, err := custodyCanonical(document)
 	if err != nil {
-		return resultAndError(nil, newError("case_manifest_verify: %s", err.Error()))
+		return map[string]any{"error": err.Error(), "hash_matches": false, "signed": false, "signature_valid": false,
+			"signature_detail": "the document cannot be canonicalised"}
 	}
 	digest := sha256.Sum256(canonical)
 	recomputed := hex.EncodeToString(digest[:])
 	recorded, _ := seal["manifest_hash"].(string)
 
 	result := map[string]any{
-		"path":             pathObj.Value,
 		"manifest_hash":    recorded,
 		"computed_hash":    recomputed,
 		"hash_matches":     recorded != "" && recorded == recomputed,
@@ -288,14 +352,10 @@ func CaseManifestVerify(args ...object.Object) object.Object {
 		"signature_valid":  false,
 		"signature_detail": "this manifest carries no signature",
 	}
-	if caseInfo, ok := document["case"].(map[string]any); ok {
-		result["case_id"], _ = caseInfo["id"].(string)
-		result["examiner"], _ = caseInfo["examiner"].(string)
-	}
 
 	signed, _ := seal["signed"].(bool)
 	if !signed {
-		return custodyManifestResult(BuiltinNameCaseManifestVerify, result)
+		return result
 	}
 	result["signed"] = true
 
@@ -320,8 +380,7 @@ func CaseManifestVerify(args ...object.Object) object.Object {
 			result["public_key"] = stringField(seal, "public_key")
 		}
 	}
-
-	return custodyManifestResult(BuiltinNameCaseManifestVerify, result)
+	return result
 }
 
 // stringField reads a string out of a decoded JSON object, or "" when it is

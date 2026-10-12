@@ -41,11 +41,42 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"mutant/global"
 	"mutant/object"
 	"mutant/security"
 )
+
+// custodyDocumentName refuses a name that cannot survive the round trip through
+// the documents this tree writes.
+//
+// Every name this is applied to is used TWICE: once as raw bytes -- inside an
+// HMAC, inside an AEAD's additional data, or inside a length-prefixed canonical
+// form -- and once as a field in a JSON document. encoding/json replaces a byte
+// that cannot appear in valid UTF-8 with U+FFFD, and an HMAC does not, so the
+// two uses stop agreeing the moment a name is not valid UTF-8.
+//
+// A class label tagged over one byte string and printed as another is a tag
+// nobody can recompute from the manifest. A case id is worse: it is bound into
+// the additional data the case key is wrapped under, so `case_key_create` would
+// write a key file that `case_key_open` could never read back, and every record
+// sealed under that key would be gone. The create SUCCEEDED, which is the part
+// that makes it worth refusing here rather than reporting there.
+//
+// Refused at the entry point and not repaired. Substituting the replacement
+// character ourselves would be this tool deciding what an examiner's case is
+// called.
+func custodyDocumentName(op, field, value string) *object.Error {
+	if utf8.ValidString(value) {
+		return nil
+	}
+	return newError("%s: the %s contains bytes that are not valid UTF-8. A name like this is written "+
+		"into documents as JSON, where a byte that cannot appear in valid UTF-8 becomes U+FFFD, and is "+
+		"also used as raw bytes inside a keyed hash, which substitutes nothing -- so the two stop "+
+		"describing the same name and nothing downstream can be recomputed from what the document says",
+		op, field)
+}
 
 // custodyHashPolicies are the values `case_open`'s `hash` option accepts. They
 // are the algorithms fsHashAlgorithm knows, plus "none".
@@ -71,6 +102,10 @@ type custodyOpen struct {
 	Handle  string
 	At      time.Time
 	Elapsed time.Duration
+	// Region locates the volume inside the source, for an opener that reads a
+	// partition rather than the whole file. Its zero value is the whole file,
+	// which is what every opener outside the filesystem families does.
+	Region fsRegion
 }
 
 // custodyEvidence is one source file under custody, however many handles were
@@ -112,6 +147,9 @@ type custodyEvent struct {
 	// native Go values so the manifest can be marshalled without reaching back
 	// into the object system.
 	Data any
+	// Role is the role the examiner asserted, stamped by appendEvent on every
+	// entry so that a timeline read on its own still says who acted as what.
+	Role string
 }
 
 // custodySession is one investigation.
@@ -122,6 +160,9 @@ type custodySession struct {
 	OpenedAt   time.Time
 	ClosedAt   time.Time
 	Closed     bool
+	// Role is what the examiner asserted at case_open, or roleUnasserted. It
+	// is recorded and never checked; see role.go.
+	Role caseRole
 
 	// evidence is keyed by resolved path; order preserves registration order so
 	// the manifest reads the way the investigation ran.
@@ -131,6 +172,169 @@ type custodySession struct {
 	// takes a list of segments, which is why this is a slice.
 	handles  map[string][]string
 	timeline []custodyEvent
+
+	// The case key and what is derived from it live for exactly as long as the
+	// case does, which is the whole reason `case_key_open` requires an open
+	// case and returns no handle. There is nothing for a program to hold and
+	// nothing for it to forget to close: CaseClose zeroes both of these inside
+	// the lock it already takes.
+	//
+	// caseKey is K_case itself; classTagKey is HKDF'd from it once, at open, so
+	// that tagging a label never touches the case key again.
+	caseKey        []byte
+	classTagKey    []byte
+	keyPath        string
+	keyFingerprint string
+	keyGeneration  uint32
+	// caseUID is the case identity bound into every segment of every record
+	// sealed under this key. It comes from the key file rather than from the
+	// case id, because the case id is a free-text label an examiner types and
+	// two investigations may well pick the same one.
+	caseUID string
+	// keyed records that a key was opened. Unlike caseKey it is never cleared,
+	// and the difference is the difference between a document and a probe. A
+	// manifest states what happened during the investigation; case_close zeroes
+	// the key, so a manifest that asked whether the key is still in memory said
+	// the case had never been keyed -- while listing, in the same block, the
+	// labels tagged under it.
+	keyed bool
+	// keyErased records that case_key_erase erased every generation of the key
+	// in this run. It is never cleared either: the manifest says it happened.
+	keyErased bool
+
+	// classes is the classification scheme, in the order it was declared.
+	// Order is presentation order and carries no authority: nothing here
+	// enforces a lattice, and a segment tagged `unclassified` is treated
+	// exactly like one tagged `secret`.
+	classes []caseClass
+
+	// views are the disclosure postures declared for this case: each one a
+	// name and the set of classes it grants. They sit beside the scheme rather
+	// than inside a record because a view is reusable -- the same posture goes
+	// to every record bound for one recipient -- and because a posture that
+	// lived inside a record could not be reviewed before a record existed.
+	views []caseView
+
+	// bundles are the recipient roles' bundles: for each role, the views a
+	// recipient holding it may be granted. See recipient_role.go.
+	bundles []caseBundle
+
+	// disclosures are the grants issued in this case, in the order they were
+	// issued. The ledger is the authoritative record of each one; this is the
+	// run's copy, which holds the sealed grant until disclose_bundle writes it
+	// and puts the disclosure in the manifest beside the view it was issued
+	// under.
+	disclosures []*caseDisclosure
+
+	// attached is the ledger this case is attached to in this run, and the
+	// state read from it, or nil; see case_lifecycle.go.
+	attached *caseAttachment
+}
+
+// caseView is one named disclosure posture: the classes a grant issued under
+// this name will open, and nothing else.
+//
+// It holds tags as well as labels, and that is not redundancy. A record's
+// segments carry tags; a person reviewing a disclosure reads labels. Resolving
+// the label once, at the line that declared the view, is what makes
+// `view_preview` a lookup rather than a second canonicalisation with its own
+// opportunity to disagree with the first.
+//
+// There is no negation and no "everything else". A view granting "all classes
+// except X" would silently widen every time a class was declared after it,
+// which is the one way a disclosure posture can change without anybody editing
+// it -- and the change would be invisible in exactly the document meant to
+// record it.
+type caseView struct {
+	Label       string
+	Canonical   string
+	Description string
+	// Classes are the declared labels this view grants, in the order given.
+	Classes []string
+	// Tags are those labels' tags, index for index with Classes.
+	Tags      []string
+	Index     int
+	DefinedAt time.Time
+	// FromLedger is true of a view case_attach read back; InLedger of one
+	// the ledger holds, read back or written there by view_define.
+	FromLedger bool
+	InLedger   bool
+}
+
+// render is one row of the manifest's view block.
+func (v caseView) render() map[string]any {
+	grants := make([]any, 0, len(v.Classes))
+	for i, label := range v.Classes {
+		grants = append(grants, map[string]any{"label": label, "tag": v.Tags[i]})
+	}
+	return map[string]any{
+		"label":       v.Label,
+		"canonical":   v.Canonical,
+		"description": v.Description,
+		"grants":      grants,
+		"grant_count": int64(len(v.Classes)),
+		"index":       int64(v.Index),
+		"defined_at":  v.DefinedAt.UTC().Format(time.RFC3339Nano),
+		"source":      definitionSource(v.FromLedger),
+		"in_ledger":   v.InLedger,
+	}
+}
+
+// definitionSource says where a class or view came from: declared in this
+// run, or read back from the case's ledger.
+func definitionSource(fromLedger bool) string {
+	if fromLedger {
+		return "ledger"
+	}
+	return "run"
+}
+
+// caseClass is one classification label and the tag its segments carry.
+//
+// Tag is keyed to the case key, so two investigations that both declare
+// "restricted" produce different tags and neither can be linked to the other
+// by an observer holding both records. The cost of that is stated where it
+// belongs, in docs/DISCLOSURE_POLICY.md: a `.mrec` separated from its case
+// manifest holds tags whose meaning is not recoverable from anything its
+// holder has.
+type caseClass struct {
+	Label       string
+	Canonical   string
+	Description string
+	Tag         string
+	Index       int
+	DefinedAt   time.Time
+	// FromLedger and InLedger are what they are on caseView.
+	FromLedger bool
+	InLedger   bool
+}
+
+// render is one row of the manifest's classification block.
+func (c caseClass) render() map[string]any {
+	return map[string]any{
+		"label":       c.Label,
+		"canonical":   c.Canonical,
+		"description": c.Description,
+		"tag":         c.Tag,
+		"index":       int64(c.Index),
+		"defined_at":  c.DefinedAt.UTC().Format(time.RFC3339Nano),
+		"source":      definitionSource(c.FromLedger),
+		"in_ledger":   c.InLedger,
+	}
+}
+
+// appendEvent adds one entry to the timeline, stamped with the examiner's
+// role. Every entry goes through here so that none is written without it. The
+// caller holds the custody lock.
+func (s *custodySession) appendEvent(at time.Time, event, detail string, data any) {
+	s.timeline = append(s.timeline, custodyEvent{
+		At:      at,
+		Elapsed: at.Sub(s.OpenedAt),
+		Event:   event,
+		Detail:  detail,
+		Data:    data,
+		Role:    s.Role.Name,
+	})
 }
 
 // custodyStore holds the one open case. A case is process-wide on purpose: a
@@ -152,9 +356,21 @@ var custodyActive atomic.Bool
 // immune to a wall clock that jumps mid-investigation.
 var custodyNow = time.Now
 
+// The options case_open and case_evidence take. An unknown key is refused
+// rather than ignored: a case opened with {"hash_policy": "sha256"} would
+// otherwise digest nothing and say so only after the evidence was opened.
+var (
+	caseOpenOptions     = []string{"hash", "role"}
+	caseEvidenceOptions = []string{"hash"}
+)
+
 func CaseOpen(args ...object.Object) object.Object {
 	if len(args) < 2 || len(args) > 3 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=2 or 3", len(args)))
+	}
+	opts, errObj := secretOptionsArg(BuiltinNameCaseOpen, args, 3, caseOpenOptions...)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	idObj, ok := args[0].(*object.String)
@@ -174,14 +390,28 @@ func CaseOpen(args ...object.Object) object.Object {
 	if examiner == "" {
 		return resultAndError(nil, newError("case_open: the examiner must not be empty; a manifest nobody signed for is not a chain of custody"))
 	}
+	if errObj := custodyDocumentName(BuiltinNameCaseOpen, "case id", id); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	if errObj := custodyDocumentName(BuiltinNameCaseOpen, "examiner name", examiner); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
 
-	policy := "none"
-	if len(args) == 3 {
-		policy = strings.ToLower(strings.TrimSpace(optString(args[2], "hash", "none")))
-		if !custodyHashPolicies[policy] {
-			return resultAndError(nil, newError(
-				"case_open: unknown hash policy %q; want \"none\", \"md5\", \"sha1\" or \"sha256\"", policy))
-		}
+	requested, errObj := opts.str("hash", "none")
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	policy := strings.ToLower(strings.TrimSpace(requested))
+	if !custodyHashPolicies[policy] {
+		return resultAndError(nil, newError(
+			"case_open: unknown hash policy %q; want \"none\", \"md5\", \"sha1\" or \"sha256\"", policy))
+	}
+	role, _, errObj := roleOption(BuiltinNameCaseOpen, opts)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
+	}
+	if errObj := roleConflict(BuiltinNameCaseOpen, examiner, role, nil); errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	custodyStore.Lock()
@@ -198,15 +428,12 @@ func CaseOpen(args ...object.Object) object.Object {
 		Examiner:   examiner,
 		HashPolicy: policy,
 		OpenedAt:   now,
+		Role:       role,
 		evidence:   map[string]*custodyEvidence{},
 		handles:    map[string][]string{},
 	}
-	session.timeline = append(session.timeline, custodyEvent{
-		At:    now,
-		Event: BuiltinNameCaseOpen,
-		Detail: fmt.Sprintf("case %s opened by %s; hash policy %s",
-			id, examiner, policy),
-	})
+	session.appendEvent(now, BuiltinNameCaseOpen, fmt.Sprintf("case %s opened by %s as %s; hash policy %s",
+		id, examiner, role.Name, policy), nil)
 	custodyStore.session = session
 	custodyStore.Unlock()
 	custodyActive.Store(true)
@@ -217,6 +444,9 @@ func CaseOpen(args ...object.Object) object.Object {
 		"hash_policy": stringObj(policy),
 		"opened_at":   stringObj(now.UTC().Format(time.RFC3339Nano)),
 		"status":      stringObj("open"),
+		"role":        stringObj(role.Name),
+		// Always false: the role is what the examiner typed.
+		"role_authenticated": boolObj(false),
 	}), nil)
 }
 
@@ -232,6 +462,11 @@ func CaseNote(args ...object.Object) object.Object {
 
 	var data any
 	if len(args) == 2 {
+		// A note is written into the manifest, and a manifest is written to
+		// be handed to somebody else.
+		if errObj := refuseClassified(BuiltinNameCaseNote, args...); errObj != nil {
+			return resultAndError(nil, errObj)
+		}
 		native, err := objectToNative(args[1], false)
 		if err != nil {
 			return resultAndError(nil, newError("case_note: argument 2 cannot be recorded: %s", err.Error()))
@@ -248,13 +483,7 @@ func CaseNote(args ...object.Object) object.Object {
 	}
 
 	now := custodyNow()
-	session.timeline = append(session.timeline, custodyEvent{
-		At:      now,
-		Elapsed: now.Sub(session.OpenedAt),
-		Event:   "note",
-		Detail:  textObj.Value,
-		Data:    data,
-	})
+	session.appendEvent(now, "note", textObj.Value, data)
 
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"event":      stringObj("note"),
@@ -290,14 +519,7 @@ func custodyRecordArtifact(event, detail string, data map[string]any) {
 		return
 	}
 
-	now := custodyNow()
-	session.timeline = append(session.timeline, custodyEvent{
-		At:      now,
-		Elapsed: now.Sub(session.OpenedAt),
-		Event:   event,
-		Detail:  detail,
-		Data:    data,
-	})
+	session.appendEvent(custodyNow(), event, detail, data)
 }
 
 // CaseEvidence brings a file under custody that no evidence opener will ever
@@ -305,6 +527,10 @@ func custodyRecordArtifact(event, detail string, data map[string]any) {
 func CaseEvidence(args ...object.Object) object.Object {
 	if len(args) < 1 || len(args) > 2 {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=1 or 2", len(args)))
+	}
+	opts, errObj := secretOptionsArg(BuiltinNameCaseEvidence, args, 2, caseEvidenceOptions...)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
 
 	pathObj, ok := args[0].(*object.String)
@@ -331,14 +557,16 @@ func CaseEvidence(args ...object.Object) object.Object {
 
 	// An explicit registration may ask for a digest the case as a whole did not,
 	// because an examiner who names one file is willing to wait for it.
-	if len(args) == 2 {
-		requested := strings.ToLower(strings.TrimSpace(optString(args[1], "hash", policy)))
-		if !custodyHashPolicies[requested] {
-			return resultAndError(nil, newError(
-				"case_evidence: unknown hash policy %q; want \"none\", \"md5\", \"sha1\" or \"sha256\"", requested))
-		}
-		policy = requested
+	requested, errObj := opts.str("hash", policy)
+	if errObj != nil {
+		return resultAndError(nil, errObj)
 	}
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	if !custodyHashPolicies[requested] {
+		return resultAndError(nil, newError(
+			"case_evidence: unknown hash policy %q; want \"none\", \"md5\", \"sha1\" or \"sha256\"", requested))
+	}
+	policy = requested
 
 	source := custodyStatSource(pathObj.Value)
 	if !source.onDisk {
@@ -361,38 +589,44 @@ func CaseEvidence(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("case_evidence: the case closed while the file was being read"))
 	}
 
-	now := custodyNow()
-	record, exists := session.evidence[source.path]
+	record := session.registerFileLocked(source, policy, digest, custodyNow(),
+		fmt.Sprintf("case_evidence registered %s", source.path))
+	if hashError != "" && record.Digest == "" {
+		record.HashError = hashError
+	}
+
+	return custodyManifestResult(BuiltinNameCaseEvidence, record.render())
+}
+
+// registerFileLocked brings a file on disk under the run's custody, or finds
+// it already there, and keeps a digest taken of it when none was kept yet.
+// case_evidence, evidence_intake and evidence_accept register through it, so
+// case_verify re-measures what each of them measured. The caller holds the
+// custody lock.
+func (s *custodySession) registerFileLocked(source custodySource, algo, digest string, now time.Time,
+	detail string) *custodyEvidence {
+	record, exists := s.evidence[source.path]
 	if !exists {
 		record = &custodyEvidence{
 			Path:       source.path,
 			Size:       source.size,
 			ModTime:    source.modTime,
 			OnDisk:     true,
-			Algo:       policy,
+			Algo:       algo,
 			Registered: now,
-			Elapsed:    now.Sub(session.OpenedAt),
+			Elapsed:    now.Sub(s.OpenedAt),
 			Touches:    map[string]*custodyTouch{},
 		}
-		session.evidence[source.path] = record
-		session.order = append(session.order, source.path)
-		session.timeline = append(session.timeline, custodyEvent{
-			At:      now,
-			Elapsed: now.Sub(session.OpenedAt),
-			Event:   "evidence_registered",
-			Detail:  fmt.Sprintf("case_evidence registered %s", source.path),
-		})
+		s.evidence[source.path] = record
+		s.order = append(s.order, source.path)
+		s.appendEvent(now, "evidence_registered", detail, nil)
 	}
 	if digest != "" && record.Digest == "" {
 		record.Digest = digest
-		record.Algo = policy
+		record.Algo = algo
 		record.HashError = ""
 	}
-	if hashError != "" && record.Digest == "" {
-		record.HashError = hashError
-	}
-
-	return custodyManifestResult(BuiltinNameCaseEvidence, record.render())
+	return record
 }
 
 // CaseVerify re-measures every source under custody and reports what moved.
@@ -512,15 +746,8 @@ func CaseVerify(args ...object.Object) object.Object {
 
 	custodyStore.Lock()
 	if custodyStore.session == session && !session.Closed {
-		now := custodyNow()
-		session.timeline = append(session.timeline, custodyEvent{
-			At:      now,
-			Elapsed: now.Sub(session.OpenedAt),
-			Event:   "verify",
-			Detail: fmt.Sprintf("%d sources checked: %d unchanged, %d changed, %d missing",
-				len(checks), counts["unchanged"], counts["changed"], counts["missing"]),
-			Data: report,
-		})
+		session.appendEvent(custodyNow(), "verify", fmt.Sprintf("%d sources checked: %d unchanged, %d changed, %d missing",
+			len(checks), counts["unchanged"], counts["changed"], counts["missing"]), report)
 	}
 	custodyStore.Unlock()
 
@@ -563,13 +790,24 @@ func CaseClose(args ...object.Object) object.Object {
 	now := custodyNow()
 	session.Closed = true
 	session.ClosedAt = now
-	session.timeline = append(session.timeline, custodyEvent{
-		At:      now,
-		Elapsed: now.Sub(session.OpenedAt),
-		Event:   BuiltinNameCaseClose,
-		Detail:  fmt.Sprintf("case %s closed after %s", session.ID, now.Sub(session.OpenedAt).Round(time.Millisecond)),
-	})
+	session.appendEvent(now, BuiltinNameCaseClose,
+		fmt.Sprintf("case %s closed after %s", session.ID, now.Sub(session.OpenedAt).Round(time.Millisecond)), nil)
 	manifest := session.manifest()
+
+	// The one place K_case dies. It is done here, under the lock the close
+	// already holds and before the manifest leaves, because this is the only
+	// path out of an open case: `case_key_open` deliberately returns no handle,
+	// so there is no `case_key_close` a program could forget to call and no
+	// second lifetime nested inside this one.
+	//
+	// Zeroing is best-effort and shallower than it looks. It cannot reach the
+	// copy chacha20poly1305 keeps inside its own struct, and SecureZero honours
+	// len rather than cap. Both are windows on a machine that is already
+	// compromised, which is the machine this policy does not defend.
+	security.SecureZero(session.caseKey)
+	security.SecureZero(session.classTagKey)
+	session.caseKey, session.classTagKey = nil, nil
+
 	custodyStore.Unlock()
 	custodyActive.Store(false)
 
@@ -611,6 +849,17 @@ func openSessionLocked(op string) (*custodySession, *object.Error) {
 // moment at which the program has said what it considers evidence and has not
 // yet done anything with it.
 func custodyRecordOpen(builtinName, handle string, paths ...string) {
+	custodyRecordOpenAt(builtinName, handle, fsRegion{}, paths...)
+}
+
+// custodyRecordOpenAt is custodyRecordOpen for an opener that reads a volume
+// sitting inside its source rather than the whole of it.
+//
+// Two partitions of one disk are two volumes and one path. Without the region
+// the manifest records "fat_open opened disk.raw" twice, word for word, and
+// nothing in the document says which partition either sentence is about -- so a
+// reader cannot tell a second look at one volume from a first look at another.
+func custodyRecordOpenAt(builtinName, handle string, region fsRegion, paths ...string) {
 	if !custodyActive.Load() || len(paths) == 0 {
 		return
 	}
@@ -702,6 +951,7 @@ func custodyRecordOpen(builtinName, handle string, paths ...string) {
 			Handle:  handle,
 			At:      now,
 			Elapsed: now.Sub(session.OpenedAt),
+			Region:  region,
 		})
 	}
 
@@ -714,12 +964,7 @@ func custodyRecordOpen(builtinName, handle string, paths ...string) {
 	}
 
 	for _, path := range registered {
-		session.timeline = append(session.timeline, custodyEvent{
-			At:      now,
-			Elapsed: now.Sub(session.OpenedAt),
-			Event:   "evidence_registered",
-			Detail:  fmt.Sprintf("%s opened %s", builtinName, path),
-		})
+		session.appendEvent(now, "evidence_registered", fmt.Sprintf("%s opened %s", builtinName, path), nil)
 	}
 }
 
@@ -813,7 +1058,7 @@ func custodyResolvePath(path string) string {
 // custodyHashFile streams a digest over a file. Streaming rather than
 // os.ReadFile because the subject is routinely a disk image.
 func custodyHashFile(path, algo string) (string, error) {
-	hasher, errObj := fsHashAlgorithm(algo)
+	hasher, _, errObj := fsHashAlgorithm(BuiltinNameCaseOpen, algo)
 	if errObj != nil {
 		return "", fmt.Errorf("%s", errObj.Message)
 	}
@@ -835,6 +1080,84 @@ func custodyHashFile(path, algo string) (string, error) {
 // a program reads and the document written to disk cannot drift apart.
 //
 // The caller must hold at least a read lock, or own the session outright.
+// classificationRecord is what the manifest says about the case key and the
+// labels declared under it.
+//
+// It is never omitted. A manifest with no classification block would leave a
+// reader to infer, from an absence, whether the investigation declined to
+// classify anything or simply never opened a key -- and those are different
+// statements. `keyed` false with an empty list says the first; `keyed` true
+// with an empty list says the second.
+//
+// `keyed` is historical and not a liveness check. A closed case reports true,
+// because it was keyed, and `status` a few lines up already tells a reader the
+// key is gone. Deriving it from the live key instead made case_close's own
+// manifest disagree with every manifest rendered afterwards about the same
+// case -- the close renders before it zeroes -- which is the drift this
+// document is supposed to be proof against.
+//
+// The key's PATH is deliberately not here. The whole point of a case key being
+// a file the examiner names is that it does not travel with the handover, and
+// a manifest that recorded where it lives would partly undo that. The
+// fingerprint identifies it; the path locates it, and only one of those
+// belongs in a document that is meant to be handed over.
+func (s *custodySession) classificationRecord() map[string]any {
+	classes := make([]any, 0, len(s.classes))
+	for _, class := range s.classes {
+		classes = append(classes, class.render())
+	}
+	views := make([]any, 0, len(s.views))
+	for _, view := range s.views {
+		views = append(views, view.render())
+	}
+	bundles := make([]any, 0, len(s.bundles))
+	for _, bundle := range s.bundles {
+		bundles = append(bundles, bundle.render())
+	}
+	record := map[string]any{
+		"keyed":   s.keyed,
+		"classes": classes,
+		"count":   int64(len(s.classes)),
+		// Views live in the classification block rather than one of their own
+		// because a disclosure posture only means anything against the scheme
+		// it selects from, and a reader who has to turn a page to find out
+		// what "counsel" grants is a reader who will not turn it.
+		"views":      views,
+		"view_count": int64(len(s.views)),
+		// Which of those views each recipient role may be granted. Here for
+		// the reason the views are: a bundle only means anything against the
+		// views it names.
+		"role_bundles":      bundles,
+		"role_bundle_count": int64(len(s.bundles)),
+		// Every disclosure issued under those views in this run, with the
+		// record, the recipient and the granted set. `bytes_recoverable` is
+		// false on each row because it is false of every disclosure there is.
+		"disclosures":      s.disclosureRows(),
+		"disclosure_count": int64(len(s.disclosures)),
+	}
+	if s.keyed {
+		record["key_fingerprint"] = s.keyFingerprint
+		record["key_id"] = custodyKeyID(s.keyFingerprint)
+		record["key_generation"] = int64(s.keyGeneration)
+		// Whether case_key_erase erased every generation of it in this run;
+		// the ledger's erasure_list says whether one ever did.
+		record["key_erased"] = s.keyErased
+	}
+	return record
+}
+
+// custodyKeyID is the short form a record header names: the first 16 hex
+// characters of the fingerprint. It is an identifier and not a secret -- the
+// fingerprint is already derived from the case key through HKDF and cannot be
+// walked back -- but it is short enough to read in a hex dump, which is what a
+// record header needs.
+func custodyKeyID(fingerprint string) string {
+	if len(fingerprint) < 16 {
+		return fingerprint
+	}
+	return fingerprint[:16]
+}
+
 func (s *custodySession) manifest() map[string]any {
 	now := custodyNow()
 	end := now
@@ -864,6 +1187,7 @@ func (s *custodySession) manifest() map[string]any {
 			"elapsed_ms": event.Elapsed.Milliseconds(),
 			"event":      event.Event,
 			"detail":     event.Detail,
+			"role":       event.Role,
 		}
 		if event.Data != nil {
 			entry["data"] = event.Data
@@ -887,6 +1211,10 @@ func (s *custodySession) manifest() map[string]any {
 			"closed_at":   custodyOptionalTime(s.Closed, s.ClosedAt),
 			"status":      status,
 			"duration_ms": end.Sub(s.OpenedAt).Milliseconds(),
+			// What the examiner said they were acting as, and in a field beside
+			// it, that nothing checked it. See role.go.
+			"role":               s.Role.Name,
+			"role_authenticated": false,
 		},
 		"tool": map[string]any{
 			"version":    global.Version,
@@ -906,10 +1234,23 @@ func (s *custodySession) manifest() map[string]any {
 			"evidence_read_only": true,
 			"read_only_policy":   "docs/EVIDENCE_HANDLING_POLICY.md",
 		},
-		"program":            custodyProgramRecord(),
-		"evidence":           evidence,
+		"program":  custodyProgramRecord(),
+		"evidence": evidence,
+		// Emitted whether or not a key was opened, because "no classification
+		// scheme was in force" is a fact about the investigation and an absent
+		// key reads as an oversight. See classificationRecord.
+		"classification": s.classificationRecord(),
+		// Whether the case is attached to a ledger, and if so the state and
+		// assignments read from it: marked source "ledger", because it is
+		// what the ledger said and not what this run decided.
+		"ledger_state":       s.ledgerStateRecord(),
 		"timeline":           timeline,
 		"security_telemetry": telemetry,
+		// The counters say how many. The audit chain says in what order, and
+		// its head is here because a hash chain nobody kept the head of
+		// proves nothing: the seal below covers this field, so the manifest
+		// is the anchor the log would otherwise lack.
+		"audit": auditManifestRecord(),
 	}
 
 	// The hash is part of every rendering, because a manifest a program looked
@@ -928,6 +1269,10 @@ func (e *custodyEvidence) render() map[string]any {
 			"handle":     open.Handle,
 			"at":         open.At.UTC().Format(time.RFC3339Nano),
 			"elapsed_ms": open.Elapsed.Milliseconds(),
+			// Always present, never conditional: a field that appears only
+			// sometimes is one a report template learns to leave out.
+			"volume_offset": open.Region.Offset,
+			"volume_length": open.Region.Length,
 		})
 	}
 

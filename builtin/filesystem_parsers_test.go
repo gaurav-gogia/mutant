@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -10,12 +11,47 @@ import (
 	"mutant/object"
 )
 
+// fakeFileReader turns a fake session's byte map into the seam the streaming
+// builtins read through.
+//
+// The reader covers every byte in the map, but located -- where the path
+// appears in it -- says how many of them the library would report as actually
+// found. That is deliberately the shape of a broken FAT chain: the bytes past
+// the chain are still there on the volume, they just belong to something else
+// now. A bound applied to the wrong number therefore returns the wrong content
+// here rather than merely running out of input.
+func fakeFileReader(files map[string][]byte, located map[string]int64, filePath string) (fsFileReader, error) {
+	clean := normalizeFSPath(filePath)
+	data, ok := files[clean]
+	if !ok {
+		return fsFileReader{}, errors.New("path not found")
+	}
+
+	reader := fsFileReader{
+		ReaderAt: bytes.NewReader(data),
+		Size:     int64(len(data)),
+		Located:  int64(len(data)),
+	}
+	if n, ok := located[clean]; ok {
+		reader.Located = n
+	}
+	return reader, nil
+}
+
 type fakeNTFSBackend struct {
 	session ntfsSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeNTFSBackend) Open(volumePath string) (ntfsSession, error) {
+func (f *fakeNTFSBackend) Open(volumePath string, region fsRegion) (ntfsSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -23,17 +59,68 @@ func (f fakeNTFSBackend) Open(volumePath string) (ntfsSession, error) {
 }
 
 type fakeNTFSSession struct {
-	entries map[string][]ntfsListEntry
-	files   map[string][]byte
-	meta    map[string]ntfsMetadata
+	entries         map[string][]ntfsListEntry
+	files           map[string][]byte
+	located         map[string]int64
+	meta            map[string]ntfsMetadata
+	verify          fsVerifyResult
+	verifyErr       error
+	deleted         fsDeletedScan
+	deletedErr      error
+	recovery        fsRecovery
+	recoveryErr     error
+	recoveryIndex   int64
+	recoveryAssumed bool
+	usn             fsJournalScan
+	usnErr          error
+	logRecords      fsJournalScan
+	logRecordsErr   error
+	logTxns         fsJournalScan
+	logTxnsErr      error
+	slack           fsSlackScan
+	slackErr        error
+	slackPath       string
+	streams         fsStreamScan
+	streamsErr      error
+	streamsPath     string
+	streamReader    fsFileReader
+	streamErr       error
+	streamName      string
+	security        fsSecurityScan
+	securityErr     error
+	securityPath    string
+	securityIndex   fsSecurityIndex
+	securityIdxErr  error
+	reparse         fsReparseScan
+	reparseErr      error
+	reparsePath     string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeNTFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 type fakeFATBackend struct {
 	session fatSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeFATBackend) Open(volumePath string) (fatSession, error) {
+func (f *fakeFATBackend) Open(volumePath string, region fsRegion) (fatSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -41,17 +128,48 @@ func (f fakeFATBackend) Open(volumePath string) (fatSession, error) {
 }
 
 type fakeFATSession struct {
-	entries map[string][]fatListEntry
-	files   map[string][]byte
-	meta    map[string]fatMetadata
+	entries         map[string][]fatListEntry
+	files           map[string][]byte
+	located         map[string]int64
+	meta            map[string]fatMetadata
+	verify          fsVerifyResult
+	verifyErr       error
+	deleted         fsDeletedScan
+	deletedErr      error
+	recovery        fsRecovery
+	recoveryErr     error
+	recoveryIndex   int64
+	recoveryAssumed bool
+	slack           fsSlackScan
+	slackErr        error
+	slackPath       string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeFATSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 type fakeXFATBackend struct {
 	session xfatSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeXFATBackend) Open(volumePath string) (xfatSession, error) {
+func (f *fakeXFATBackend) Open(volumePath string, region fsRegion) (xfatSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -59,17 +177,48 @@ func (f fakeXFATBackend) Open(volumePath string) (xfatSession, error) {
 }
 
 type fakeXFATSession struct {
-	entries map[string][]xfatListEntry
-	files   map[string][]byte
-	meta    map[string]xfatMetadata
+	entries         map[string][]xfatListEntry
+	files           map[string][]byte
+	located         map[string]int64
+	meta            map[string]xfatMetadata
+	verify          fsVerifyResult
+	verifyErr       error
+	deleted         fsDeletedScan
+	deletedErr      error
+	recovery        fsRecovery
+	recoveryErr     error
+	recoveryIndex   int64
+	recoveryAssumed bool
+	slack           fsSlackScan
+	slackErr        error
+	slackPath       string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeXFATSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 type fakeEXTBackend struct {
 	session extSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeEXTBackend) Open(volumePath string) (extSession, error) {
+func (f *fakeEXTBackend) Open(volumePath string, region fsRegion) (extSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -77,17 +226,66 @@ func (f fakeEXTBackend) Open(volumePath string) (extSession, error) {
 }
 
 type fakeEXTSession struct {
-	entries map[string][]extListEntry
-	files   map[string][]byte
-	meta    map[string]extMetadata
+	entries           map[string][]extListEntry
+	files             map[string][]byte
+	located           map[string]int64
+	meta              map[string]extMetadata
+	verify            fsVerifyResult
+	verifyErr         error
+	deleted           fsDeletedScan
+	deletedErr        error
+	recovery          fsRecovery
+	recoveryErr       error
+	recoveryIndex     int64
+	recoveryAssumed   bool
+	journal           fsJournalScan
+	journalErr        error
+	copies            fsJournalScan
+	copiesErr         error
+	copiesBlock       int64
+	versions          fsJournalScan
+	versionsErr       error
+	versionsInode     int64
+	journalled        fsRecovery
+	journalledErr     error
+	journalledInode   int64
+	journalledVersion int64
+	slack             fsSlackScan
+	slackErr          error
+	slackPath         string
+	dirSlack          fsDirSlackScan
+	dirSlackErr       error
+	dirSlackPath      string
+	xattrs            fsXattrScan
+	xattrsErr         error
+	xattrsPath        string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeEXTSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 type fakeHFSBackend struct {
 	session hfsSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeHFSBackend) Open(volumePath string) (hfsSession, error) {
+func (f *fakeHFSBackend) Open(volumePath string, region fsRegion) (hfsSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -95,17 +293,56 @@ func (f fakeHFSBackend) Open(volumePath string) (hfsSession, error) {
 }
 
 type fakeHFSSession struct {
-	entries map[string][]hfsListEntry
-	files   map[string][]byte
-	meta    map[string]hfsMetadata
+	entries         map[string][]hfsListEntry
+	files           map[string][]byte
+	located         map[string]int64
+	meta            map[string]hfsMetadata
+	verify          fsVerifyResult
+	verifyErr       error
+	deleted         fsDeletedScan
+	deletedErr      error
+	recovery        fsRecovery
+	recoveryErr     error
+	recoveryIndex   int64
+	recoveryAssumed bool
+	slack           fsSlackScan
+	slackErr        error
+	slackPath       string
+	freeSpace       fsFreeSpaceScan
+	freeSpaceErr    error
+	xattrs          fsXattrScan
+	xattrsErr       error
+	xattrsPath      string
+	resourceFork    fsForkScan
+	resourceErr     error
+	resourcePath    string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeHFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 type fakeXFSBackend struct {
 	session xfsSession
 	err     error
+	opened  *fsRegion
+	path    *string
 }
 
-func (f fakeXFSBackend) Open(volumePath string) (xfsSession, error) {
+func (f *fakeXFSBackend) Open(volumePath string, region fsRegion) (xfsSession, error) {
+	if f.opened != nil {
+		*f.opened = region
+	}
+	if f.path != nil {
+		*f.path = volumePath
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -113,9 +350,42 @@ func (f fakeXFSBackend) Open(volumePath string) (xfsSession, error) {
 }
 
 type fakeXFSSession struct {
-	entries map[string][]xfsListEntry
-	files   map[string][]byte
-	meta    map[string]xfsMetadata
+	entries         map[string][]xfsListEntry
+	files           map[string][]byte
+	located         map[string]int64
+	meta            map[string]xfsMetadata
+	verify          fsVerifyResult
+	verifyErr       error
+	deleted         fsDeletedScan
+	deletedErr      error
+	deletedDir      string
+	unlinked        fsDeletedScan
+	unlinkedErr     error
+	recovery        fsRecovery
+	recoveryErr     error
+	recoveryIndex   int64
+	recoveryAssumed bool
+	logRecords      fsJournalScan
+	logRecordsErr   error
+	logTxns         fsJournalScan
+	logTxnsErr      error
+	slack           fsSlackScan
+	slackErr        error
+	slackPath       string
+	xattrs          fsXattrScan
+	xattrsErr       error
+	xattrsPath      string
+
+	// The capability set and the volume report, which the *_capabilities and
+	// *_report builtins read through the session like every other scan here.
+	capabilities    fsCapabilitySet
+	capabilitiesErr error
+	report          fsReport
+	reportErr       error
+}
+
+func (f *fakeXFSSession) OpenReader(filePath string) (fsFileReader, error) {
+	return fakeFileReader(f.files, f.located, filePath)
 }
 
 func (f *fakeXFSSession) ListFiles(dirPath string) ([]xfsListEntry, error) {
@@ -438,7 +708,7 @@ func TestNTFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeNTFSBackend(t, fakeNTFSBackend{session: fakeSession})
+	installFakeNTFSBackend(t, &fakeNTFSBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, NtfsOpen(stringObj("synthetic.img")))
 	if openErr != nil {
@@ -511,7 +781,7 @@ func TestNTFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestNTFSBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeNTFSBackend(t, fakeNTFSBackend{err: errors.New("boom")})
+	installFakeNTFSBackend(t, &fakeNTFSBackend{err: errors.New("boom")})
 
 	_, errObj := unwrapPair(t, NtfsOpen(stringObj("broken.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "ntfs_open") {
@@ -564,7 +834,7 @@ func TestFATBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeFATBackend(t, fakeFATBackend{session: fakeSession})
+	installFakeFATBackend(t, &fakeFATBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, FatOpen(stringObj("synthetic-fat.img")))
 	if openErr != nil {
@@ -637,7 +907,7 @@ func TestFATBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestFATBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeFATBackend(t, fakeFATBackend{err: errors.New("fat backend failed")})
+	installFakeFATBackend(t, &fakeFATBackend{err: errors.New("fat backend failed")})
 
 	_, errObj := unwrapPair(t, FatOpen(stringObj("broken-fat.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "fat_open") {
@@ -685,7 +955,7 @@ func TestXFATBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeXFATBackend(t, fakeXFATBackend{session: fakeSession})
+	installFakeXFATBackend(t, &fakeXFATBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, XFATOpen(stringObj("synthetic-xfat.img")))
 	if openErr != nil {
@@ -758,7 +1028,7 @@ func TestXFATBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestXFATBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeXFATBackend(t, fakeXFATBackend{err: errors.New("xfat backend failed")})
+	installFakeXFATBackend(t, &fakeXFATBackend{err: errors.New("xfat backend failed")})
 
 	_, errObj := unwrapPair(t, XFATOpen(stringObj("broken-xfat.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "xfat_open") {
@@ -783,8 +1053,8 @@ func TestXFATBuiltinArgumentAndHandleErrors(t *testing.T) {
 
 func TestXFATFindEntryByNameHelper(t *testing.T) {
 	entries := []libxfat.Entry{}
-	if _, found := xfatFindEntryByName(entries, "file.txt"); found {
-		t.Fatalf("expected not found on empty entries")
+	if _, err := xfatFindEntryByName(entries, "file.txt"); !errors.Is(err, errXFATNoSuchName) {
+		t.Fatalf("expected no such name on empty entries, got %v", err)
 	}
 }
 
@@ -812,7 +1082,7 @@ func TestEXTBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeEXTBackend(t, fakeEXTBackend{session: fakeSession})
+	installFakeEXTBackend(t, &fakeEXTBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, ExtOpen(stringObj("synthetic-ext.img")))
 	if openErr != nil {
@@ -885,7 +1155,7 @@ func TestEXTBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestEXTBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeEXTBackend(t, fakeEXTBackend{err: errors.New("ext backend failed")})
+	installFakeEXTBackend(t, &fakeEXTBackend{err: errors.New("ext backend failed")})
 
 	_, errObj := unwrapPair(t, ExtOpen(stringObj("broken-ext.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "ext_open") {
@@ -935,7 +1205,7 @@ func TestHFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeHFSBackend(t, fakeHFSBackend{session: fakeSession})
+	installFakeHFSBackend(t, &fakeHFSBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, HFSOpen(stringObj("synthetic-hfs.img")))
 	if openErr != nil {
@@ -1008,7 +1278,7 @@ func TestHFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestHFSBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeHFSBackend(t, fakeHFSBackend{err: errors.New("hfs backend failed")})
+	installFakeHFSBackend(t, &fakeHFSBackend{err: errors.New("hfs backend failed")})
 
 	_, errObj := unwrapPair(t, HFSOpen(stringObj("broken-hfs.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "hfs_open") {
@@ -1057,7 +1327,7 @@ func TestXFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 			},
 		},
 	}
-	installFakeXFSBackend(t, fakeXFSBackend{session: fakeSession})
+	installFakeXFSBackend(t, &fakeXFSBackend{session: fakeSession})
 
 	openPayload, openErr := unwrapPair(t, XFSOpen(stringObj("synthetic-xfs.img")))
 	if openErr != nil {
@@ -1130,7 +1400,7 @@ func TestXFSBuiltinFlowWithSyntheticDataset(t *testing.T) {
 }
 
 func TestXFSBuiltinArgumentAndHandleErrors(t *testing.T) {
-	installFakeXFSBackend(t, fakeXFSBackend{err: errors.New("xfs backend failed")})
+	installFakeXFSBackend(t, &fakeXFSBackend{err: errors.New("xfs backend failed")})
 
 	_, errObj := unwrapPair(t, XFSOpen(stringObj("broken-xfs.img")))
 	if errObj == nil || !strings.Contains(errObj.Message, "xfs_open") {
@@ -1151,4 +1421,269 @@ func TestXFSBuiltinArgumentAndHandleErrors(t *testing.T) {
 	if errObj == nil || !strings.Contains(errObj.Message, "wrong number of arguments") {
 		t.Fatalf("expected xfs_metadata arity error, got: %v", errObj)
 	}
+}
+
+func (f *fakeNTFSSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeFATSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeXFATSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeEXTSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeHFSSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeXFSSession) Verify() (fsVerifyResult, error) {
+	return f.verify, f.verifyErr
+}
+
+func (f *fakeNTFSSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeFATSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeXFATSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeEXTSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeHFSSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeXFSSession) Capabilities() (fsCapabilitySet, error) {
+	return f.capabilities, f.capabilitiesErr
+}
+
+func (f *fakeNTFSSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeFATSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeXFATSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeEXTSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeHFSSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeXFSSession) Report() (fsReport, error) {
+	return f.report, f.reportErr
+}
+
+func (f *fakeNTFSSession) ScanDeleted() (fsDeletedScan, error) {
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeFATSession) ScanDeleted() (fsDeletedScan, error) {
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeXFATSession) ScanDeleted() (fsDeletedScan, error) {
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeEXTSession) ScanDeleted() (fsDeletedScan, error) {
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeHFSSession) ScanDeleted() (fsDeletedScan, error) {
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeXFSSession) ScanDeletedDirectory(dirPath string) (fsDeletedScan, error) {
+	f.deletedDir = dirPath
+	return f.deleted, f.deletedErr
+}
+
+func (f *fakeXFSSession) UnlinkedInodes() (fsDeletedScan, error) {
+	return f.unlinked, f.unlinkedErr
+}
+
+// The recovery fakes record what they were asked for as well as answering:
+// which index reached the library, and whether the contiguity hypothesis
+// travelled with it, are both things the builtins are responsible for and
+// neither is visible in the result.
+func (f *fakeNTFSSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeFATSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeXFATSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeEXTSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeHFSSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeXFSSession) RecoverDeleted(index int64, assumeContiguous bool) (fsRecovery, error) {
+	f.recoveryIndex = index
+	f.recoveryAssumed = assumeContiguous
+	return f.recovery, f.recoveryErr
+}
+
+func (f *fakeNTFSSession) ScanUSNJournal() (fsJournalScan, error) {
+	return f.usn, f.usnErr
+}
+
+func (f *fakeNTFSSession) ScanLogRecords() (fsJournalScan, error) {
+	return f.logRecords, f.logRecordsErr
+}
+
+func (f *fakeNTFSSession) ScanLogTransactions() (fsJournalScan, error) {
+	return f.logTxns, f.logTxnsErr
+}
+
+func (f *fakeEXTSession) ScanJournal() (fsJournalScan, error) {
+	return f.journal, f.journalErr
+}
+
+func (f *fakeEXTSession) JournalBlockCopies(fsBlock int64) (fsJournalScan, error) {
+	f.copiesBlock = fsBlock
+	return f.copies, f.copiesErr
+}
+
+func (f *fakeEXTSession) JournalInodeVersions(inode int64) (fsJournalScan, error) {
+	f.versionsInode = inode
+	return f.versions, f.versionsErr
+}
+
+func (f *fakeEXTSession) RecoverJournalledFile(inode, version int64) (fsRecovery, error) {
+	f.journalledInode = inode
+	f.journalledVersion = version
+	return f.journalled, f.journalledErr
+}
+
+func (f *fakeXFSSession) ScanLogRecords() (fsJournalScan, error) {
+	return f.logRecords, f.logRecordsErr
+}
+
+func (f *fakeXFSSession) ScanLogTransactions() (fsJournalScan, error) {
+	return f.logTxns, f.logTxnsErr
+}
+
+func (f *fakeNTFSSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeFATSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeXFATSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeEXTSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeEXTSession) DirSlack(dirPath string) (fsDirSlackScan, error) {
+	f.dirSlackPath = dirPath
+	return f.dirSlack, f.dirSlackErr
+}
+
+func (f *fakeHFSSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeHFSSession) Unallocated() (fsFreeSpaceScan, error) {
+	return f.freeSpace, f.freeSpaceErr
+}
+
+func (f *fakeXFSSession) Slack(filePath string) (fsSlackScan, error) {
+	f.slackPath = filePath
+	return f.slack, f.slackErr
+}
+
+func (f *fakeNTFSSession) Streams(filePath string) (fsStreamScan, error) {
+	f.streamsPath = filePath
+	return f.streams, f.streamsErr
+}
+
+func (f *fakeNTFSSession) OpenStream(filePath, streamName string) (fsFileReader, error) {
+	f.streamsPath = filePath
+	f.streamName = streamName
+	return f.streamReader, f.streamErr
+}
+
+func (f *fakeNTFSSession) Security(filePath string) (fsSecurityScan, error) {
+	f.securityPath = filePath
+	return f.security, f.securityErr
+}
+
+func (f *fakeNTFSSession) SecurityIndex() (fsSecurityIndex, error) {
+	return f.securityIndex, f.securityIdxErr
+}
+
+func (f *fakeNTFSSession) Reparse(filePath string) (fsReparseScan, error) {
+	f.reparsePath = filePath
+	return f.reparse, f.reparseErr
+}
+
+func (f *fakeEXTSession) Xattrs(filePath string) (fsXattrScan, error) {
+	f.xattrsPath = filePath
+	return f.xattrs, f.xattrsErr
+}
+
+func (f *fakeHFSSession) Xattrs(filePath string) (fsXattrScan, error) {
+	f.xattrsPath = filePath
+	return f.xattrs, f.xattrsErr
+}
+
+func (f *fakeHFSSession) ResourceFork(filePath string) (fsForkScan, error) {
+	f.resourcePath = filePath
+	return f.resourceFork, f.resourceErr
+}
+
+func (f *fakeXFSSession) Xattrs(filePath string) (fsXattrScan, error) {
+	f.xattrsPath = filePath
+	return f.xattrs, f.xattrsErr
 }

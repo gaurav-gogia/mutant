@@ -30,7 +30,6 @@ import (
 
 	mast "mutant/ast"
 	"mutant/builtin"
-	localprotocol "mutant/lsp/internal/protocol"
 
 	lsp "github.com/tliron/glsp/protocol_3_16"
 )
@@ -148,8 +147,31 @@ func (c *spawnWriteCollector) reportWrites(literal *mast.FunctionLiteral, builti
 			return
 		}
 
+		// c.globals is spellings, and a local of the ENCLOSING function that
+		// happens to share a name with a top-level one is not a global:
+		//
+		//	let count = 0;
+		//	let run = fn() { let count = 5; spawn(fn() { count = 1; }); };
+		//
+		// leaves the global at 0 and the enclosing local at 5, both measured.
+		// The advice below is still right -- the write is lost -- but the
+		// sentence names the wrong variable, and the rule's own header promises
+		// that only a top-level name counts. shadowed holds what the callback
+		// binds for itself and so cannot see the enclosing `let` at all; the
+		// graph can, because a top-level declaration is one whose scope is the
+		// root.
+		//
+		// A target the graph cannot resolve keeps the old answer rather than
+		// going quiet: the globals check is still a real signal, and the cost
+		// of being wrong here is a wording, not a missed defect.
+		graph := c.snapshot.Graph()
+		if declared, resolved := graph.Resolve(rng.Start.Line, rng.Start.Column); resolved &&
+			declared != nil && declared.Scope != graph.Root {
+			return
+		}
+
 		c.result = append(c.result, lsp.Diagnostic{
-			Range:    localprotocol.ToLSPRange(rng),
+			Range:    c.snapshot.Range(rng),
 			Severity: c.severity,
 			Source:   c.source,
 			Message: fmt.Sprintf(
@@ -170,6 +192,24 @@ func visitExpressions(node mast.Node, visit func(mast.Expression)) {
 // bindings needs enterFunctions=false: a nested body has different bindings, so
 // it has to be walked separately rather than as part of this one.
 func walkExpressions(node mast.Node, enterFunctions bool, visit func(mast.Expression)) {
+	walkExpressionsFiltered(node, enterFunctions, nil, visit)
+}
+
+// walkExpressionsFiltered is walkExpressions with a gate on the descent: when
+// descend is not nil and answers false for an expression, that expression is
+// visited and its children are not.
+//
+// It exists for a caller whose subtree means something other than the code
+// around it. macroSafety needs it for `quote(...)`, which holds source the macro
+// emits rather than code the compiler runs, and has to walk that subtree under a
+// different rule instead of skipping it -- an `unquote(...)` anywhere inside puts
+// its argument back. A nil descend is the behaviour every other caller has.
+func walkExpressionsFiltered(
+	node mast.Node,
+	enterFunctions bool,
+	descend func(mast.Expression) bool,
+	visit func(mast.Expression),
+) {
 	var walkStatement func(mast.Statement)
 	var walkExpression func(mast.Expression)
 
@@ -178,6 +218,9 @@ func walkExpressions(node mast.Node, enterFunctions bool, visit func(mast.Expres
 			return
 		}
 		visit(e)
+		if descend != nil && !descend(e) {
+			return
+		}
 
 		switch n := e.(type) {
 		case *mast.CallExpression:
@@ -207,9 +250,9 @@ func walkExpressions(node mast.Node, enterFunctions bool, visit func(mast.Expres
 				walkExpression(el)
 			}
 		case *mast.HashLiteral:
-			for key, value := range n.Pairs {
-				walkExpression(key)
-				walkExpression(value)
+			for _, pair := range n.Pairs {
+				walkExpression(pair.Key)
+				walkExpression(pair.Value)
 			}
 		case *mast.StructLiteral:
 			for _, field := range n.Fields {
@@ -248,10 +291,14 @@ func walkExpressions(node mast.Node, enterFunctions bool, visit func(mast.Expres
 		case *mast.ExpressionStatement:
 			walkExpression(n.Expression)
 		case *mast.ReturnStatement:
+			// The parser records the first value in both fields, so
+			// ReturnValue alone is walked only when it is the only one set.
 			for _, value := range n.ReturnValues {
 				walkExpression(value)
 			}
-			walkExpression(n.ReturnValue)
+			if len(n.ReturnValues) == 0 {
+				walkExpression(n.ReturnValue)
+			}
 		case *mast.BlockStatement:
 			for _, inner := range n.Statements {
 				walkStatement(inner)

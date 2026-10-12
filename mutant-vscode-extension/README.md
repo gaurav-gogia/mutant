@@ -17,7 +17,12 @@ VS Code language support for Mutant.
 - **Hover & completion** showing each builtin's signature, summary, capability
   category, and any platform constraint.
 - **Semantic highlighting**, go-to-definition, references, rename, document and
-  workspace symbols, and signature help.
+  workspace symbols, and signature help. Rename reaches files you have not
+  opened.
+- **Call hierarchy** (Shift+Alt+H, or "Peek Call Hierarchy"): who calls a
+  function and what it calls, across files. A call into another module --
+  `stats.mean(...)` -- is followed to the module that declares it, and a caller
+  in a file nobody has opened still appears.
 - **Debugging** (press F5 on a `.mut`): breakpoints with hit counts, step
   over/into/out, the call stack, and Arguments / Locals / Globals with arrays,
   hashes and structs expandable. The CLI is the debug adapter -- the extension
@@ -36,6 +41,13 @@ VS Code language support for Mutant.
   `off`)
 - `mutant.lint.rules.unusedDeclaration.severity`: severity for the unused
   declaration lint rule (`error`, `warning`, `information`, `hint`, `off`)
+- `mutant.lint.rules.unusedImport.severity`: severity for an import that brings
+  nothing this file uses (`error`, `warning`, `information`, `hint`, `off`;
+  `information` by default, because an imported module's top-level statements
+  run whether or not its namespace is used). An import brings more than its
+  namespace: a struct name, an enum name and a macro all arrive bare, so
+  `import a "shapes.mut";` above `Point{x: 1}` is a used import even though the
+  word `a` never appears again.
 - `mutant.lint.rules.undefinedDeclaration.severity`: severity for the undefined
   identifier lint rule (`error`, `warning`, `information`, `hint`, `off`)
 - `mutant.lint.rules.nestingComplexity.severity`: severity for deep nesting
@@ -52,6 +64,9 @@ VS Code language support for Mutant.
   calls to fixed-arity builtins
 - `mutant.lint.rules.builtinArgType.severity`: severity for arguments of a type
   a builtin parameter cannot accept
+- `mutant.lint.rules.builtinArgChoice.severity`: severity for a string literal
+  that is not one of the words a builtin parameter takes -- `db_bfs`'s direction,
+  `ledger_path`'s cost model -- which the builtin refuses when it runs
 - `mutant.lint.rules.builtinSingleReturn.severity`: severity for binding several
   names from a builtin that returns one value
 - `mutant.lint.rules.builtinDeprecated.severity`: severity for calling a builtin
@@ -100,9 +115,39 @@ what makes them worth having: nothing else in the toolchain objects.
   path out of a value the program did not choose
 - `mutant.lint.rules.unboundedResource.severity`: severity for reading something
   whose size the program does not control into memory with no ceiling on it
+- `mutant.lint.rules.classifiedPlaintext.severity`: severity for handing
+  plaintext read out of a classified record to a builtin that refuses it --
+  `putln`, `fs_write`, `http_post` and the rest -- before the run time does
 - `mutant.lint.rules.evidenceMutation.severity`: severity for writing to evidence
   a case opened read-only -- the one rule here about the report rather than the
   machine, because an altered artifact is an artifact that proves nothing
+
+The case family. Each reports a call the case, record and ledger builtins refuse
+when the program runs -- often after it has asked for a passphrase -- in the run
+time's own words, from lists the run time exports and its tests hold to the code.
+
+- `mutant.lint.rules.roleLiteral.severity`: severity for a role `case_open` or
+  `ledger_open` refuses in its options: a word that is not a role, a recipient's
+  role such as `legal`, or `unasserted`
+- `mutant.lint.rules.filteredLedgerHandle.severity`: severity for passing the
+  handle `ledger_under_view` returns to a builtin that does not read under a
+  view -- any writer, and every read but the eight that filter
+- `mutant.lint.rules.secretOption.severity`: severity for an option named
+  `passphrase`, `password`, `secret` or `key` handed to a builtin that asks for
+  its passphrase at the terminal and refuses one as an argument
+- `mutant.lint.rules.lifecycleState.severity`: severity for asking
+  `case_transition` for a state it never moves a case to -- `in_review`,
+  `concluded`, `retained` or `registered` -- naming the builtin that makes the
+  move
+
+One is about when code runs rather than what it does.
+
+- `mutant.lint.rules.macroSafety.severity`: severity for a builtin a macro body
+  calls that the compiler refuses while expanding it -- one that reads or writes
+  a file, reaches the network, starts a process, draws entropy, reads the clock
+  or decodes cryptographic material -- in the expander's own words. Nothing
+  inside `quote(...)` is reported, since that is the source the macro emits; an
+  `unquote(...)` inside it is
 
 - `mutant.strictFormatting`: master on/off switch for canonical formatting
   (`true` by default)
@@ -110,9 +155,14 @@ what makes them worth having: nothing else in the toolchain objects.
   (`false` by default)
 
 By default, Mutant files use `editor.formatOnSave: true` via extension
-configuration defaults, so canonical style is enforced when saving. By default,
-`editor.formatOnType` remains disabled for Mutant files; enable
-`mutant.format.onType.enabled` if you want live formatting while typing.
+configuration defaults, so canonical style is enforced when saving. On-type
+formatting is off unless `mutant.format.onType.enabled` is set, and then it runs
+on `;` and `}`. The extension writes nothing to your settings to arrange this:
+it turns `editor.formatOnType` on for Mutant files as a default and asks the
+language server only while `mutant.format.onType.enabled` is set. Your own
+`"[mutant]": { "editor.formatOnType": false }` still turns it off. Earlier
+versions wrote an `editor.formatOnType` line into the open folder's workspace
+settings; you may delete it.
 
 When `mutant.languageServer.path` is empty, the extension first tries packaged
 platform binaries in `bin/`:

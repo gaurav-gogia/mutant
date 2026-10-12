@@ -203,3 +203,60 @@ let body, err = fs_read(name);`
 		}
 	}
 }
+
+// One sink is one report however deep it sits. The same pairing of
+// forEachStatementInScope with walkExpressions that inflated evidenceMutation
+// inflated this: a read three blocks down was reported once per enclosing
+// statement.
+func TestPathTraversalReportsANestedCallOnce(t *testing.T) {
+	src := `let name = gets();
+if (true) {
+  if (true) {
+    if (true) {
+      let body, err = fs_read("cases/" + name);
+    }
+  }
+}`
+
+	if messages := traversalMessages(t, src); len(messages) != 1 {
+		t.Fatalf("want one report, got %d: %v", len(messages), messages)
+	}
+}
+
+// The doc at the top of path_traversal.go promises that a mention of the name
+// "or of any name it was derived from" counts as the check. The code looked at
+// one hop, so a path built in two steps was reported with a message saying
+// nothing in the file looks at the value -- four lines under the line that
+// does.
+func TestPathTraversalFollowsAGuardThroughEveryHop(t *testing.T) {
+	twoHops := `let name = gets();
+if (text_contains(name, "..")) {
+  putln("rejected");
+}
+let file = "cases/" + name;
+let full = file + ".log";
+let body, err = fs_read(full);`
+
+	if messages := traversalMessages(t, twoHops); len(messages) != 0 {
+		t.Fatalf("guard two hops back, want silence, got %v", messages)
+	}
+
+	// Still a narrowing and not an amputation: the same two hops with no guard
+	// anywhere report, and so does the one-hop case the old code did catch.
+	unguarded := `let name = gets();
+let file = "cases/" + name;
+let full = file + ".log";
+let body, err = fs_read(full);`
+
+	if messages := traversalMessages(t, unguarded); len(messages) != 1 {
+		t.Fatalf("two hops with no guard, want one report, got %d: %v", len(messages), messages)
+	}
+
+	oneHop := `let name = gets();
+let file = "cases/" + name;
+let body, err = fs_read(file);`
+
+	if messages := traversalMessages(t, oneHop); len(messages) != 1 {
+		t.Fatalf("one hop with no guard, want one report, got %d: %v", len(messages), messages)
+	}
+}

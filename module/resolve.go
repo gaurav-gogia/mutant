@@ -13,8 +13,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"mutant/sema"
 )
 
 // Extension is the suffix every Mutant source file carries. An import path
@@ -69,7 +70,8 @@ func (r *Resolver) Resolve(spelling, importerDir string) (string, error) {
 		return "", err
 	}
 
-	local := filepath.FromSlash(spelling)
+	// Both separators, on every host: sema.ImportPath says why.
+	local := sema.ImportPath(spelling)
 
 	// An absolute import bypasses the search entirely: there is exactly one
 	// file it could mean, and joining it onto a search directory would produce
@@ -103,19 +105,26 @@ func (r *Resolver) Resolve(spelling, importerDir string) (string, error) {
 	return "", &NotFoundError{Spelling: spelling, ImporterDir: importerDir, Searched: searched}
 }
 
-// validateSpelling rejects import paths that cannot name a Mutant source file.
+// validateSpelling rejects import paths that cannot name a Mutant source file,
+// and those that cannot be resolved the same way on every host.
+//
+// The portability check runs before the extension is looked at, so every
+// later check reads the spelling as written: there is no trimmed copy for a
+// check to pass while Resolve joins the untrimmed one.
 func validateSpelling(spelling string) error {
-	trimmed := strings.TrimSpace(spelling)
-	if trimmed == "" {
+	if strings.TrimSpace(spelling) == "" {
 		return &InvalidPathError{Spelling: spelling, Reason: "the path is empty"}
 	}
-	if !strings.HasSuffix(trimmed, Extension) {
+	if problem := sema.ImportSpellingProblem(spelling); problem != "" {
+		return &InvalidPathError{Spelling: spelling, Reason: problem}
+	}
+	if !strings.HasSuffix(spelling, Extension) {
 		return &InvalidPathError{
 			Spelling: spelling,
 			Reason:   fmt.Sprintf("an import path must end in %s", Extension),
 		}
 	}
-	if len(trimmed) == len(Extension) {
+	if len(spelling) == len(Extension) {
 		return &InvalidPathError{Spelling: spelling, Reason: "the path names no file, only the extension"}
 	}
 	return nil
@@ -124,17 +133,13 @@ func validateSpelling(spelling string) error {
 // canonicalKey returns the identity of a file: the value two spellings of the
 // same file must share, so a diamond import compiles it once.
 //
-// Case is folded on Windows and only on Windows. Folding everywhere would
-// merge `Util.mut` and `util.mut` on a case-sensitive filesystem, where they
-// are genuinely two files; folding nowhere would compile the same Windows file
-// twice when two imports disagree about capitalisation, giving duplicate
-// definitions for code that is correct on the platform it was written for.
+// The rule itself lives in sema, which also files every fact it holds under
+// this key, and which the language server can import where it cannot import
+// this package. Two independently-written copies of the rule that defines
+// module identity is how modules come to silently fail to match across
+// case-differing paths, so this forwards rather than repeating it.
 func canonicalKey(absolutePath string) string {
-	key := filepath.Clean(absolutePath)
-	if runtime.GOOS == "windows" {
-		key = strings.ToLower(key)
-	}
-	return key
+	return sema.CanonicalKey(absolutePath)
 }
 
 // fileExists reports whether path names an existing regular file. A directory

@@ -60,8 +60,6 @@ func (p *Parser) parseIfExpression() ast.Expression {
 }
 
 func (p *Parser) parsePrefixExpression() ast.Expression {
-	// defer untrace(trace("parsePrefixExpression"))
-
 	start := p.startMark()
 	expression := &ast.PrefixExpression{
 		Token:    p.curToken,
@@ -76,8 +74,6 @@ func (p *Parser) parsePrefixExpression() ast.Expression {
 }
 
 func (p *Parser) parseInfixExpression(left ast.Expression) ast.Expression {
-	// defer untrace(trace("parseInfixExpression"))
-
 	// The left-hand side has already been parsed; its range is registered
 	// against the sub-node. For the InfixExpression as a whole we use the
 	// left operand's start (if known) so hovers cover the entire binary
@@ -106,11 +102,20 @@ func (p *Parser) parseGroupedExpression() ast.Expression {
 	if !p.expectPeek(token.RPAREN) {
 		return nil
 	}
+	p.markParenthesized(exp)
 	return exp
 }
 
 func (p *Parser) parseExpression(precedence int) ast.Expression {
-	// defer untrace(trace("parseExpression"))
+	// Every expression form that recurses does it through here, so this one
+	// check bounds all of them: parseGroupedExpression for '(', the prefix
+	// operators, the element and value scans of the array and hash literals,
+	// a call's arguments, an index, and the body of a function literal by way
+	// of parseBlockStatement (M26-LEX-003).
+	if !p.enterNesting() {
+		return nil
+	}
+	defer p.leaveNesting()
 
 	prefix := p.prefixParseFns[p.curToken.Type]
 	if prefix == nil {
@@ -133,8 +138,6 @@ func (p *Parser) parseExpression(precedence int) ast.Expression {
 }
 
 func (p *Parser) parseExpressionStatement() *ast.ExpressionStatement {
-	// defer untrace(trace("parseExpressionStatement"))
-
 	start := p.startMark()
 	stmt := &ast.ExpressionStatement{Token: p.curToken}
 	stmt.Expression = p.parseExpression(LOWEST)
@@ -166,10 +169,19 @@ func (p *Parser) parseExpressionList(end token.TokenType) []ast.Expression {
 
 	p.nextToken()
 	for !p.curTokenIs(token.EOF) {
+		// An element that reported its own problem has already told the author
+		// what is wrong at this position, so the punctuation complaint below is
+		// suppressed and the parse goes straight to synchronising. Without this
+		// `putln(0xFF + 1)` cost two errors for one mistake -- the lexer's
+		// account of `0xFF`, and then a sentence about commas aimed at the `+`
+		// left over from the element that was refused. Counting errors around
+		// the call is how parseBlockStatement decides the same question.
+		before := len(p.errors)
 		exp := p.parseExpression(LOWEST)
 		if exp != nil {
 			list = append(list, exp)
 		}
+		reported := len(p.errors) > before
 
 		if p.peekTokenIs(token.COMMA) {
 			p.nextToken()
@@ -182,12 +194,28 @@ func (p *Parser) parseExpressionList(end token.TokenType) []ast.Expression {
 			return list
 		}
 
-		if p.curTokenIs(end) {
+		// The element's own last token can be the closing token too: in
+		// `f(1, g(2)` the `)` that ends g(2) is not f's. Only an element that
+		// reported an error may have stopped on the list's end while
+		// recovering. Treating every such token as the list's end closed
+		// `putln(1,` with the next line's `putln(3)`, which then ran as an
+		// argument, in silence (M26-LEX-022).
+		if reported && p.curTokenIs(end) {
 			return list
 		}
 
-		msg := fmt.Sprintf("expected next token to be %s or %s, but got %s instead", token.COMMA, end, p.peekToken.Type)
-		p.appendError(p.peekToken, msg)
+		if !reported {
+			// An ILLEGAL's own sentence replaces this one, as it does at every
+			// other refusal that can meet one. The lexer knows a backslash is
+			// not an operator; this function knows only that the token is not a
+			// comma, which is the less useful half of the truth and was all
+			// `putln(6 \ 3)` ever produced (M26-LEX-016).
+			msg := fmt.Sprintf("expected next token to be %s or %s, but got %s instead", token.COMMA, end, p.peekToken.Type)
+			if detail := illegalDetail(p.peekToken); detail != "" {
+				msg = detail
+			}
+			p.appendError(p.peekToken, msg)
+		}
 
 		stop := p.synchronizeToTokenTypes(token.COMMA, end, token.SEMICOLON, token.RBRACE)
 		if stop == token.COMMA {

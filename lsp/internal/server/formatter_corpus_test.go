@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"mutant/ast"
 	"mutant/lexer"
 	"mutant/lsp/internal/analyzer"
 	"mutant/token"
@@ -57,12 +58,12 @@ func TestFormatterIsIdempotentAcrossExamples(t *testing.T) {
 
 		snapshot := analyzer.New().Analyze(string(data))
 		if len(snapshot.ParseErrors) > 0 {
-			// Unparseable examples take the whitespace-normalisation path,
-			// which this test is not about.
+			// The formatter refuses an example that does not parse, which
+			// this test is not about.
 			continue
 		}
 
-		once := formatSnapshotText(snapshot)
+		once := mustFormat(t, path, snapshot)
 
 		reparsed := analyzer.New().Analyze(once)
 		if len(reparsed.ParseErrors) > 0 {
@@ -70,7 +71,7 @@ func TestFormatterIsIdempotentAcrossExamples(t *testing.T) {
 			continue
 		}
 
-		if twice := formatSnapshotText(reparsed); once != twice {
+		if twice := mustFormat(t, path, reparsed); once != twice {
 			t.Errorf("%s: formatting is not idempotent", path)
 		}
 	}
@@ -94,7 +95,7 @@ func TestFormatterPreservesEveryCommentAcrossExamples(t *testing.T) {
 		}
 
 		before := commentBodies(src)
-		after := commentBodies(formatSnapshotText(snapshot))
+		after := commentBodies(mustFormat(t, path, snapshot))
 
 		if len(before) != len(after) {
 			t.Errorf("%s: %d comments before formatting, %d after", path, len(before), len(after))
@@ -118,12 +119,12 @@ func TestFormatterPreservesEveryCommentAcrossExamples(t *testing.T) {
 // that the formatted text still means what the original did.
 //
 // The comparison is between parse trees rather than token streams, because this
-// formatter legitimately rewrites tokens: it parenthesises infix expressions
-// (`return n1 + n2` prints as `return (n1 + n2)`) and drops the optional
-// terminator after a struct or enum declaration. Both keep the same tree, which
-// is the property that actually matters. Re-parsing the formatted text and
-// comparing renderings sees past all of it, and still catches a lost statement
-// or a re-associated operator.
+// formatter legitimately rewrites tokens: it prints two pairs of brackets around
+// one expression as one (`((a))` as `(a)`) and drops the optional terminator
+// after a struct or enum declaration. Both keep the same tree, which is the
+// property that actually matters. Re-parsing the formatted text and comparing
+// renderings sees past all of it, and still catches a lost statement or a
+// re-associated operator.
 func TestFormatterPreservesProgramStructureAcrossExamples(t *testing.T) {
 	compared, skipped := 0, 0
 
@@ -139,7 +140,7 @@ func TestFormatterPreservesProgramStructureAcrossExamples(t *testing.T) {
 			continue
 		}
 
-		formatted := formatSnapshotText(snapshot)
+		formatted := mustFormat(t, path, snapshot)
 		reparsed := analyzer.New().Analyze(formatted)
 		if len(reparsed.ParseErrors) > 0 || reparsed.Program == nil {
 			t.Errorf("%s: formatted output no longer parses: %v", path, reparsed.ParseErrors)
@@ -147,9 +148,22 @@ func TestFormatterPreservesProgramStructureAcrossExamples(t *testing.T) {
 		}
 
 		compared++
+		if ast.Equal(snapshot.Program, reparsed.Program) {
+			continue
+		}
+		// The verdict is ast.Equal's; the rendering is only how the failure is
+		// shown, because a side-by-side of two canonicalised texts is what a
+		// reader can act on. It used to be the verdict as well, and that was
+		// the defect: Program.String() is lossy, so two different programs can
+		// render to one string and this test watched for a change it could not
+		// see (M26-LEX-011). Where the two now disagree -- Equal says different,
+		// the renderings agree -- firstDifference has nothing to show, and the
+		// message says so rather than printing an empty diff.
 		before := canonicalRendering(snapshot.Program.String())
 		after := canonicalRendering(reparsed.Program.String())
 		if before == after {
+			t.Errorf("%s: formatting changed the program's structure, in a way the rendering "+
+				"cannot show: ast.Equal reports the trees as different and both render as\n%s", path, before)
 			continue
 		}
 		t.Errorf("%s: formatting changed the program's structure\n%s", path, firstDifference(before, after))
@@ -209,18 +223,18 @@ func TestCanonicalRenderingDetectsRealChanges(t *testing.T) {
 // canonicalRendering makes an AST rendering comparable by sorting the members
 // of every brace group.
 //
-// HashLiteral.Pairs is a Go map, so the authored order of a hash literal does
-// not survive parsing and something has to choose one. HashLiteral.String()
-// sorts by key, so one tree now renders the same way every run -- this used to
-// be the thing that made the comparison below meaningless, and is no longer.
-// The sorting here stays because the two sides are not always rendered the same
-// way: the formatter restores the authored order from source ranges, which the
-// parser does not record for every key. Sorting is safe because braces are the
+// HashLiteral.Pairs holds its pairs in the order the author wrote them, and
+// HashLiteral.String() renders that order, so one tree renders the same way
+// every run -- which is what used to make the comparison below meaningless,
+// back when the pairs were a Go map and no two renderings agreed on an order.
+// The sorting here is no longer what rescues a hash literal, and stays because
+// it costs nothing and makes the comparison one of membership rather than of
+// order. Sorting is safe because braces are the
 // one construct whose order carries no meaning:
 // BlockStatement.String() concatenates its statements with no braces at all,
 // and arrays — where order does matter — render with brackets. (Only tests
-// render an AST; the compiler sorts hash keys before emitting, so bytecode is
-// unaffected.)
+// render an AST; both engines evaluate a hash literal's pairs in the order the
+// tree holds them, so the bytecode is unaffected either way.)
 func canonicalRendering(s string) string {
 	var b strings.Builder
 	i := 0
@@ -337,6 +351,45 @@ func firstDifference(before, after string) string {
 		at, len(before), len(after), window(before), window(after))
 }
 
+// TestFormatterAddsNoBracketsAcrossExamples holds every real example to the
+// owner's decision of 2026-09-29: the formatter keeps the brackets the author
+// wrote and adds none. The formatted text may have fewer `(` than the source --
+// two pairs around one expression print as one -- and never more.
+func TestFormatterAddsNoBracketsAcrossExamples(t *testing.T) {
+	compared := 0
+	for _, path := range exampleFiles(t) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		snapshot := analyzer.New().Analyze(string(data))
+		if len(snapshot.ParseErrors) > 0 || snapshot.Program == nil {
+			continue
+		}
+		compared++
+		before := openingBrackets(string(data))
+		if after := openingBrackets(mustFormat(t, path, snapshot)); after > before {
+			t.Errorf("%s: formatting added brackets: %d before, %d after", path, before, after)
+		}
+	}
+	if compared == 0 {
+		t.Fatal("no example parsed cleanly enough to compare; the corpus or the analyzer is broken")
+	}
+}
+
+// openingBrackets counts `(` tokens, so a bracket inside a string or a comment
+// is not one.
+func openingBrackets(src string) int {
+	l := lexer.New(src)
+	count := 0
+	for tok := l.NextToken(); tok.Type != token.EOF; tok = l.NextToken() {
+		if tok.Type == token.LPAREN {
+			count++
+		}
+	}
+	return count
+}
+
 // commentBodies lexes src and returns its comment texts in source order.
 func commentBodies(src string) []string {
 	l := lexer.New(src)
@@ -352,4 +405,17 @@ func commentBodies(src string) []string {
 		out = append(out, strings.TrimSpace(comment.Text))
 	}
 	return out
+}
+
+// mustFormat is formatSnapshotText for a snapshot the caller has already
+// checked parses, which is every use in this file. A refusal there would mean
+// the formatter declined a tree it has no reason to decline, so it is a
+// failure and not a skip.
+func mustFormat(t *testing.T, path string, snapshot *analyzer.Snapshot) string {
+	t.Helper()
+	formatted, parseErrors, ok := formatSnapshotText(snapshot)
+	if !ok {
+		t.Fatalf("%s: the formatter refused a snapshot with no parse errors: %v", path, parseErrors)
+	}
+	return formatted
 }

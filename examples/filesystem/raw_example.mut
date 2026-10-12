@@ -1,3 +1,5 @@
+// mutant:sweep needs-input -- opens ./disk.raw, a raw disk image the repository does not ship
+
 let opened, open_err = raw_open("./disk.raw");
 if (open_err) {
     putln("raw_open failed:", open_err);
@@ -5,7 +7,7 @@ if (open_err) {
 }
 
 let handle = opened["handle"];
-putf("RAW opened (handle=" + handle + ")");
+putf("RAW opened (handle=%s)\n", handle);
 
 let meta, meta_err = raw_metadata(handle);
 if (meta_err) {
@@ -13,9 +15,9 @@ if (meta_err) {
     return;
 }
 
-putf("RAW metadata:");
-putf("  file_size=" + meta["file_size"]);
-putf("  sector_size=" + meta["sector_size"]);
+putf("RAW metadata:\n");
+putf("  file_size=%d\n", meta["file_size"]);
+putf("  assumed_sector_size=%d\n", meta["assumed_sector_size"]);
 
 let first, read_err = raw_read_at(handle, 0, 512);
 if (read_err) {
@@ -23,8 +25,7 @@ if (read_err) {
     return;
 }
 
-putf("First 512 bytes (string rendering):");
-putf(first);
+putf("First 512 bytes (string rendering):\n%s\n", first);
 
 let closed, close_err = raw_close(handle);
 if (close_err) {
@@ -32,4 +33,4 @@ if (close_err) {
     return;
 }
 
-putf("Handle closed: " + closed["closed"]);
+putf("Handle closed: %t\n", closed["closed"]);

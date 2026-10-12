@@ -12,9 +12,11 @@ package policy
 //
 // Mutant takes no configuration from the environment. The only permitted
 // accesses are ones where the value is observed rather than obeyed -- sandbox
-// and debugger detection, the process_env forensic builtin -- plus writing
-// GOOS/GOARCH/CGO_ENABLED for a build-time child `go build`, which the Go
-// toolchain accepts no other way.
+// and debugger detection, the process_env forensic builtin, a name the REPL
+// prints -- plus writing GOOS/GOARCH/CGO_ENABLED for a build-time child
+// `go build`, which the Go toolchain accepts no other way, working files in the
+// temporary directory, whose location changes no result, and a test that sets
+// a variable to prove nothing obeys it.
 //
 // Anything not listed here fails TestNoEnvironmentAccessOutsideAllowlist.
 type EnvAccessException struct {
@@ -26,7 +28,8 @@ type EnvAccessException struct {
 	// environment. Pinning the count means a new access added inside an
 	// already-allowlisted function still fails the guard.
 	Lines int
-	// Category is one of "detection", "evidence" or "toolchain".
+	// Category is one of "detection", "evidence", "toolchain", "display",
+	// "scratch" or "regression".
 	Category string
 	// Why explains what makes this access something other than configuration.
 	Why string
@@ -35,9 +38,10 @@ type EnvAccessException struct {
 // EnvAccessAllowlist is the complete set of permitted environment accesses.
 //
 // Adding an entry is a policy decision, not a formality: it must be a value
-// Mutant observes or reports rather than obeys, or a build-time `go build`
-// invocation. If a Mutant user could set the variable to change what Mutant
-// does, the answer is a CLI flag instead.
+// Mutant observes, reports or prints rather than obeys, a build-time `go build`
+// invocation, a place for working files that no result depends on, or a test
+// proving a variable is not obeyed. If a Mutant user could set the variable to
+// change what Mutant does, the answer is a CLI flag instead.
 var EnvAccessAllowlist = []EnvAccessException{
 	// detection -- Mutant observing where it is running. This is core Mutant
 	// infrastructure, not configuration: the variables are set by Sandboxie, WSL,
@@ -54,12 +58,12 @@ var EnvAccessAllowlist = []EnvAccessException{
 		Why:      "Windows sandbox indicators, plus USERNAME/USERPROFILE for the Defender Application Guard account.",
 	},
 	{
-		File: "security/antidebug_linux.go", Func: "hasDebuggerEnvironmentMarkers", Lines: 2,
+		File: "security/antidebug_linux.go", Func: "hasDebuggerEnvironmentMarkers", Lines: 1,
 		Category: "detection",
 		Why:      "LD_PRELOAD and Linux debugger markers, read as indicators of compromise.",
 	},
 	{
-		File: "security/antidebug_darwin.go", Func: "hasDebuggerEnvironmentMarkersDarwin", Lines: 2,
+		File: "security/antidebug_darwin.go", Func: "hasDebuggerEnvironmentMarkersDarwin", Lines: 1,
 		Category: "detection",
 		Why:      "DYLD_INSERT_LIBRARIES and macOS debugger markers, read as indicators of compromise.",
 	},
@@ -67,11 +71,6 @@ var EnvAccessAllowlist = []EnvAccessException{
 		File: "security/antitamper_detectors.go", Func: "detectFridaPtrace", Lines: 1,
 		Category: "detection",
 		Why:      "Frida instrumentation markers left in the environment by the injector.",
-	},
-	{
-		File: "security/antitamper_windows.go", Func: "findInjectionEnvMarkers", Lines: 1,
-		Category: "detection",
-		Why:      "Windows library-injection indicators, reported as probe detail.",
 	},
 
 	// evidence -- Mutant reporting on a subject process. The value is output, not
@@ -86,9 +85,10 @@ var EnvAccessAllowlist = []EnvAccessException{
 	// command-line equivalent; the Go toolchain reads them from the child
 	// environment or not at all.
 	{
-		File: "generator/release_assets.go", Func: "buildReleaseRuntimeBinary", Lines: 1,
+		File: "generator/release_assets.go", Func: "buildReleaseRuntimeBinary", Lines: 2,
 		Category: "toolchain",
-		Why:      "Cross-target release builds pass GOOS/GOARCH/CGO_ENABLED to a child go build.",
+		Why: "Cross-target release builds pass GOOS/GOARCH/CGO_ENABLED to a child go build, which writes " +
+			"into a temporary directory removed before the function returns.",
 	},
 	{
 		File: "cmd/wasmreplserve/main.go", Func: "ensureWasmBinary", Lines: 1,
@@ -99,5 +99,94 @@ var EnvAccessAllowlist = []EnvAccessException{
 		File: "builtin/fingerprint_builtins_test.go", Func: "TestImphashOnWindowsPE", Lines: 1,
 		Category: "toolchain",
 		Why:      "Cross-compiles a throwaway Windows PE to fingerprint; needs GOOS/GOARCH on the child build.",
+	},
+
+	// display -- a value Mutant prints and never acts on.
+	{
+		File: "repl/repl.go", Func: "lookupCurrentUser", Lines: 1,
+		Category: "display",
+		Why: "The REPL greeting prints the account's display name. Built without cgo on Linux, user.Current " +
+			"answers for a uid missing from /etc/passwd from $USER and $HOME, with no display name, and only " +
+			"the greeting uses it. It was in welcome, which panicked when either variable was unset and " +
+			"greeted a host that had no display name as \"Hello !\"; both are M26-TOOL-031, and the lookup " +
+			"now sits behind repl.greetingName, which falls back to the username and then to a greeting " +
+			"with no name in it.",
+	},
+
+	// scratch -- the temporary directory (TMPDIR; TMP, TEMP or USERPROFILE on
+	// Windows), for working files deleted when the work is done. Where they sit
+	// changes no result.
+	{
+		File: "builtin/sqlite_builtins.go", Func: "withSQLiteCopy", Lines: 1,
+		Category: "scratch",
+		Why: "The copy of a database an sqlite_* builtin queries, so the evidence file is never opened for " +
+			"writing; removed before the builtin returns.",
+	},
+	{
+		File: "cmd/sweep/main.go", Func: "resolveMutantBinary", Lines: 1,
+		Category: "scratch",
+		Why:      "The example sweep builds the mutant binary it runs into a temporary directory, removed when the sweep ends.",
+	},
+	{
+		File: "cmd/sweep/main.go", Func: "newScratch", Lines: 1,
+		Category: "scratch",
+		Why: "The example sweep runs the examples in a temporary copy of their tree, removed when the sweep " +
+			"ends unless --keep asks for it.",
+	},
+
+	// regression -- a test that sets a variable in its own process to prove
+	// that nothing follows it.
+	{
+		File: "security/antidebug_env_markers_linux_test.go", Func: "TestLinuxDebuggerEnvironmentMarkersNeedAValue", Lines: 4,
+		Category: "regression",
+		Why: "Clears the Linux debugger markers and sets variables one at a time: an empty LD_PRELOAD or LD_AUDIT and " +
+			"a GDBHISTFILE must not count as a debugger attached to the process, and each listed variable holding a " +
+			"value must (M26-TMP-010).",
+	},
+	{
+		File: "security/antidebug_env_markers_darwin_test.go", Func: "TestDarwinDebuggerEnvironmentMarkersNeedAValue", Lines: 4,
+		Category: "regression",
+		Why: "Clears the macOS debugger markers and sets variables one at a time: an empty DYLD_INSERT_LIBRARIES, a " +
+			"GDBHISTFILE and an XCODE_VERSION_ACTUAL must not count as a debugger attached to the process, and each " +
+			"listed variable holding a value must (M26-TMP-010).",
+	},
+	{
+		File: "security/key_bootstrap_test.go", Func: "TestTheKeystoreDoesNotFollowTheEnvironment", Lines: 1,
+		Category: "regression",
+		Why:      "Points HOME and USERPROFILE at two directories in turn and requires the keystore not to move (M26-DOC3-001).",
+	},
+	{
+		File: "security/process_injection_env_windows_test.go", Func: "TestProcessInjectionIgnoresConfigurationVariables", Lines: 1,
+		Category: "regression",
+		Why: "Sets _NT_SYMBOL_PATH, JAVA_TOOL_OPTIONS and the three COR_ profiler variables and requires " +
+			"process_injection to report none of them (M26-TMP-004).",
+	},
+	{
+		File: "builtin/http_environment_test.go", Func: "TestTheHTTPBuiltinsDoNotFollowTheProxyVariables", Lines: 1,
+		Category: "regression",
+		Why:      "Names a local listener in HTTP_PROXY and HTTPS_PROXY and requires no http_* request to reach it (M26-NET-010).",
+	},
+	{
+		File: "builtin/tls_roots_linux_test.go", Func: "TestTheTLSClientsDoNotTrustTheCertificateVariables", Lines: 1,
+		Category: "regression",
+		Why: "Names a planted certificate authority in SSL_CERT_FILE and SSL_CERT_DIR and requires no TLS client to " +
+			"trust it (M26-NET-010).",
+	},
+	{
+		File: "builtin/tls_roots_linux_test.go", Func: "TestTheSystemStoreIsTheOneCryptoX509Reads", Lines: 2,
+		Category: "regression",
+		Why: "Clears SSL_CERT_FILE and SSL_CERT_DIR and asks crypto/x509's SystemCertPool for the system's store, " +
+			"which Mutant's own reading of it must equal (M26-NET-010).",
+	},
+	{
+		File: "builtin/process_host_proc_linux_test.go", Func: "TestTheProcessBuiltinsReadTheRealProc", Lines: 1,
+		Category: "regression",
+		Why:      "Names a planted /proc in HOST_PROC and requires every process_* builtin to report from /proc (M26-NET-025).",
+	},
+	{
+		File: "security/sandbox_virtualbox_installer_windows_test.go", Func: "TestWindowsSandboxIgnoresTheVirtualBoxInstallerVariables", Lines: 1,
+		Category: "regression",
+		Why: "Sets VBOX_INSTALL_PATH and VBOX_MSI_INSTALL_PATH, which VirtualBox's installers set on the host they install it on, " +
+			"and requires the Windows sandbox detector not to read either as a VirtualBox guest (M26-TMP-012).",
 	},
 }

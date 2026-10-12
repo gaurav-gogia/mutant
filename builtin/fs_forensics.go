@@ -36,12 +36,25 @@ func FsHash(args ...object.Object) object.Object {
 		algo = strings.ToLower(strings.TrimSpace(algoObj.Value))
 	}
 
+	// A path that stats as a directory is refused here, in fs_hash's own
+	// words and the same on every host. Read as a file, a directory failed in
+	// the host's: "Incorrect function." on Windows, "is a directory" on Linux,
+	// and "permission denied" for one a Unix user may not list, so a script
+	// could not tell the case apart portably (M26-BLT-002). The stat is by
+	// name, not on an open handle, because opening a directory to read it
+	// needs the right to list it, and the refusal must not depend on that
+	// right.
+	if info, err := os.Stat(pathObj.Value); err == nil && info.IsDir() {
+		return resultAndError(nil, newError("fs_hash: %s is a directory, and a directory has no digest; "+
+			"hash each file in it instead (fs_walk lists them)", pathObj.Value))
+	}
+
 	data, err := os.ReadFile(pathObj.Value)
 	if err != nil {
 		return resultAndError(nil, newError("fs_hash: %s", err.Error()))
 	}
 
-	h, errObj := fsHashAlgorithm(algo)
+	h, algo, errObj := fsHashAlgorithm(BuiltinNameFsHash, algo)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
 	}
@@ -78,7 +91,6 @@ func FsWalk(args ...object.Object) object.Object {
 	}
 
 	root := rootObj.Value
-	baseDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
 	entries := make([]object.Object, 0)
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
@@ -86,7 +98,14 @@ func FsWalk(args ...object.Object) object.Object {
 			return walkErr
 		}
 
-		currentDepth := int64(strings.Count(filepath.Clean(path), string(os.PathSeparator)) - baseDepth)
+		// Depth is how many names lie between the root and the path. Counting
+		// separators in each spelling instead gave "." and its children the
+		// same depth, 0, so a walk from "." went a level deeper than the same
+		// walk from the absolute path (M26-FS2-011).
+		currentDepth := int64(0)
+		if rel, relErr := filepath.Rel(root, path); relErr == nil && rel != "." {
+			currentDepth = int64(strings.Count(rel, string(os.PathSeparator)) + 1)
+		}
 		if maxDepth >= 0 && currentDepth > maxDepth {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -307,18 +326,27 @@ func FsCarve(args ...object.Object) object.Object {
 	}
 
 	target := strings.ToLower(strings.TrimSpace(typeObj.Value))
-	sig, ok := carveSignature(target)
+	sig, sigOffset, ok := carveSignature(target)
 	if !ok {
 		return resultAndError(nil, newError("fs_carve: unsupported type `%s`. supported: %s", typeObj.Value, strings.Join(carveTypes(), ", ")))
 	}
 
+	// The table records where a type's magic sits inside the file -- 'ftyp'
+	// four bytes into an ISO-BMFF box, 'ustar' 257 bytes into a tar header --
+	// and the offset reported is where the artifact starts, as the summary
+	// says, not where its magic was found (M26-FS2-010). A hit too close to
+	// the start of the data to have a beginning is not one.
 	hits := carveOffsets(data, sig)
-	elements := make([]object.Object, len(hits))
-	for i, off := range hits {
-		elements[i] = makeHashObject(map[string]object.Object{
+	elements := make([]object.Object, 0, len(hits))
+	for _, off := range hits {
+		start := off - sigOffset
+		if start < 0 {
+			continue
+		}
+		elements = append(elements, makeHashObject(map[string]object.Object{
 			"type":   stringObj(target),
-			"offset": intObj(int64(off)),
-		})
+			"offset": intObj(int64(start)),
+		}))
 	}
 
 	return resultAndError(&object.Array{Elements: elements}, nil)
@@ -347,16 +375,26 @@ func FsEntropy(args ...object.Object) object.Object {
 	}), nil)
 }
 
-func fsHashAlgorithm(algo string) (hash.Hash, *object.Error) {
+// fsHashAlgorithm maps a mutant algorithm name onto a hash. The set is the
+// one case_open accepts for its custody policy, so a digest recorded by a
+// manifest and one computed by a script are never a different shape.
+//
+// md5 and sha1 are here because published hash sets are keyed on them, not
+// as security properties; nothing that calls this treats a match as one.
+// fsHashAlgorithm returns the digest an algorithm argument asks for and the
+// name to report it under. The argument is matched without regard to case and
+// "" means sha256, so the argument itself is not a label: reported back as
+// given, a sha256 digest read "" or "SHA256".
+func fsHashAlgorithm(op, algo string) (hash.Hash, string, *object.Error) {
 	switch strings.ToLower(algo) {
 	case "md5":
-		return md5.New(), nil
+		return md5.New(), "md5", nil
 	case "sha1":
-		return sha1.New(), nil
+		return sha1.New(), "sha1", nil
 	case "sha256", "":
-		return sha256.New(), nil
+		return sha256.New(), "sha256", nil
 	default:
-		return nil, newError("fs_hash: unsupported algorithm `%s`", algo)
+		return nil, "", newError("%s: unsupported algorithm `%s`", op, algo)
 	}
 }
 
@@ -416,7 +454,7 @@ var fileSignatures = []fileSignature{
 	{"flac", "audio/flac", []byte{'f', 'L', 'a', 'C'}, 0},
 	{"ogg", "application/ogg", []byte{'O', 'g', 'g', 'S'}, 0},
 	{"mp3", "audio/mpeg", []byte{'I', 'D', '3'}, 0},
-	{"mp4", "video/mp4", []byte{'f', 't', 'y', 'p'}, 4}, // also mov/m4a/heic (ISO-BMFF)
+	{"mp4", "video/mp4", []byte{'f', 't', 'y', 'p'}, 4},           // also mov/m4a/heic (ISO-BMFF)
 	{"riff", "application/x-riff", []byte{'R', 'I', 'F', 'F'}, 0}, // refined to wav/avi/webp below
 	{"pe", "application/vnd.microsoft.portable-executable", []byte{0x4D, 0x5A}, 0},
 }
@@ -480,13 +518,15 @@ func bytesEqual(a, b []byte) bool {
 	return true
 }
 
-func carveSignature(name string) ([]byte, bool) {
+// carveSignature returns a type's magic and the offset the magic sits at
+// inside a file of that type.
+func carveSignature(name string) ([]byte, int, bool) {
 	for _, def := range fileSignatures {
 		if def.typ == name {
-			return def.sig, true
+			return def.sig, def.offset, true
 		}
 	}
-	return nil, false
+	return nil, 0, false
 }
 
 // carveTypes lists the distinct signature type names, for error messages.

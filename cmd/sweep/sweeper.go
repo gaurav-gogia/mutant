@@ -30,6 +30,9 @@ type result struct {
 	status status
 	note   string
 	detail string
+	// verified is set when the output matched the example's .golden file --
+	// the only runs whose output, and not just their exit status, was checked.
+	verified bool
 }
 
 func (r result) String() string {
@@ -57,6 +60,10 @@ type sweeper struct {
 	opts    options
 	binary  string
 	scratch *scratch
+
+	// run stands in for runAt when set, so the decisions runAcrossLevels makes
+	// about outputs can be tested without compiling anything.
+	run func(file string, marker sweep.Marker, level int) (string, *result)
 }
 
 func (s *sweeper) sweepOne(file string) result {
@@ -76,6 +83,12 @@ func (s *sweeper) sweepOne(file string) result {
 	switch marker.Mode {
 	case sweep.ModeServeHandler:
 		return s.compileOnly(file, marker)
+	case sweep.ModeNeedsInput:
+		res := s.compileOnly(file, marker)
+		if res.status == statusOK {
+			res.note = "needs input    " + marker.Reason
+		}
+		return res
 	case sweep.ModeServer:
 		return s.startAndStop(file, marker)
 	default:
@@ -112,7 +125,7 @@ func (s *sweeper) startAndStop(file string, marker sweep.Marker) result {
 		return result{file: file, mode: marker.Mode, status: statusFail, note: "server", detail: err.Error()}
 	}
 
-	command := exec.Command(s.binary, compiled, "--dev", "--password", s.opts.password)
+	command := exec.Command(s.binary, compiled, "--dev", "--password-insecure", s.opts.password)
 	command.Dir = s.scratch.root
 	output := &bytes.Buffer{}
 	command.Stdout, command.Stderr = output, output
@@ -154,40 +167,148 @@ func (s *sweeper) startAndStop(file string, marker sweep.Marker) result {
 func (s *sweeper) runAcrossLevels(file string, marker sweep.Marker) result {
 	first := s.opts.levels[0]
 
-	baseline, failure := s.runAt(file, marker, first)
+	baseline, failure := s.runLevel(file, marker, first)
 	if failure != nil {
 		return *failure
 	}
-	if len(s.opts.levels) == 1 {
+	// A golden file is only meaningful for output that reproduces, so the
+	// golden options need the same probe as a comparison across levels.
+	checkingGolden := s.opts.golden || s.opts.updateGolden
+	if len(s.opts.levels) == 1 && !checkingGolden {
 		return s.ranWell(file, marker, "run", baseline)
 	}
 
-	repeat, failure := s.runAt(file, marker, first)
+	repeat, failure := s.runLevel(file, marker, first)
 	if failure != nil {
 		return *failure
 	}
 	reproducible := repeat == baseline
 
 	for _, level := range s.opts.levels[1:] {
-		output, failure := s.runAt(file, marker, level)
+		output, failure := s.runLevel(file, marker, level)
 		if failure != nil {
 			return *failure
 		}
-		if reproducible && output != baseline {
+		if !reproducible || output == baseline {
+			continue
+		}
+		defect, failure := s.confirmDifference(file, marker, first, level, baseline, output)
+		if failure != nil {
+			return *failure
+		}
+		if defect {
 			return result{
 				file: file, mode: marker.Mode, status: statusFail,
 				note:   fmt.Sprintf("mutation %d differs from mutation %d", level, first),
 				detail: firstDifference(baseline, output),
 			}
 		}
+		reproducible = false
 	}
 
 	note := fmt.Sprintf("run, identical across %d levels", len(s.opts.levels))
-	if !reproducible {
+	switch {
+	case len(s.opts.levels) == 1 && reproducible:
+		note = "run, reproducible"
+	case len(s.opts.levels) == 1:
+		note = "run, output varies between runs"
+	case !reproducible:
 		note = fmt.Sprintf("run, %d levels, output varies between runs so it was not compared",
 			len(s.opts.levels))
 	}
-	return s.ranWell(file, marker, note, baseline)
+	if !checkingGolden {
+		return s.ranWell(file, marker, note, baseline)
+	}
+
+	verdict, verified, failure := s.checkGolden(file, marker, baseline, reproducible)
+	if failure != nil {
+		return *failure
+	}
+	res := s.ranWell(file, marker, note+"; "+verdict, baseline)
+	res.verified = verified
+	return res
+}
+
+// confirmDifference takes a second look before calling two levels' outputs a
+// mutation defect. The probe that found the output reproducible ran the first
+// level twice back to back, and output carrying a clock reading or a timing
+// measurement can agree with itself for that long and still differ by the time
+// the next level runs: a timestamp crossing a second boundary, a microsecond
+// timer. That was reported as the polymorphic engine changing what a program
+// prints, on a different example each run. Running both levels again separates
+// the cases. A defect is deterministic -- each level prints what it printed
+// before, and the two still disagree -- where output that varies does not print
+// the same thing twice.
+func (s *sweeper) confirmDifference(file string, marker sweep.Marker, first, level int, baseline, output string) (bool, *result) {
+	baselineAgain, failure := s.runLevel(file, marker, first)
+	if failure != nil {
+		return false, failure
+	}
+	if baselineAgain != baseline {
+		return false, nil
+	}
+	outputAgain, failure := s.runLevel(file, marker, level)
+	if failure != nil {
+		return false, failure
+	}
+	return outputAgain == output, nil
+}
+
+// checkGolden compares one example's normalized output with the .golden file
+// beside it, or rewrites that file under --update-golden. Output that varies
+// between two runs of the same bytecode has no golden: recording one would
+// write down a single sample of something that is not a single value.
+func (s *sweeper) checkGolden(file string, marker sweep.Marker, output string, reproducible bool) (string, bool, *result) {
+	path := sweep.GoldenPath(file)
+	got := sweep.NormalizeOutput(output, s.scratch.root)
+	recorded, err := os.ReadFile(path)
+	has := err == nil
+	want := ""
+	if has {
+		want = sweep.NormalizeOutput(string(recorded), "")
+	}
+
+	if s.opts.updateGolden {
+		switch {
+		case !reproducible && has:
+			if err := os.Remove(path); err != nil {
+				return "", false, &result{file: file, mode: marker.Mode, status: statusFail, note: "golden", detail: err.Error()}
+			}
+			return "golden removed: output varies", false, nil
+		case !reproducible:
+			return "no golden: output varies", false, nil
+		case has && strings.ReplaceAll(string(recorded), "\r\n", "\n") == got:
+			// Compared as stored, not as normalized, so a golden recorded
+			// before a normalization existed is rewritten in the form that
+			// normalization produces. CRLF is ignored: a Windows checkout
+			// adds it and git removes it again.
+			return "golden unchanged", true, nil
+		}
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			return "", false, &result{file: file, mode: marker.Mode, status: statusFail, note: "golden", detail: err.Error()}
+		}
+		return "golden written", true, nil
+	}
+
+	switch {
+	case !has && reproducible:
+		return "no golden", false, nil
+	case !has:
+		return "no golden: output varies", false, nil
+	case !reproducible:
+		return "", false, &result{
+			file: file, mode: marker.Mode, status: statusFail,
+			note:   "has a golden file but its output varies between runs",
+			detail: "delete " + filepath.ToSlash(path) + " or make the example's output deterministic",
+		}
+	case want != got:
+		return "", false, &result{
+			file: file, mode: marker.Mode, status: statusFail,
+			note:   "output differs from " + filepath.ToSlash(path),
+			detail: firstDifference(want, got),
+		}
+	}
+	return "matches golden", true, nil
 }
 
 func (s *sweeper) ranWell(file string, marker sweep.Marker, note, output string) result {
@@ -195,6 +316,13 @@ func (s *sweeper) ranWell(file string, marker sweep.Marker, note, output string)
 		return result{file: file, mode: marker.Mode, note: note, detail: trim(output)}
 	}
 	return result{file: file, mode: marker.Mode, note: note}
+}
+
+func (s *sweeper) runLevel(file string, marker sweep.Marker, level int) (string, *result) {
+	if s.run != nil {
+		return s.run(file, marker, level)
+	}
+	return s.runAt(file, marker, level)
 }
 
 // runAt compiles and runs one example at one mutation level from a clean tree.
@@ -239,7 +367,7 @@ func (s *sweeper) compile(file string, level int) (string, error) {
 
 	command := exec.CommandContext(ctx, s.binary, "gen",
 		"--src", file,
-		"--password", s.opts.password,
+		"--password-insecure", s.opts.password,
 		"--mutation", strconv.Itoa(level),
 		"--seed", strconv.FormatInt(s.opts.seed, 10),
 	)
@@ -262,7 +390,7 @@ func (s *sweeper) execute(compiled string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.opts.timeout)
 	defer cancel()
 
-	command := exec.CommandContext(ctx, s.binary, compiled, "--dev", "--password", s.opts.password)
+	command := exec.CommandContext(ctx, s.binary, compiled, "--dev", "--password-insecure", s.opts.password)
 	command.Dir = s.scratch.root
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	command.Stdout, command.Stderr = stdout, stderr
@@ -322,7 +450,7 @@ func lineAt(lines []string, index int) string {
 
 func report(results []result) int {
 	byMode := map[string]int{}
-	failed := 0
+	failed, verified := 0, 0
 
 	for _, res := range results {
 		if res.status == statusFail {
@@ -330,6 +458,12 @@ func report(results []result) int {
 			continue
 		}
 		byMode[string(res.mode)]++
+		if res.verified {
+			verified++
+		}
+	}
+	if verified > 0 {
+		fmt.Printf("\n%d of %d examples printed exactly what their .golden file records\n", verified, len(results))
 	}
 
 	modes := make([]string, 0, len(byMode))

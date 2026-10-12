@@ -12,7 +12,8 @@ artifact, runtime, and risky builtins.
 - Signer pinning is enforced in secure mode when `--signer-auth` is enabled.
 - Trusted signer key comes from `--trusted-key <path>`, a file holding the
   hex-encoded public key. Without the flag, Mutant bootstraps and trusts a local
-  keypair under `<home>/.mutant/keys`.
+  keypair under `<home>/.mutant/keys`, where `<home>` comes from the account
+  database, never from `HOME` or `USERPROFILE`.
 - Compatibility mode verifies embedded signature validity only.
 
 2. Payload confidentiality
@@ -32,7 +33,10 @@ artifact, runtime, and risky builtins.
 
 5. Builtin capability configuration
 
-- Under design. No interface is specified.
+- Declined, not pending. A program carries the authority of the process that
+  runs it, as in any general-purpose language; the operator's decision is
+  whether to run a program they did not write. See note 1 under the control
+  matrix in [SECURITY_LLD_TRACEABILITY.md](SECURITY_LLD_TRACEABILITY.md).
 
 6. Release attestation
 
@@ -73,7 +77,8 @@ a run is a flag, so the command line is a complete record of it. See
 | _(no password flag)_ | Prompt for the password with terminal echo off. The default. |
 | `--password-file <path>` | Read the password from a file. Refused if other users can read it. |
 | `--password-stdin` | Read the password from stdin, for CI and pipelines. |
-| `--password <pw>` | **Deprecated:** password on argv, visible in the process table. Warns on use. |
+| `--password-insecure <pw>` | The password on argv, visible in the process table. Only if you accept that. |
+| `--password`, `--pwd` | Refused since 2.6.0; use one of the sources above. |
 | `--security-log-level <level>` | Security logging verbosity in dev mode. |
 | `--timing` | Per-stage run timing on stderr. |
 
@@ -112,8 +117,10 @@ Standalone release trailer V3:
 
 ## Quick checks
 
-- Unexpected builtin behaviour? There is no capability gate to check: builtin
-  capability configuration is under design.
+- Unexpected builtin behaviour? There is no capability gate to check and none
+  is planned; a builtin runs with this process's own permissions. What bounds
+  an external command is fixed: a 3-second timeout, 8 KiB kept per stream,
+  and a kill that reaches the process tree.
 - Signature failure? Check the `--trusted-key` file and the release signer
   chain; without the flag, verification is against the local bootstrap keypair,
   which trusts whatever signed the artifact on this machine.

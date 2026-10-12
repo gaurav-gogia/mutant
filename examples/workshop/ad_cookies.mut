@@ -1,0 +1,18 @@
+import "lib/quilldrop.mut";
+
+putln("QUILLDROP  the cookie jar");
+
+let chrome = quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome");
+
+if (quilldrop.ready(chrome + "/Cookies")) {
+    let history, _ = browser_history(chrome + "/History");
+    let jar, _ = browser_cookies(chrome + "/Cookies");
+    let visited = {};
+    for (v in history["entries"]) {
+        visited[tld_extract(domain_extract(v["url"]))["etld1"]] = true;
+    }
+    for (c in jar["entries"]) {
+        let site = tld_extract(c["host"])["etld1"];
+        putln("  ", site, c["name"], "visited:", has_key(visited, site));
+    }
+}

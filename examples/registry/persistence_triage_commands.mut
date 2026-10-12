@@ -1,41 +1,39 @@
+// mutant:sweep needs-input -- runs PowerShell against this machine's startup commands and scheduled tasks
+
 putln("=== Persistence Triage via Command Execution ===");
 
 let output_dir = "example_output/persistence";
 let report_path = output_dir + "/persistence_triage_report.json";
 
-let mk, err = fs_mkdir(output_dir);
-if (mk == false) {
+let run_powershell = fn(script) {
+    let builder, _ = cmd_builder("powershell");
+    let command, _ = cmd_add(builder, script);
+    let result, _ = cmd_run(command);
+    return result;
+};
+
+let made, _ = fs_mkdir(output_dir);
+if (made == false) {
     putln("failed to create output directory");
-};
+}
 
-let startup_builder, err = cmd_builder("powershell");
-let updated_startup_builder, err = cmd_add(startup_builder, "Get-CimInstance Win32_StartupCommand | Select-Object Name, Command, Location | ConvertTo-Json -Compress");
-startup_builder = updated_startup_builder;
-let startup, err = cmd_run(startup_builder);
+let startup = run_powershell("Get-CimInstance Win32_StartupCommand | Select-Object Name, Command, Location | ConvertTo-Json -Compress");
+let tasks = run_powershell("Get-ScheduledTask | Select-Object TaskName, TaskPath, State | ConvertTo-Json -Compress");
 
-let tasks_builder, err = cmd_builder("powershell");
-let updated_tasks_builder, err = cmd_add(tasks_builder, "Get-ScheduledTask | Select-Object TaskName, TaskPath, State | ConvertTo-Json -Compress");
-tasks_builder = updated_tasks_builder;
-let tasks, err = cmd_run(tasks_builder);
+if (startup["ok"] == false) {
+    putln("startup collection did not run: ", startup["error"]);
+}
+if (tasks["ok"] == false) {
+    putln("scheduled-task collection did not run: ", tasks["error"]);
+}
+putln("startup command exit_code: ", startup["exit_code"], " timed_out=", startup["timed_out"]);
+putln("task command exit_code: ", tasks["exit_code"], " timed_out=", tasks["timed_out"]);
 
-if (startup["allowed"] == false) {
-    putln("command execution blocked by policy");
-    putln("update command execution policy/profile to enable this example");
-} else {
-    putln("startup command exit_code: ", startup["exit_code"], " timed_out=", startup["timed_out"]);
-    putln("task command exit_code: ", tasks["exit_code"], " timed_out=", tasks["timed_out"]);
-};
-
-let report = {
-    "profile": "persistence_triage",
-    "startup_snapshot": startup,
-    "scheduled_tasks_snapshot": tasks
-};
-
-let report_json, err = json_stringify(report);
-let write_report, err = fs_write(report_path, report_json);
-if (write_report) {
+let report = {"profile": "persistence_triage", "startup_snapshot": startup, "scheduled_tasks_snapshot": tasks};
+let report_json, _ = json_stringify(report);
+let written, _ = fs_write(report_path, report_json);
+if (written) {
     putln("wrote report: ", report_path);
 } else {
     putln("failed to write report");
-};
+}

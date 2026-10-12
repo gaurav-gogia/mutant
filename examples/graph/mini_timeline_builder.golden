@@ -1,0 +1,4 @@
+=== mini_timeline_builder ===
+Builds a simple file metadata timeline using fs_stat and graph DB.
+seeded test dataset:  example_output/mini_timeline_builder/files.json
+wrote report:  example_output/mini_timeline_builder/report.json

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -26,12 +27,30 @@ func Defang(args ...object.Object) object.Object {
 	return stringObj(out)
 }
 
-var refangReplacer = strings.NewReplacer(
-	"[.]", ".", "(.)", ".", "{.}", ".", "[dot]", ".", "(dot)", ".", " dot ", ".",
+// defangMarkers are the defang encodings only a defanger writes, a bracketed
+// separator or the hxxp scheme, as the old, new pairs strings.NewReplacer
+// takes. Unlike the bare words " at " and " dot ", none of them is ordinary
+// English, so undoing them across free text does not turn prose into an
+// indicator.
+var defangMarkers = []string{
+	"[.]", ".", "(.)", ".", "{.}", ".", "[dot]", ".", "(dot)", ".",
 	"hxxps", "https", "hxxp", "http", "hXXp", "http",
-	"[at]", "@", "(at)", "@", "[@]", "@", " at ", "@",
+	"[at]", "@", "(at)", "@", "[@]", "@",
 	"[:]", ":", "[://]", "://", "[/]", "/",
-)
+}
+
+// refangReplacer serves refang, whose argument is one indicator, so it also
+// reads the bare words " dot " and " at " as "." and "@": "admin at evil dot
+// com" is admin@evil.com. Both start with a space and no marker does, so no
+// position matches one of them and a marker, and their place in the list
+// does not matter.
+var refangReplacer = strings.NewReplacer(slices.Concat(defangMarkers, []string{" dot ", ".", " at ", "@"})...)
+
+// iocTextRefangReplacer serves extract_iocs, whose argument is free text, so
+// it undoes defangMarkers and nothing more. Prose is full of " at " and
+// " dot ": reading them as "@" and "." made "logged in at example.com" the
+// email in@example.com and "the red dot on the map" the domain red.on.
+var iocTextRefangReplacer = strings.NewReplacer(defangMarkers...)
 
 func Refang(args ...object.Object) object.Object {
 	s, errObj := strOneStringArg(BuiltinNameRefang, args)
@@ -177,12 +196,19 @@ func TLDExtract(args ...object.Object) object.Object {
 	if errObj != nil {
 		return errObj
 	}
+	// A cookie's host ".example.com" and the fully qualified "example.com."
+	// both name example.com. A name with no registrable domain -- an IP
+	// address, a bare public suffix, localhost -- answers an empty etld1.
+	// Each of these returned "" in place of the hash. An IP address is not
+	// looked up at all: the list's default rule reads its last octet as a
+	// suffix.
 	domain := strings.ToLower(strings.TrimSpace(s))
-	etld1, err := publicsuffix.EffectiveTLDPlusOne(domain)
-	if err != nil {
-		return stringObj("")
+	domain = strings.TrimSuffix(strings.TrimPrefix(domain, "."), ".")
+	etld1, suffix := "", ""
+	if domain != "" && net.ParseIP(domain) == nil {
+		etld1, _ = publicsuffix.EffectiveTLDPlusOne(domain)
+		suffix, _ = publicsuffix.PublicSuffix(domain)
 	}
-	suffix, _ := publicsuffix.PublicSuffix(domain)
 	return makeHashObject(map[string]object.Object{
 		"domain": stringObj(domain),
 		"etld1":  stringObj(etld1),
@@ -221,8 +247,10 @@ func ExtractIOCs(args ...object.Object) object.Object {
 	if errObj != nil {
 		return errObj
 	}
-	// Refang first so defanged IOCs (hxxp, [.]) are captured too.
-	text := refangReplacer.Replace(s)
+	// Undo the defang markers first so defanged IOCs (hxxp, [.]) are captured
+	// too. The bare words " at " and " dot " stay as written: see
+	// iocTextRefangReplacer.
+	text := iocTextRefangReplacer.Replace(s)
 
 	ipv4 := filterValidIPv4(iocIPv4Re.FindAllString(text, -1))
 	rawURLs := iocURLRe.FindAllString(text, -1)

@@ -113,8 +113,14 @@ func loadOrBootstrapSigningPrivateKey() ([]byte, error) {
 // The entry path is recorded in the image so a runtime error can name the
 // program it came from. stripDebug removes that name and every line table
 // before encoding: line tables are a reverse-engineering aid, and a release
-// artifact is the thing that leaves the machine. Polymorphism strips them too,
-// unconditionally and for a second reason -- see ByteCode.StripDebugInfo.
+// artifact is the thing that leaves the machine. Polymorphism does NOT strip
+// them. This comment said it did, and docs/MODULES.md said it with it, until
+// both were corrected on 2026-10-07: StripDebugInfo is called below under
+// stripDebug alone, which is the release flag, so a `mutant gen` artifact keeps
+// every module's name and source text at any mutation level (M26-DOC1-001).
+// The engine remaps the tables rather than dropping them, which is what lets a
+// mutated artifact still report a position -- see ByteCode.StripDebugInfo,
+// whose own comment has always said so.
 //
 // The module graph is walked, linked and driven through ONE compiler, with
 // ByteCode() called exactly once. That is forced by the bytecode format, not
@@ -148,8 +154,8 @@ func compile(entrypath string, modulePaths []string, stripDebug bool, password s
 // signing -- because a debug session runs the program in the process that
 // compiled it. Round-tripping it through an artifact would mean either a
 // password prompt in the middle of a protocol handshake the editor owns, or a
-// release build with nothing left to step through. See decision 2 in
-// plans/T1_DEBUGGER.md.
+// release build with nothing left to step through. See "How a debug build
+// differs from a release build" in docs/DEBUGGING.md.
 //
 // Mutation is off for the same reason: nothing is being protected in a session
 // whose whole purpose is to watch the program execute, and every layer removed
@@ -210,10 +216,24 @@ func buildByteCode(entrypath string, modulePaths []string, mutationLevel int, mu
 	comp.SetSecurityCheckSeed(resolvePolymorphismSeed(mutationSeed))
 	configureCompilerPolymorphism(comp, mutationLevel, mutationSeed)
 
-	// One macro environment for the whole program, filled in link order, so a
-	// macro a module defines is available to everything that imports it and to
-	// nothing it imports. Expansion runs after linking has already rebased the
-	// positions, which is what puts absolute lines into the macro table.
+	// One macro environment for the whole program, filled in link order.
+	//
+	// Read that literally: a macro is in scope for every module compiled AFTER
+	// the one that defines it, which is a wider rule than "everything that
+	// imports it". Post-order guarantees a module compiles after everything it
+	// imports, so an importer always sees it -- but so does a sibling that
+	// imports nothing of the sort, and swapping two import lines in the entry
+	// file decides which. TestAMacroReachesASiblingItNeverImported pins both
+	// halves of that.
+	//
+	// Nothing here narrows it. Scoping macroEnv per closure would be a language
+	// change, and the deliberate choice is the other way round: sema answers
+	// from the closure -- the order-independent subset -- so the editor offers
+	// only what is true whatever order anything else in the program is written
+	// in. See the header of sema/toplevel.go.
+	//
+	// Expansion runs after linking has already rebased the positions, which is
+	// what puts absolute lines into the macro table.
 	macroEnv := object.NewEnvironment()
 	for _, mod := range linked.Modules {
 		// Each module gets its own top-level scope, so two files may both

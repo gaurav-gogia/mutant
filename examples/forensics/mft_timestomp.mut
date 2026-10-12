@@ -1,0 +1,30 @@
+// Flag $MFT entries whose SI creation time is older than their FN creation time: a timestomp.
+// mutant:sweep needs-input -- needs an NTFS $MFT, which no sweep can supply
+
+let MFT_PATH = "C:/evidence/$MFT";
+
+let looks_stomped = fn(e) {
+    let si = get(e, "si_created", 0);
+    let fn_created = get(e, "fn_created", 0);
+    return si > 0 && fn_created > 0 && si < fn_created;
+};
+
+putln("=== 5/5 Timestomping detection ===");
+
+let exists, _ = fs_exists(MFT_PATH);
+if (!exists) {
+    putln("No $MFT at", MFT_PATH);
+    putln("Set MFT_PATH to a standalone $MFT or an NTFS image, then re-run.");
+} else {
+    let mft, err = mft_parse(MFT_PATH);
+    if (err) {
+        putln("[error] mft_parse:", err);
+    } else {
+        let suspects = filter(mft["entries"], looks_stomped);
+        putln("scanned", len(mft["entries"]), "records;", len(suspects), "look stomped:");
+        for (e in suspects) {
+            putln("  ", e["path"]);
+            putln("    SI created", e["si_created_iso"], " < FN created", e["fn_created_iso"]);
+        }
+    }
+}

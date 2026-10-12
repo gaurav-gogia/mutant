@@ -197,3 +197,44 @@ func TestHardcodedSecretCanBeTurnedOff(t *testing.T) {
 		}
 	}
 }
+
+// The three questions together were certain to fire on the most ordinary lines
+// in a Linux triage script. secretNamePattern matches `auth`, `passwd` and
+// `token` as words; the only exemptions were the _file, _path and _dir
+// suffixes; and looksIssued passes any value of eight characters with a symbol
+// in it, which every path and every URL has. A rule that is wrong about the
+// artefact paths an examiner writes every day is a rule they switch off, and
+// that costs its real findings too.
+func TestOrdinaryPathsAndURLsAreNotCredentials(t *testing.T) {
+	quiet := []string{
+		`let auth_log = "/var/log/auth.log";`,
+		`let passwd_dump = "/etc/passwd";`,
+		`let token_endpoint = "https://logs.example.com/ingest";`,
+		`let secret_store = "C:\\ProgramData\\case\\store";`,
+		`let api_key_source = "./conf/keys.json";`,
+		`let credential_share = "\\\\fileserver\\evidence";`,
+	}
+
+	for _, src := range quiet {
+		if messages := secretMessages(t, src); len(messages) != 0 {
+			t.Fatalf("a location is not a credential:\n%s\ngot %v", src, messages)
+		}
+	}
+}
+
+// A narrowing, not an amputation. A URL carrying userinfo is a location with a
+// credential written into it, which is the thing this rule exists for, and a
+// provider shape is its own evidence whatever it looks like to the location
+// test -- that check runs before the name is consulted at all.
+func TestAURLCarryingACredentialStillReports(t *testing.T) {
+	loud := []string{
+		`let bearer_target = "https://svc:Kq7wZr2m@logs.example.com/ingest";`,
+		`let db_password = "Tr0ub4dor&3-x91";`,
+	}
+
+	for _, src := range loud {
+		if messages := secretMessages(t, src); len(messages) == 0 {
+			t.Fatalf("want a report:\n%s", src)
+		}
+	}
+}

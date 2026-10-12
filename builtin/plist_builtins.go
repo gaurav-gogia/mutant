@@ -18,6 +18,30 @@ import (
 // Cocoa/Core Foundation epoch (2001-01-01 UTC) in Unix seconds.
 const cocoaEpochUnix = 978307200
 
+// maxPlistDepth bounds how deeply dictionaries and arrays may nest in one
+// property list. A plist written by a tool nests a handful of levels deep -- a
+// dict of dicts of arrays of strings -- and both parsers walk a level with a
+// call, so a file nested deeper than this is one built to make the walk
+// recurse. The bound is what the binary parser has always refused past; it is
+// named here because the XML parser had no bound at all, and there was nothing
+// for it to agree with (M26-ART-009).
+//
+//mutant:limit depth
+const maxPlistDepth = 100
+
+// errPlistTooDeep is the XML path's depth refusal, and it is compared with ==
+// rather than wrapped or matched.
+//
+// It needs to be told apart from every other error a child can return, because
+// the container parsers treat those as the end of a truncated document and
+// answer with the part of the tree they already hold. That is deliberate and is
+// how a cut-short plist still parses. Answering a depth refusal the same way
+// would make the parse succeed and return the tree above the bound, which is a
+// silent truncation of the file's own contents.
+var errPlistTooDeep = fmt.Errorf(
+	"xml plist nested more than %d levels deep: a property list is written a few levels deep, "+
+		"and this is past what the parser will follow", maxPlistDepth)
+
 // PlistParse parses an Apple property list (binary bplist00 or XML) into a Mutant
 // value (dict->hash, array->array, plus string/integer/real/bool; dates and data
 // become strings). Pure-Go, no dependencies. Returns (value, err).
@@ -63,15 +87,15 @@ func parseXMLPlist(data []byte) (object.Object, error) {
 		}
 		if se, ok := tok.(xml.StartElement); ok {
 			if se.Name.Local == "plist" {
-				return parseXMLPlistInner(dec)
+				return parseXMLPlistInner(dec, 0)
 			}
 			// Some plists omit the <plist> wrapper.
-			return parseXMLPlistValue(dec, se)
+			return parseXMLPlistValue(dec, se, 0)
 		}
 	}
 }
 
-func parseXMLPlistInner(dec *xml.Decoder) (object.Object, error) {
+func parseXMLPlistInner(dec *xml.Decoder, depth int) (object.Object, error) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -79,19 +103,22 @@ func parseXMLPlistInner(dec *xml.Decoder) (object.Object, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			return parseXMLPlistValue(dec, t)
+			return parseXMLPlistValue(dec, t, depth)
 		case xml.EndElement:
 			return globalNullObject(), nil
 		}
 	}
 }
 
-func parseXMLPlistValue(dec *xml.Decoder, start xml.StartElement) (object.Object, error) {
+func parseXMLPlistValue(dec *xml.Decoder, start xml.StartElement, depth int) (object.Object, error) {
+	if depth > maxPlistDepth {
+		return nil, errPlistTooDeep
+	}
 	switch start.Name.Local {
 	case "dict":
-		return parseXMLPlistDict(dec)
+		return parseXMLPlistDict(dec, depth+1)
 	case "array":
-		return parseXMLPlistArray(dec)
+		return parseXMLPlistArray(dec, depth+1)
 	case "string":
 		return stringObj(readXMLText(dec, start)), nil
 	case "integer":
@@ -121,7 +148,7 @@ func parseXMLPlistValue(dec *xml.Decoder, start xml.StartElement) (object.Object
 	}
 }
 
-func parseXMLPlistDict(dec *xml.Decoder) (object.Object, error) {
+func parseXMLPlistDict(dec *xml.Decoder, depth int) (object.Object, error) {
 	pairs := map[string]object.Object{}
 	for {
 		tok, err := dec.Token()
@@ -136,8 +163,13 @@ func parseXMLPlistDict(dec *xml.Decoder) (object.Object, error) {
 			}
 			key := readXMLText(dec, t)
 			// next start element is the value
-			val, verr := nextXMLValue(dec)
+			val, verr := nextXMLValue(dec, depth)
+			if verr == errPlistTooDeep {
+				return nil, verr
+			}
 			if verr != nil {
+				// The document ended inside this dict. What was read before
+				// that is kept, which is how a truncated plist parses.
 				return makeHashObject(pairs), nil
 			}
 			pairs[key] = val
@@ -147,7 +179,7 @@ func parseXMLPlistDict(dec *xml.Decoder) (object.Object, error) {
 	}
 }
 
-func parseXMLPlistArray(dec *xml.Decoder) (object.Object, error) {
+func parseXMLPlistArray(dec *xml.Decoder, depth int) (object.Object, error) {
 	elems := []object.Object{}
 	for {
 		tok, err := dec.Token()
@@ -156,8 +188,13 @@ func parseXMLPlistArray(dec *xml.Decoder) (object.Object, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			v, verr := parseXMLPlistValue(dec, t)
+			v, verr := parseXMLPlistValue(dec, t, depth)
+			if verr == errPlistTooDeep {
+				return nil, verr
+			}
 			if verr != nil {
+				// As in the dict: the end of a truncated document keeps what
+				// was read before it.
 				return &object.Array{Elements: elems}, nil
 			}
 			elems = append(elems, v)
@@ -167,14 +204,14 @@ func parseXMLPlistArray(dec *xml.Decoder) (object.Object, error) {
 	}
 }
 
-func nextXMLValue(dec *xml.Decoder) (object.Object, error) {
+func nextXMLValue(dec *xml.Decoder, depth int) (object.Object, error) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			return nil, err
 		}
 		if se, ok := tok.(xml.StartElement); ok {
-			return parseXMLPlistValue(dec, se)
+			return parseXMLPlistValue(dec, se, depth)
 		}
 	}
 }
@@ -206,40 +243,85 @@ func parseBinaryPlist(data []byte) (object.Object, error) {
 	trailer := data[len(data)-32:]
 	offsetIntSize := int(trailer[6])
 	objectRefSize := int(trailer[7])
-	numObjects := int(binary.BigEndian.Uint64(trailer[8:16]))
-	topObject := int(binary.BigEndian.Uint64(trailer[16:24]))
-	offsetTableOffset := int(binary.BigEndian.Uint64(trailer[24:32]))
+	numObjects64 := binary.BigEndian.Uint64(trailer[8:16])
+	topObject64 := binary.BigEndian.Uint64(trailer[16:24])
+	offsetTable64 := binary.BigEndian.Uint64(trailer[24:32])
 
-	if offsetIntSize < 1 || objectRefSize < 1 || numObjects < 1 {
+	if offsetIntSize < 1 || offsetIntSize > 8 || objectRefSize < 1 || objectRefSize > 8 || numObjects64 < 1 {
 		return nil, fmt.Errorf("invalid binary plist trailer")
 	}
+	// The offset table holds offsetIntSize bytes per object, so the object
+	// count is checked against the room the table has before it sizes anything.
+	// Taken as given, it was a uint64 handed to make (M26-ART-005).
+	//
+	// That room ends where the trailer begins. Measuring to the end of the file
+	// instead counted the trailer's own thirty-two bytes as room for offsets,
+	// which let a file declare up to 32/offsetIntSize objects more than its
+	// table holds -- and the offsets for those were then read out of the
+	// trailer. A top object pointing at one came back as a value built from the
+	// trailer's bytes, with no error: a fabricated answer about an artifact,
+	// which is the one outcome a parser here may not have (M26-ART-035).
+	tableRoom := uint64(len(data)) - 32
+	if offsetTable64 >= tableRoom || numObjects64 > (tableRoom-offsetTable64)/uint64(offsetIntSize) {
+		return nil, fmt.Errorf("offset table out of bounds")
+	}
+	if topObject64 >= numObjects64 {
+		return nil, fmt.Errorf("top object %d out of range", topObject64)
+	}
+	numObjects, offsetTableOffset := int(numObjects64), int(offsetTable64)
 	offsets := make([]int, numObjects)
 	for i := 0; i < numObjects; i++ {
 		start := offsetTableOffset + i*offsetIntSize
-		if start+offsetIntSize > len(data) {
-			return nil, fmt.Errorf("offset table out of bounds")
-		}
 		offsets[i] = int(beUint(data[start : start+offsetIntSize]))
 	}
 
-	p := &bplistParser{data: data, offsets: offsets, numObjects: numObjects, refSize: objectRefSize}
-	return p.parseObject(topObject, 0)
+	p := &bplistParser{
+		data: data, offsets: offsets, numObjects: numObjects, refSize: objectRefSize,
+		remaining: len(data), active: map[int]bool{}, leaves: map[int]string{},
+	}
+	return p.parseObject(int(topObject64), 0)
 }
 
+// bplistParser expands a binary plist's object graph into a tree of values.
+//
+// A reference is at least one byte, so a plist whose containers are each listed
+// once cannot describe more values than it has bytes: sharing a string or a
+// number, which every writer does, costs a reference apiece. Sharing a
+// container is what multiplies. An array of two references to the next array,
+// twenty levels down, is a million values from 140 bytes, and each of them was
+// parsed afresh every time it was reached (M26-ART-008). remaining is the file's
+// size in values, spent one per value produced; a plist that would expand past
+// it is refused, since a tree that large can only have been built by sharing
+// containers. active is the path from the root, so a container that holds
+// itself is named as that rather than run down to the depth cap. leaves holds
+// each string and data object once decoded, because a value budget counts
+// values and not bytes, and a shared string was decoded afresh at every
+// reference.
 type bplistParser struct {
 	data       []byte
 	offsets    []int
 	numObjects int
 	refSize    int
+	remaining  int
+	active     map[int]bool
+	leaves     map[int]string
 }
 
 func (p *bplistParser) parseObject(idx, depth int) (object.Object, error) {
-	if depth > 100 {
-		return nil, fmt.Errorf("binary plist nesting too deep")
+	if depth > maxPlistDepth {
+		return nil, fmt.Errorf("binary plist nested more than %d levels deep", maxPlistDepth)
 	}
 	if idx < 0 || idx >= p.numObjects {
 		return nil, fmt.Errorf("object index %d out of range", idx)
 	}
+	if p.active[idx] {
+		return nil, fmt.Errorf("binary plist object %d contains itself", idx)
+	}
+	if p.remaining <= 0 {
+		return nil, fmt.Errorf("binary plist expands to more values than it has bytes, %d: "+
+			"its containers are shared, and are not expanded past the file's own size", len(p.data))
+	}
+	p.remaining--
 	off := p.offsets[idx]
 	if off >= len(p.data) {
 		return nil, fmt.Errorf("object offset out of bounds")
@@ -272,20 +354,33 @@ func (p *bplistParser) parseObject(idx, depth int) (object.Object, error) {
 		sec := math.Float64frombits(beUint(p.slice(off+1, 8)))
 		unix := int64(sec) + cocoaEpochUnix
 		return stringObj(time.Unix(unix, 0).UTC().Format(time.RFC3339)), nil
-	case 0x4: // data
+	case 0x4, 0x5, 0x6: // data, ASCII string, UTF-16BE string
+		// Decoded once and shared: a megabyte string listed a million times is
+		// one megabyte, where decoding it at every reference was a terabyte.
+		if s, ok := p.leaves[idx]; ok {
+			return stringObj(s), nil
+		}
 		count, dataStart := p.readCount(off, int(info))
-		return stringObj(string(p.slice(dataStart, count))), nil
-	case 0x5: // ASCII string
-		count, dataStart := p.readCount(off, int(info))
-		return stringObj(string(p.slice(dataStart, count))), nil
-	case 0x6: // UTF-16BE string
-		count, dataStart := p.readCount(off, int(info))
-		return stringObj(decodeUTF16BE(p.slice(dataStart, count*2))), nil
+		var s string
+		if objType == 0x6 {
+			s = decodeUTF16BE(p.slice(dataStart, count*2))
+		} else {
+			s = string(p.slice(dataStart, count))
+		}
+		p.leaves[idx] = s
+		return stringObj(s), nil
 	case 0x8: // UID
 		n := int(info) + 1
 		return intObj(int64(beUint(p.slice(off+1, n)))), nil
 	case 0xA: // array
 		count, dataStart := p.readCount(off, int(info))
+		// The count is the file's word: it sizes nothing until the references
+		// it promises are there to read (M26-ART-005).
+		if count < 0 || dataStart > len(p.data) || count > (len(p.data)-dataStart)/p.refSize {
+			return nil, fmt.Errorf("array of %d references runs past the end of the plist", count)
+		}
+		p.active[idx] = true
+		defer delete(p.active, idx)
 		elems := make([]object.Object, 0, count)
 		for i := 0; i < count; i++ {
 			ref := int(beUint(p.slice(dataStart+i*p.refSize, p.refSize)))
@@ -298,6 +393,11 @@ func (p *bplistParser) parseObject(idx, depth int) (object.Object, error) {
 		return &object.Array{Elements: elems}, nil
 	case 0xD: // dict
 		count, dataStart := p.readCount(off, int(info))
+		if count < 0 || dataStart > len(p.data) || count > (len(p.data)-dataStart)/(2*p.refSize) {
+			return nil, fmt.Errorf("dictionary of %d pairs runs past the end of the plist", count)
+		}
+		p.active[idx] = true
+		defer delete(p.active, idx)
 		keyBase := dataStart
 		valBase := dataStart + count*p.refSize
 		pairs := map[string]object.Object{}

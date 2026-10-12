@@ -46,6 +46,7 @@ func applyLintConfig(config *analyzer.LintConfig, settings any) {
 
 	applyRuleSeverity(rulesMap, "duplicateTopLevelDeclaration", &config.DuplicateTopLevelDeclaration)
 	applyRuleSeverity(rulesMap, "unusedDeclaration", &config.UnusedDeclaration)
+	applyRuleSeverity(rulesMap, "unusedImport", &config.UnusedImport)
 	applyRuleSeverity(rulesMap, "undefinedDeclaration", &config.UndefinedDeclaration)
 	applyRuleSeverity(rulesMap, "nestingComplexity", &config.NestingComplexity)
 	applyRuleSeverity(rulesMap, "semicolon", &config.Semicolon)
@@ -53,6 +54,7 @@ func applyLintConfig(config *analyzer.LintConfig, settings any) {
 	applyRuleSeverity(rulesMap, "platformSupport", &config.PlatformSupport)
 	applyRuleSeverity(rulesMap, "builtinArity", &config.BuiltinArity)
 	applyRuleSeverity(rulesMap, "builtinArgType", &config.BuiltinArgType)
+	applyRuleSeverity(rulesMap, "builtinArgChoice", &config.BuiltinArgChoice)
 	applyRuleSeverity(rulesMap, "builtinSingleReturn", &config.BuiltinSingleReturn)
 	applyRuleSeverity(rulesMap, "builtinPairReturn", &config.BuiltinPairReturn)
 	applyRuleSeverity(rulesMap, "builtinDeprecated", &config.BuiltinDeprecated)
@@ -68,6 +70,12 @@ func applyLintConfig(config *analyzer.LintConfig, settings any) {
 	applyRuleSeverity(rulesMap, "commandInjection", &config.CommandInjection)
 	applyRuleSeverity(rulesMap, "evidenceMutation", &config.EvidenceMutation)
 	applyRuleSeverity(rulesMap, "pathTraversal", &config.PathTraversal)
+	applyRuleSeverity(rulesMap, "classifiedPlaintext", &config.ClassifiedPlaintext)
+	applyRuleSeverity(rulesMap, "roleLiteral", &config.RoleLiteral)
+	applyRuleSeverity(rulesMap, "filteredLedgerHandle", &config.FilteredLedgerHandle)
+	applyRuleSeverity(rulesMap, "secretOption", &config.SecretOption)
+	applyRuleSeverity(rulesMap, "lifecycleState", &config.LifecycleState)
+	applyRuleSeverity(rulesMap, "macroSafety", &config.MacroSafety)
 }
 
 // parseStrictFormatting reads `mutant.strictFormatting`, defaulting to true.

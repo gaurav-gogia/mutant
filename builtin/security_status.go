@@ -12,14 +12,18 @@ func DebugStatus(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=0", len(args)))
 	}
 
-	detected := security.IsDebuggerPresent()
+	// One reading gives the verdict, the checks that fired and what they
+	// prove. The confidence used to be 100 for any detection and the checks
+	// were dropped, so a parent process named gdb read as certainly as an
+	// attached debugger, with nothing to say which it was (M26-TMP-014).
+	detected, methods, confidence := security.DebuggerStatus()
 	telemetry := security.SecurityTelemetrySnapshot()
 
 	result := map[string]object.Object{
 		"detected":       boolObj(detected),
 		"type":           stringObj(detectionType(detected, "debugger")),
-		"confidence":     intObj(detectionConfidence(detected)),
-		"indicators":     stringArrayObj(nil),
+		"confidence":     intObj(int64(confidence)),
+		"indicators":     stringArrayObj(methods),
 		"probe_signals":  antiTamperSignalArrayObj(nil),
 		"probe_enabled":  boolObj(false),
 		"probe_error":    stringObj(""),
@@ -30,8 +34,12 @@ func DebugStatus(args ...object.Object) object.Object {
 		"schema_version": intObj(1),
 	}
 
+	// hardware_breakpoint and syscall were in this list and are not probes now:
+	// each re-reported the debugger detector, whose checks are this builtin's
+	// own indicators, under the name of a measurement it never made
+	// (M26-TMP-014).
 	probeSignals, probeEnabled, probeErr := security.RunAntiTamperProbe(
-		[]string{"hardware_breakpoint", "timing", "syscall", "frida_ptrace", "trampoline", "iat_got", "process_injection", "module_integrity", "memory_page_anomaly"},
+		[]string{"timing", "frida_ptrace", "trampoline", "iat_got", "process_injection", "module_integrity", "memory_page_anomaly"},
 		"builtin:debug_status",
 	)
 	result["probe_enabled"] = boolObj(probeEnabled)
@@ -48,26 +56,21 @@ func SandboxStatus(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("wrong number of arguments. got=%d, want=0", len(args)))
 	}
 
+	// An error no longer voids the detection: it names checks the detector
+	// could not make, and the type, confidence and indicators are what the
+	// others found. Both calls read one cached detection and return the same
+	// error, so it is reported once. (M26-TMP-013)
 	statusType, confidence, err := security.DetectSandboxType()
-	indicators, indicatorsErr := security.GetSandboxIndicators()
-	if indicatorsErr != nil {
-		indicators = nil
-	}
+	indicators, _ := security.GetSandboxIndicators()
 
-	detected := confidence >= 70
-	if statusType == "none" {
+	detected := confidence >= security.SandboxDetectedThreshold
+	if statusType == security.SandboxTypeNone {
 		detected = false
 	}
 
 	errorMessage := ""
 	if err != nil {
 		errorMessage = err.Error()
-	}
-	if indicatorsErr != nil {
-		if errorMessage != "" {
-			errorMessage += "; "
-		}
-		errorMessage += indicatorsErr.Error()
 	}
 
 	telemetry := security.SecurityTelemetrySnapshot()
@@ -86,8 +89,12 @@ func SandboxStatus(args ...object.Object) object.Object {
 		"schema_version": intObj(1),
 	}
 
+	// cpuid_hypervisor was in this list and is not a probe now: it re-reported
+	// the sandbox detector, which this builtin reports in its own fields, and
+	// read no CPUID of its own. sleep_drift was called rdtsc_drift; it times
+	// short sleeps on the OS clock and makes no RDTSC check (M26-TMP-014).
 	probeSignals, probeEnabled, probeErr := security.RunAntiTamperProbe(
-		[]string{"cpuid_hypervisor", "rdtsc_drift", "acpi_pci", "gpu_feature", "ld_preload", "syscall_table", "module_integrity", "memory_page_anomaly"},
+		[]string{"sleep_drift", "syscall_table", "module_integrity", "memory_page_anomaly"},
 		"builtin:sandbox_status",
 	)
 	result["probe_enabled"] = boolObj(probeEnabled)
@@ -106,22 +113,18 @@ func SecurityDiagnostics(args ...object.Object) object.Object {
 
 	debugDetected, debugMethods := security.DetectDebuggerDetails()
 	sandboxType, sandboxConfidence, sandboxErr := security.DetectSandboxType()
-	sandboxIndicators, indicatorsErr := security.GetSandboxIndicators()
+	// As in SandboxStatus: the indicators come beside sandboxErr, which is
+	// reported once. (M26-TMP-013)
+	sandboxIndicators, _ := security.GetSandboxIndicators()
 
-	sandboxDetected := sandboxConfidence >= 70
-	if sandboxType == "none" {
+	sandboxDetected := sandboxConfidence >= security.SandboxDetectedThreshold
+	if sandboxType == security.SandboxTypeNone {
 		sandboxDetected = false
 	}
 
 	sandboxError := ""
 	if sandboxErr != nil {
 		sandboxError = sandboxErr.Error()
-	}
-	if indicatorsErr != nil {
-		if sandboxError != "" {
-			sandboxError += "; "
-		}
-		sandboxError += indicatorsErr.Error()
 	}
 
 	telemetry := security.SecurityTelemetrySnapshot()
@@ -151,14 +154,7 @@ func detectionType(detected bool, name string) string {
 	if detected {
 		return name
 	}
-	return "none"
-}
-
-func detectionConfidence(detected bool) int64 {
-	if detected {
-		return 100
-	}
-	return 0
+	return security.SandboxTypeNone
 }
 
 func makeHashObject(values map[string]object.Object) *object.Hash {
@@ -194,7 +190,11 @@ func antiTamperSignalArrayObj(signals []security.AntiTamperSignal) *object.Array
 	elements := make([]object.Object, len(signals))
 	for i, signal := range signals {
 		elements[i] = makeHashObject(map[string]object.Object{
-			"name":       stringObj(signal.Name),
+			"name": stringObj(signal.Name),
+			// measured false means the probe did not look -- it cannot run on
+			// this host, or its own check failed -- and detected false beside
+			// it is then not a finding. detail says which.
+			"measured":   boolObj(signal.Measured),
 			"detected":   boolObj(signal.Detected),
 			"confidence": intObj(int64(signal.Confidence)),
 			"detail":     stringObj(signal.Detail),

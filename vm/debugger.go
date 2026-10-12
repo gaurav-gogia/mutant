@@ -155,7 +155,7 @@ type BreakpointSpec struct {
 	// what a hit condition compiles to, and it is deliberately the only
 	// condition this engine takes: a general condition is an expression, and
 	// evaluating one in a frame needs a symbol table the artifact does not
-	// carry. See the deferral in plans/T1_DEBUGGER.md.
+	// carry. docs/DEBUGGING.md says so under "What it deliberately does not do".
 	SkipHits int
 }
 
@@ -605,7 +605,7 @@ func (d *Debugger) resolve(file string, spec BreakpointSpec) Breakpoint {
 
 	absLine, ok := d.vm.bytecode.ModuleLine(file, spec.Line)
 	if !ok {
-		bp.Message = fmt.Sprintf("%s is not one of the files this program was built from", file)
+		bp.Message = d.refusalFor(file, spec.Line)
 		return bp
 	}
 
@@ -615,18 +615,89 @@ func (d *Debugger) resolve(file string, spec BreakpointSpec) Breakpoint {
 		return bp
 	}
 
-	bp.Bound = bound
-	bp.Verified = true
-
 	// Bound is a blob line; the caller asked in file lines and has to be
 	// answered in them, or an editor moves the marker to a line of another
 	// module.
-	if _, local, resolvedOK := d.vm.bytecode.ModuleAt(bound); resolvedOK {
-		bp.Line = local
-	} else {
+	boundPath, local, resolvedOK := d.vm.bytecode.ModuleAt(bound)
+	if !resolvedOK {
+		// One module, or debug info stripped: the blob line is the file line.
+		bp.Bound = bound
 		bp.Line = bound
+		bp.Verified = true
+		return bp
 	}
+
+	// Walking forward over a blank line or a comment is the whole point of
+	// binding. Walking out of the FILE is not. It means nothing at or after the
+	// requested line in that module emitted an instruction, so the next thing
+	// in the blob belongs to whichever module the linker happened to put next,
+	// and binding there while still reporting the file the caller named is a
+	// solid marker on a line of one file that stops in another.
+	//
+	// ModuleLine refuses a line PAST the end of a file for this reason. This is
+	// the last line or two INSIDE it -- a closing brace emits nothing -- which
+	// the arithmetic alone cannot tell from a line that does. Refusing one and
+	// arming the other left two adjacent lines of the same file disagreeing
+	// about whether anything had been checked.
+	//
+	// The two paths are compared rather than the two span indices: both strings
+	// come out of the same span table through the same walk, so one span always
+	// answers with one string, and what a breakpoint asks is "is this the file
+	// I named", not "is this the span I resolved".
+	if askedPath, _, ok := d.vm.bytecode.ModuleAt(absLine); ok && askedPath != boundPath {
+		named := file
+		if named == "" {
+			named = askedPath
+		}
+		bp.Message = fmt.Sprintf(
+			"nothing at or after line %d of %s emitted code: the next instruction belongs to %s",
+			spec.Line, named, boundPath)
+		return bp
+	}
+
+	bp.Bound = bound
+	bp.Line = local
+	bp.Verified = true
 	return bp
+}
+
+// refusalFor says which of ModuleLine's refusals happened, so a stale marker
+// past the end of a file is not reported as the file being unknown -- a message
+// that would send a reader looking for a build problem they do not have.
+//
+// ModuleLine answers yes or no and nothing else, so the two are separated by
+// asking it again about line 1 of the same file: line 1 of a file the program
+// was built from always resolves, and a file it was not built from never does.
+func (d *Debugger) refusalFor(file string, line int) string {
+	if line <= 0 {
+		return fmt.Sprintf("%d is not a line number: a breakpoint has to name line 1 or later", line)
+	}
+
+	// A caller that named no file asked about the program's own source, which
+	// ModuleLine read as the entry module. The refusal has to call it by that
+	// name rather than quote the empty one back.
+	named := file
+	if named == "" {
+		named = d.vm.bytecode.SourceFile
+	}
+	if named == "" {
+		named = "this program's source"
+	}
+
+	if _, known := d.vm.bytecode.ModuleLine(file, 1); known {
+		return fmt.Sprintf("line %d is past the end of %s", line, named)
+	}
+
+	// Line 1 failing does not have to mean the file is absent. moduleSpanFor
+	// refuses a base name carried by more than one module rather than guess
+	// which one the editor meant, so a program built from two files called
+	// util.mut answers no to every line of either -- and telling someone the
+	// file is not in the program they are looking at it in would send them
+	// hunting a build problem they do not have. Say which it is.
+	if n := d.vm.bytecode.ModulesNamed(file); n > 1 {
+		return fmt.Sprintf("%d of this program's files are called %s, so a line number alone does not say which one", n, file)
+	}
+	return fmt.Sprintf("%s is not one of the files this program was built from", named)
 }
 
 // nextLineWithCode binds a line forward to the next one that emitted an
@@ -794,17 +865,12 @@ func (d *Debugger) variable(name string, raw object.Object) Variable {
 // with the cell a captured local lives in taken off. A cell is a storage
 // location rather than a value, and showing one would show an address where the
 // program sees a number.
+//
+// This was the only reader of the stack that got the order right, and the
+// traceback's frameArguments did not, so the two lines live in
+// vm.unwrapForDisplay now and both go through them.
 func (d *Debugger) unwrap(raw object.Object) object.Object {
-	if raw == nil {
-		return nil
-	}
-	if cell, ok := raw.(*object.Cell); ok {
-		if cell.Value == nil {
-			return nil
-		}
-		raw = cell.Value
-	}
-	return d.vm.decryptForUse(raw)
+	return d.vm.unwrapForDisplay(raw)
 }
 
 // Children expands the value behind a handle. Handles come from Variable.Ref
@@ -1026,26 +1092,14 @@ func hasChildren(value object.Object) bool {
 // renderDebugValue renders one value for a variables pane: on one line, capped,
 // and truncated rather than summarised so that what is shown is a prefix of
 // what is there.
+//
+// A pane has more room than a traceback line and that is the only way the two
+// differ, so the rendering is one function in vm/display.go and this is the
+// pane's cap. The pane was the worse of the two to leak through: at 256 it
+// printed a 31-byte classified buffer whole, where the traceback's 48 cut it
+// to 12 bytes.
 func renderDebugValue(value object.Object) string {
-	if value == nil {
-		return "<unset>"
-	}
-
-	// Bytes renders as full hex through Inspect, because Inspect doubles as the
-	// identity function for equality. A pane only ever wanted a preview, so it
-	// asks for one rather than building a megabyte of hex to then cut it back.
-	if buf, ok := value.(*object.Bytes); ok {
-		return buf.Preview(maxDebugValue / 4)
-	}
-
-	text := strings.Join(strings.Fields(value.Inspect()), " ")
-	if len(text) > maxDebugValue {
-		text = text[:maxDebugValue-3] + "..."
-	}
-	if text == "" {
-		return string(value.Type())
-	}
-	return text
+	return renderForDisplay(value, maxDebugValue)
 }
 
 // clearUnsetLocals blanks the slots between a new frame's arguments and the end

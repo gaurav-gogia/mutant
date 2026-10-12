@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 
 	localprotocol "mutant/lsp/internal/protocol"
 
@@ -36,6 +37,12 @@ type methodRouter struct {
 
 func (r *methodRouter) Handle(ctx *glsp.Context) (any, bool, bool, error) {
 	if ctx.Method == localprotocol.MethodTextDocumentInlayHint {
+		// The same gate glsp's own Handle applies to every method it routes:
+		// nothing is answered before initialize or after shutdown. This branch
+		// bypasses that Handle, so it has to apply the gate itself.
+		if !r.base.IsInitialized() {
+			return nil, true, true, errors.New("server not initialized")
+		}
 		var params localprotocol.InlayHintParams
 		if len(ctx.Params) > 0 {
 			if err := json.Unmarshal(ctx.Params, &params); err != nil {

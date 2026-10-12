@@ -25,14 +25,48 @@ package policy
 // partition tables, registry hives, archives, and the Windows, Unix and browser
 // artifact parsers.
 //
-// A new evidence family belongs on this list. Leaving it off is not caught by
-// anything -- that is the one soft edge of this policy, and the reason the list
-// is a declaration in source rather than a pattern match on file names.
+// A new evidence family belongs on this list. For the image and filesystem
+// family, leaving it off is now caught: TestEveryImageReaderIsUnderTheGuard
+// derives the set from three structural facts -- an import of an aoiflux lib*
+// or partition package, a use of the fsRegion type that every *_open goes
+// through, and a use of the fsFileReader type the streaming reads go through --
+// and fails when a file with one of them is absent from this list. That rule
+// found twelve omissions when it was written, among them
+// builtin/filesystem_region.go, which holds the os.Open behind every *_open
+// family, and builtin/filesystem_recover.go, the only code in the evidence path
+// that creates and removes files (M26-TEST-009).
+//
+// The soft edge that remains is narrower and worth stating exactly. A parser of
+// a captured artifact -- an EVTX log, a LNK, a plist -- has no structural marker
+// in common with the others: it opens a path and reads bytes, like most of the
+// standard library does. Those entries are still a judgement, and leaving one
+// off is still caught by nothing. What changed is that the judgement is no
+// longer load-bearing for the family the policy was written for.
 var EvidenceReadOnlyFiles = []string{
 	// disk images, volumes and partition tables
 	"builtin/disk_image_parsers.go",
+	"builtin/disk_image_extents.go",
 	"builtin/filesystem_parsers.go",
 	"builtin/table_parsers.go",
+	// the seams every filesystem open and every streaming read goes through:
+	// fsRegion bounds the part of an image a filesystem occupies, and
+	// fsFileReader is how a file inside one is read out
+	"builtin/filesystem_region.go",
+	"builtin/filesystem_stream.go",
+	// and where an NTFS MFT walk gets its bound: the record numbers the image
+	// holds, rather than the count record 0 declares about itself
+	"builtin/filesystem_ntfs_mft.go",
+	// what a mounted filesystem is asked for, family by family
+	"builtin/filesystem_capabilities.go",
+	"builtin/filesystem_deleted.go",
+	"builtin/filesystem_journal.go",
+	"builtin/filesystem_recover.go",
+	"builtin/filesystem_report.go",
+	"builtin/filesystem_slack.go",
+	"builtin/filesystem_verify.go",
+	"builtin/filesystem_xattr.go",
+	// type identification on a path the examiner named
+	"builtin/fs_forensics.go",
 	// registry
 	"builtin/registry_forensics.go",
 	"builtin/hive_builtins.go",
@@ -57,6 +91,11 @@ var EvidenceReadOnlyFiles = []string{
 	"builtin/fs_deleted_builtins.go",
 	// live subjects
 	"builtin/memory_forensics.go",
+	// custody of exhibits: a file taken in or accepted is hashed, and a
+	// disposal is a statement that deletes nothing
+	"builtin/case_evidence.go",
+	// where an open is recorded against the exhibit it was made on
+	"builtin/custody.go",
 }
 
 // EvidenceWriteException records a place in that code where a filesystem
@@ -88,11 +127,6 @@ type EvidenceWriteException struct {
 // examiner's or the evidence's?"
 var EvidenceWriteAllowlist = []EvidenceWriteException{
 	{
-		File: "builtin/filesystem_parsers.go", Func: "ReadFile", Lines: 2,
-		Why: "libxfat extracts only to a path, so an exFAT file's content round-trips " +
-			"through os.CreateTemp and is removed in a defer. The volume is never written to.",
-	},
-	{
 		File: "builtin/sqlite_builtins.go", Func: "withSQLiteCopy", Lines: 2,
 		Why: "This is the policy in action rather than an exception to it: SQLite wants to " +
 			"write a journal beside any database it opens, so the evidence database is " +
@@ -102,5 +136,14 @@ var EvidenceWriteAllowlist = []EvidenceWriteException{
 		File: "builtin/sqlite_builtins.go", Func: "copyFileContents", Lines: 1,
 		Why: "The os.Create that makes the temp copy withSQLiteCopy queries. The destination " +
 			"is the temp path; the source is opened read-only.",
+	},
+	{
+		File: "builtin/filesystem_recover.go", Func: "fsWriteEvidenceFile", Lines: 2,
+		Why: "Recovery writes the file it recovered, which is the point of recovering it. The " +
+			"destination is a path the examiner named for output and never the image: the open " +
+			"is O_WRONLY|O_CREATE|O_EXCL, so it refuses to write over anything that is already " +
+			"there, and the os.Remove on the second line only undoes a destination this " +
+			"function created moments earlier and then failed to fill. Neither line can reach " +
+			"the evidence, because the image is open read-only in another handle entirely.",
 	},
 }
