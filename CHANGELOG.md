@@ -990,6 +990,16 @@ exhaustive lists.
   vulnerable. Each now reads the result's `ok` field or the response body. The
   examples are also rewritten shorter and plainer, and print what they printed.
 
+- **`tld_extract` answers every name with a hash.** A cookie's host
+  (`.example.com`), a name with its trailing dot, a bare public suffix,
+  `localhost` and an IP address each returned an empty string, so
+  `tld_extract(h)["etld1"]` stopped the program. The leading and trailing dot are
+  dropped, and a name with no registrable domain answers an empty `etld1`.
+
+- **A refused comparison names its operator.** `1 < h["x"]` on a missing field
+  failed as `unknown operator: 59 (INTEGER NULL)`, the opcode's number; it now
+  reads `unknown operator: INTEGER < NULL`.
+
 - **An editor's cursor and the language server's own columns now mean the same thing in every direction, and a document the server cannot keep up with stops handing out edits.**
 
   LSP 3.16 measures `Position.character` in UTF-16 code units. Mutant's lexer measures columns in bytes, deliberately: the CLI prints those columns, the parser's messages quote them, and the example sweep's recorded output pins them. The conversion between the two happens once, at the protocol boundary. Three rows here were the places that conversion had not reached, or had never been checked, and a fourth was the same arithmetic going the other way -- from a position the client sent to a place in the text -- which nothing owned at all.

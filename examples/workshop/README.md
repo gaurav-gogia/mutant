@@ -94,7 +94,7 @@ Every row here is true of **v2.6.0**.
 | There is no `null` literal | `undefined variable: null` | a bare `return;` yields null; test with `is_null()` |
 | A program ending in a loop prints `<iterator>` | a stray line after your output | end on a `putln`, not on a `for` |
 | Builtins are not first-class values | `map(xs, defang)` fails | `map(xs, fn(d) { return defang(d); })` |
-| A missing field is null, and null does not compare | `unknown operator: 59 (INTEGER NULL)` | test it with `is_null()` before `<` |
+| A missing field is null, and null does not compare | `unknown operator: INTEGER < NULL` | test it with `is_null()` before `<` |
 | There are no hex literals | `0xF0000000 is not a number` | write the decimal, `4026531840` |
 | Assigning a name you never declared | `cannot assign to y: y is not declared` | `let y = ...` first |
 | `let` inside a block makes a new variable | the outer one keeps its old value | assign without `let` to change the outer one |

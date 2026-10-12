@@ -42,7 +42,7 @@ var workshopBuiltinsAtV260 = []string{
 	"mft_parse", "ntfs_close", "ntfs_extract_file", "ntfs_open", "putln",
 	"regex_capture_groups", "regex_find_all", "regex_match", "set",
 	"sigma_scan", "slice", "sort_by", "sqlite_query", "str_format",
-	"str_starts_with", "str_trim_prefix", "table_close",
+	"str_starts_with", "table_close",
 	"table_list_partitions", "table_open", "text_jaro_winkler",
 	"text_levenshtein", "timestamp_normalize", "tld_extract",
 	"tls_generate_ca", "to_string", "x509_parse", "zip_close", "zip_entries",

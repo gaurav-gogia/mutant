@@ -575,7 +575,7 @@ IOC handling: defang/refang, IP/CIDR math, domain/eTLD+1 extraction, validation,
 | `ip_version(ip: STRING) -> INTEGER` | all | Returns 4, 6, or 0 (invalid) for an IP address. |
 | `is_valid_domain(s: STRING) -> BOOLEAN` | all | Returns whether s is a syntactically valid domain name. |
 | `refang(ioc: STRING) -> STRING` | all | Reverses common defang encodings ([.]/(.)/[dot]->., hxxp->http, [at]->@). |
-| `tld_extract(domain: STRING) -> STRING\|HASH` | all | Returns {domain, etld1, suffix} using the public suffix list. |
+| `tld_extract(domain: STRING) -> HASH` | all | Returns {domain, etld1, suffix} using the public suffix list. A leading dot, as a cookie's host has, and a trailing dot are dropped. etld1 is empty for a name with no registrable domain: an IP address, a bare public suffix, localhost. |
 
 ## Detection (9)
 

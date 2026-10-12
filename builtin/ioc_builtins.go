@@ -196,12 +196,19 @@ func TLDExtract(args ...object.Object) object.Object {
 	if errObj != nil {
 		return errObj
 	}
+	// A cookie's host ".example.com" and the fully qualified "example.com."
+	// both name example.com. A name with no registrable domain -- an IP
+	// address, a bare public suffix, localhost -- answers an empty etld1.
+	// Each of these returned "" in place of the hash. An IP address is not
+	// looked up at all: the list's default rule reads its last octet as a
+	// suffix.
 	domain := strings.ToLower(strings.TrimSpace(s))
-	etld1, err := publicsuffix.EffectiveTLDPlusOne(domain)
-	if err != nil {
-		return stringObj("")
+	domain = strings.TrimSuffix(strings.TrimPrefix(domain, "."), ".")
+	etld1, suffix := "", ""
+	if domain != "" && net.ParseIP(domain) == nil {
+		etld1, _ = publicsuffix.EffectiveTLDPlusOne(domain)
+		suffix, _ = publicsuffix.PublicSuffix(domain)
 	}
-	suffix, _ := publicsuffix.PublicSuffix(domain)
 	return makeHashObject(map[string]object.Object{
 		"domain": stringObj(domain),
 		"etld1":  stringObj(etld1),

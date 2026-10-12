@@ -12,7 +12,7 @@ if (quilldrop.ready(chrome + "/Cookies")) {
         visited[tld_extract(domain_extract(v["url"]))["etld1"]] = true;
     }
     for (c in jar["entries"]) {
-        let site = tld_extract(str_trim_prefix(c["host"], "."))["etld1"];
+        let site = tld_extract(c["host"])["etld1"];
         putln("  ", site, c["name"], "visited:", has_key(visited, site));
     }
 }

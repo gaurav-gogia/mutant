@@ -2383,6 +2383,33 @@ func (vm *VM) execBitNotOperation() error {
 	return vm.push(result)
 }
 
+// comparisonRefusal is the error for a comparison the operands do not support,
+// naming the operator as the program spells it. It printed the opcode's number,
+// so `1 < h["x"]` on a missing field failed as "unknown operator: 59 (INTEGER
+// NULL)".
+func comparisonRefusal(op code.Opcode, left, right object.Object) error {
+	return fmt.Errorf("unknown operator: %s %s %s", left.Type(), comparisonSymbol(op), right.Type())
+}
+
+// comparisonSymbol is the source spelling of a comparison opcode.
+func comparisonSymbol(op code.Opcode) string {
+	switch op {
+	case code.OpEqual:
+		return "=="
+	case code.OpUnEqual:
+		return "!="
+	case code.OpGreater:
+		return ">"
+	case code.OpGreaterEqual:
+		return ">="
+	case code.OpLess:
+		return "<"
+	case code.OpLessEqual:
+		return "<="
+	}
+	return fmt.Sprintf("opcode %d", op)
+}
+
 func (vm *VM) execComparison(op code.Opcode) error {
 	right := vm.pop()
 	left := vm.pop()
@@ -2461,7 +2488,7 @@ func (vm *VM) execComparison(op code.Opcode) error {
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(ltype != rtype || right.Inspect() != left.Inspect()))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2487,7 +2514,7 @@ func (vm *VM) execEnumComparison(op code.Opcode, left, right object.Object) erro
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2517,7 +2544,7 @@ func (vm *VM) execStructComparison(op code.Opcode, left, right object.Object) er
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2539,7 +2566,7 @@ func (vm *VM) execErrorComparison(op code.Opcode, left, right object.Object) err
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2562,7 +2589,7 @@ func (vm *VM) execBytesComparison(op code.Opcode, left, right object.Object) err
 	case code.OpUnEqual:
 		return vm.push(nativeBoolToBooleanObject(!equal))
 	default:
-		return fmt.Errorf("unknown operator: %d (%s %s)", op, left.Type(), right.Type())
+		return comparisonRefusal(op, left, right)
 	}
 }
 
@@ -2583,7 +2610,7 @@ func (vm *VM) execFloatComparison(op code.Opcode, left, right object.Object) err
 	case code.OpLessEqual:
 		return vm.push(nativeBoolToBooleanObject(leftValue <= rightValue))
 	default:
-		return fmt.Errorf("unknown operator: %d", op)
+		return comparisonRefusal(op, left, right)
 	}
 }
 func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) error {
@@ -2603,7 +2630,7 @@ func (vm *VM) execIntegerComparison(op code.Opcode, left, right object.Object) e
 	case code.OpLessEqual:
 		return vm.push(nativeBoolToBooleanObject(leftValue <= rightValue))
 	default:
-		return fmt.Errorf("unknown operator: %d", op)
+		return comparisonRefusal(op, left, right)
 	}
 }
 
