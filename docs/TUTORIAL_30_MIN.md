@@ -148,10 +148,13 @@ and the artifact is still verified. `--dev` is the one that weakens the key.
 See [EXECUTION_MODES.md](EXECUTION_MODES.md).
 
 > **Expected, and mislabelled before 2.6.0.** On Windows, launching `mutant`
-> from **Git Bash** (or MSYS2/Cygwin) is detected and secure mode halts. That is
-> intended: an emulated shell is one of the environments the detector exists to
-> notice. What was wrong is what it reported. Until 2.6.0 the type was `WSL`,
-> which was untrue on a machine with no WSL installed; it is now
+> straight from **Git Bash** (or MSYS2/Cygwin), so that its parent process is
+> `bash.exe`, is detected and secure mode halts. That is intended: an emulated
+> shell is one of the environments the detector exists to notice. The detector
+> looks at that one parent and no further, so a program in between — `timeout`,
+> `env`, `sh -c` or `cmd /c`, say — hides the shell, which then does not count
+> towards a halt. What was wrong is what it reported. Until 2.6.0 the type was
+> `WSL`, which was untrue on a machine with no WSL installed; it is now
 > `MSYS/Cygwin or legacy WSL`, which is everything a `bash.exe` parent can
 > prove. The behaviour is the same on every version: run from PowerShell or
 > `cmd`, or pass `--compat` to make the halt a warning.

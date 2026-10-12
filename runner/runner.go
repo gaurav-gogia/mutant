@@ -41,10 +41,9 @@ var (
 // processProtectionTerminateConfidence is the confidence from which a
 // process-protection signal stops a secure-mode run. With the probes' scores as
 // they are (security/antitamper_constants.go), a redirected import (90), a
-// suspicious module (85), writable and executable API pages (92), hooks on two
-// or more APIs (90) or an injection variable in the environment (90, or 95
-// beside an injector process) stop the run; a hook on one API (75) or an
-// injector process alone (70) does not.
+// suspicious module (85), writable and executable API pages (92) or hooks on
+// two or more APIs (90) stop the run; a hook on one API (75) or an injector
+// process (70) does not.
 //
 //mutant:limit score
 const processProtectionTerminateConfidence = 80

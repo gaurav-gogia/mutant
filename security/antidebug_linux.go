@@ -15,16 +15,20 @@ const (
 	linuxParentCommPathPrefix = "/proc/"
 	linuxParentCommPathSuffix = "/comm"
 	linuxLDPreloadVar         = "LD_PRELOAD"
-	linuxLDPreloadLengthLimit = 50
 	linuxForcedExitCode       = 1
 )
 
 var (
+	// linuxDebuggerEnvVars are the variables hasDebuggerEnvironmentMarkers
+	// reads (M26-TMP-010). GDBHISTFILE is not among them: it is where gdb
+	// keeps its history, which XDG base-directory guides tell users to export
+	// from a shell profile, and the location of a history file says nothing
+	// about this process. Nor is LLDB_HIST_FILE, which only looks like such a
+	// setting: no lldb reads it, since lldb keeps its history under ~/.lldb
+	// and has no variable of its own to move it.
 	linuxDebuggerEnvVars = []string{
 		"GDB_OPTS",
-		"GDBHISTFILE",
 		"LLDB_DEBUGSERVER",
-		"LLDB_HIST_FILE",
 		"VALGRIND_LIB",
 		"VALGRIND_PID",
 		linuxLDPreloadVar,
@@ -49,12 +53,12 @@ func detectDebuggerDetailsLinux() (bool, []string) {
 		methods = append(methods, "linux:tracer_pid")
 	}
 
-	// Check 2: Debugger process detection via /proc/cmdline of parent
+	// Check 2: Debugger process detection via /proc/<ppid>/comm of the parent
 	if isParentDebugger() {
 		methods = append(methods, "linux:parent_debugger_process")
 	}
 
-	// Check 3: GDB specific markers in environment
+	// Check 3: debugger and library-loading markers in the environment
 	if hasDebuggerEnvironmentMarkers() {
 		methods = append(methods, "linux:debugger_environment")
 	}
@@ -97,10 +101,10 @@ func isTracingDetected() bool {
 // ends the run (M26-TMP-002).
 //
 // A parent whose comm cannot be read is not a debugger. The file is gone for a
-// reaped parent and unreadable under some container policies, and this is the
-// weaker of the two checks the Linux detector makes -- isTracingDetected is the
-// one that finds a debugger actually attached -- so it fails towards silence
-// rather than terminating a run over a file it could not open.
+// reaped parent and unreadable under some container policies, and of the three
+// checks the Linux detector makes, isTracingDetected is the one that finds a
+// debugger actually attached, so this one fails towards silence rather than
+// terminating a run over a file it could not open.
 func isParentDebugger() bool {
 	ppid := os.Getppid()
 
@@ -113,21 +117,24 @@ func isParentDebugger() bool {
 	return debuggerProcessNameMatches(string(commData), linuxDebuggerProcessNames)
 }
 
-// hasDebuggerEnvironmentMarkers checks for environment variables set by debuggers
-// GDB, LLDB, and other debuggers typically set specific environment variables
+// hasDebuggerEnvironmentMarkers reports whether any variable in
+// linuxDebuggerEnvVars holds a value: the dynamic loader's LD_PRELOAD and
+// LD_AUDIT, which name libraries for the loader to load into a dynamically
+// linked program as it starts, or a variable named for a debugging or
+// instrumentation tool. debuggerEnvironmentMarkerSet says what holding a
+// value means.
+//
+// Neither loader variable can load anything into this program as released: a
+// Linux release is built with CGO_ENABLED=0 and statically linked, so the
+// dynamic loader never runs for it. They are reported all the same, as
+// docs/CONFIGURATION_POLICY.md has it for LD_PRELOAD: an indicator of
+// compromise, read and reported.
+//
+// LD_PRELOAD counts whatever the length of its value. A rule that counted it
+// only past fifty characters sat after a loop that had already returned on
+// the variable existing, so it never ran (M26-TMP-010).
 func hasDebuggerEnvironmentMarkers() bool {
-	for _, envVar := range linuxDebuggerEnvVars {
-		if _, exists := os.LookupEnv(envVar); exists {
-			return true
-		}
-	}
-
-	// Check for excessive LD_PRELOAD which is often used in debuggers
-	if preload, exists := os.LookupEnv(linuxLDPreloadVar); exists && len(preload) > linuxLDPreloadLengthLimit {
-		return true
-	}
-
-	return false
+	return debuggerEnvironmentMarkerSet(linuxDebuggerEnvVars, os.Getenv)
 }
 
 // DetectDebuggerAndTerminate is a helper that detects debuggers and terminates

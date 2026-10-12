@@ -231,11 +231,6 @@ var LimitBudget = map[string][]string{
 		"L7 DefaultSandboxConfig: 64",
 		"L7 DefaultSandboxConfig: 5000",
 	},
-	"security/antidebug_linux.go": {
-		// M26-TMP-010 decides this one: the length check it sizes cannot run
-		// while LD_PRELOAD counts as a debugger's marker by being set at all.
-		"N1 package level: linuxLDPreloadLengthLimit = 50",
-	},
 	"vm/debugger.go": {
 		"N1 package level: maxDebugValue = 256",
 		"N1 package level: maxDebugChildren = 200",

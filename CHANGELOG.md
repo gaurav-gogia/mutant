@@ -699,10 +699,23 @@ exhaustive lists.
 - **`sandbox_status` reports only probes that measure something.** Three of its
   probe signals measured nothing: `acpi_pci` and `gpu_feature` answered "not
   implemented yet", and `ld_preload` answered "env-based preload checks
-  disabled". They are no longer probes. `acpi_pci` re-reported what
-  `cpuid_hypervisor` already reports, and `ld_preload` could never see anything
-  in a statically linked build, which never runs the dynamic loader
-  `LD_PRELOAD` works through.
+  disabled". They are no longer probes. `acpi_pci` re-reported the sandbox
+  detector's verdict, which `sandbox_status` reports in its own fields, and
+  `ld_preload` could never see anything in a statically linked build, which
+  never runs the dynamic loader `LD_PRELOAD` works through.
+
+- **`debug_status` says which checks found a debugger, and how sure that is.**
+  Its `confidence` was 100 for any detection and its `indicators` always empty,
+  so a parent process that happened to be named `gdb` read exactly as a
+  debugger the kernel says is attached. `indicators` now lists the checks that
+  fired, and `confidence` is 100 only when one of them reads the operating
+  system's own record of a debugger -- `IsDebuggerPresent`, the debug port,
+  `TracerPid` -- while heuristics alone give 35 for one and 70 for two or more.
+  Four probes named measurements they never made. `hardware_breakpoint` and
+  `syscall` re-reported the debugger detector -- that `gdb` parent came out as
+  a hardware breakpoint -- and `cpuid_hypervisor` the sandbox detector, so they
+  are no longer probes; `rdtsc_drift`, which times short sleeps on the OS clock,
+  is called `sleep_drift`. See [ANTITAMPER_PROBE.md](docs/ANTITAMPER_PROBE.md).
 
 - **A probe that did not look says so, and so does process protection.** The
   six probes that read Windows process structures answered "not supported on

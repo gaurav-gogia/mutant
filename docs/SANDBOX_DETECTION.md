@@ -33,28 +33,40 @@ the platform detector reported.
 
 Behavior:
 
-- Returns ("none", 0, nil) when no signal is present
+- Returns ("none", 0, nil) when every check ran and no signal is present
 - Confidence is clamped to [0, 100]
 - Type is the highest-scoring class for current platform heuristics
+- An error comes beside the type and confidence, never in place of them. It
+  names checks the detector could not make -- on Linux, a cgroup file it could
+  not read, as /proc/1/cgroup is for an unprivileged process where /proc is
+  mounted hidepid=2 -- and the type and confidence are what the other checks
+  found. A check that was not made can only have hidden a signal, so the
+  confidence is a floor: at or above the threshold it is a detection either
+  way, and IsSandboxed answers true.
 
 ```go
 sandboxType, confidence, err := security.DetectSandboxType()
-if err == nil && confidence >= 70 {
+if confidence >= 70 {
     log.Printf("detected %s (%d%%)", sandboxType, confidence)
+}
+if err != nil {
+    log.Printf("detection incomplete: %v", err)
 }
 ```
 
 ### GetSandboxIndicators() ([]string, error)
 
-Returns normalized, deduplicated indicator strings used by the detector. The
-slice is a copy, so a caller cannot edit what later callers see.
+Returns normalized, deduplicated indicator strings used by the detector, with
+the error DetectSandboxType returns beside them rather than in place of them.
+The slice is a copy, so a caller cannot edit what later callers see.
 
 ```go
 indicators, err := security.GetSandboxIndicators()
-if err == nil {
-    for _, indicator := range indicators {
-        log.Println(indicator)
-    }
+for _, indicator := range indicators {
+    log.Println(indicator)
+}
+if err != nil {
+    log.Printf("indicators incomplete: %v", err)
 }
 ```
 
@@ -94,7 +106,11 @@ VM/sandbox heuristics currently include:
 
 - Driver/library file markers: vmmouse.sys, vmhgfs.sys, VBoxMouse.sys,
   VBoxGuest.sys, xenbus.sys, SbieDll.dll
-- Environment markers: SANDBOXIE, CUCKOO, VBOX_INSTALL_PATH
+- Environment markers: SANDBOXIE, CUCKOO. VBOX_INSTALL_PATH and
+  VBOX_MSI_INSTALL_PATH are not read: VirtualBox's installers set them on the
+  machine they install VirtualBox on, which is a host that runs guests rather
+  than a guest, and a VirtualBox guest is recognised by the drivers and
+  processes of its Guest Additions.
 - Process markers from tasklist: vmtoolsd.exe, vmwaretray.exe, vboxservice.exe,
   vboxtray.exe, xenservice.exe, qemu-ga.exe, sbiectrl.exe,
   sandboxiedcomlaunch.exe
@@ -121,16 +137,19 @@ and its UNC working directory as well, and is reported as WSL.
 
 Virtualization/sandbox heuristics currently include:
 
-- Environment markers: APP_SANDBOX_CONTAINER_ID, DYLD_INSERT_LIBRARIES,
-  COLIMA_HOME
-- Application/file markers: /Applications/VMware Fusion.app,
-  /Applications/VirtualBox.app, /Applications/Parallels Desktop.app,
-  /Applications/UTM.app, /Users/Shared/Parallels, /opt/homebrew/bin/colima
-- Process markers from ps -axo comm: vmware-vmx, vboxservice, vboxclient,
-  prl_tools, qemu-system, colima
+- Environment markers: APP_SANDBOX_CONTAINER_ID, DYLD_INSERT_LIBRARIES
+- Guest-tool process markers from ps -axo comm: vboxservice, vboxclient
+  (VirtualBox Guest Additions), prl_tools (Parallels Tools)
+- CPUID hypervisor vendor leaf
 
-Potential types include: macOS App Sandbox, Colima, VMware Fusion, VirtualBox,
-Parallels, UTM, QEMU
+Potential types include: macOS App Sandbox, VirtualBox, Parallels, VM
+
+Hosting virtual machines does not make a Mac a guest, so nothing a Mac carries
+for hosting them is scored: VMware Fusion, VirtualBox, Parallels Desktop or UTM
+installed under /Applications, /Users/Shared/Parallels, a Homebrew colima,
+COLIMA_HOME, or vmware-vmx, qemu-system or colima running. Each of those is
+found on the machine that runs guests and says nothing about whether this one
+is a guest.
 
 ## Runtime Enforcement Integration
 

@@ -31,7 +31,6 @@ const (
 	windowsConfidenceSandboxieFile     = 85
 	windowsConfidenceSandboxieEnv      = 85
 	windowsConfidenceCuckooEnv         = 85
-	windowsConfidenceVboxEnv           = 70
 	windowsConfidenceWslContextEnv     = 95
 	windowsConfidenceWslEnvOnly        = 35
 	windowsConfidenceWslCwd            = 90
@@ -57,7 +56,6 @@ const (
 
 	windowsEnvSandboxie     = "SANDBOXIE"
 	windowsEnvCuckoo        = "CUCKOO"
-	windowsEnvVBoxInstall   = "VBOX_INSTALL_PATH"
 	windowsEnvUsername      = "USERNAME"
 	windowsEnvUserProfile   = "USERPROFILE"
 	windowsEnvWSLInterop    = "WSL_INTEROP"
@@ -74,7 +72,6 @@ const (
 	windowsIndicatorFileSandboxieDLL  = "windows:file:sbiedll.dll"
 	windowsIndicatorEnvSandboxie      = "windows:env:sandboxie"
 	windowsIndicatorEnvCuckoo         = "windows:env:cuckoo"
-	windowsIndicatorEnvVboxInstall    = "windows:env:vbox_install_path"
 	windowsIndicatorEnvWSLContext     = "windows:env:wsl_context"
 	windowsIndicatorEnvWSLEnvOnly     = "windows:env:wslenv_only"
 	windowsIndicatorEnvWdagUser       = "windows:env:wdag_utility_account"
@@ -162,9 +159,13 @@ func detectSandboxWindows() (sandboxDetection, error) {
 	if envSet(windowsEnvCuckoo) {
 		add(windowsSandboxTypeCuckoo, windowsConfidenceCuckooEnv, windowsIndicatorEnvCuckoo)
 	}
-	if envSet(windowsEnvVBoxInstall) {
-		add(windowsSandboxTypeVirtualBox, windowsConfidenceVboxEnv, windowsIndicatorEnvVboxInstall)
-	}
+	// VBOX_INSTALL_PATH and VBOX_MSI_INSTALL_PATH are not read. VirtualBox's
+	// installers set them, older ones the first and the current one the second,
+	// on the machine they install VirtualBox on: a host that runs guests rather
+	// than one of them. The first scored a VirtualBox guest at the threshold on
+	// its own, so secure mode refused to run on such a host (M26-TMP-012). A
+	// VirtualBox guest is recognised by the drivers and processes of its Guest
+	// Additions instead.
 	addWindowsEnvIndicators(os.LookupEnv, add)
 	if wd, err := os.Getwd(); err == nil {
 		addWindowsWSLCwdIndicators(wd, add)

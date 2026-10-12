@@ -4,6 +4,7 @@
 package security
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -121,10 +122,19 @@ func detectSandboxLinux() (sandboxDetection, error) {
 		add(linuxSandboxTypeWSL, linuxConfidenceWSLEnv, linuxIndicatorWSLEnv)
 	}
 
+	// A cgroup file that cannot be read is a check this detection could not
+	// make: it can have hidden a container marker, never added one. So it is
+	// recorded and reported beside the result, and the detection goes on. It
+	// used to end the detection, throwing away every indicator already found
+	// and skipping every check after it. Where /proc is mounted hidepid=2,
+	// /proc/1 is invisible to an unprivileged process, so every unprivileged
+	// run on such a host was reported as no sandbox at all. (M26-TMP-013)
+	var unreadCgroups []string
 	for _, cgroupPath := range linuxCgroupPaths {
 		data, err := os.ReadFile(cgroupPath)
 		if err != nil {
-			return detection, err
+			unreadCgroups = append(unreadCgroups, err.Error())
+			continue
 		}
 
 		cgroup := strings.ToLower(string(data))
@@ -246,7 +256,21 @@ func detectSandboxLinux() (sandboxDetection, error) {
 	detection.Type = bestType
 	detection.Confidence = bestScore
 	detection.Indicators = uniqueStrings(indicators)
-	return detection, nil
+	return detection, linuxCgroupUnreadError(unreadCgroups)
+}
+
+// linuxCgroupUnreadError is the error a detection returns beside its result
+// when it could not read every cgroup file, and nil when it read them all. It
+// carries each failed read's own message, which names the file and the reason.
+func linuxCgroupUnreadError(unread []string) error {
+	if len(unread) == 0 {
+		return nil
+	}
+	what := "a cgroup file could not be read, so its container markers went unchecked"
+	if len(unread) > 1 {
+		what = "cgroup files could not be read, so their container markers went unchecked"
+	}
+	return fmt.Errorf("sandbox detection is incomplete: %s (%s)", what, strings.Join(unread, "; "))
 }
 
 func hasLinuxHyperVVMBus(path string) bool {

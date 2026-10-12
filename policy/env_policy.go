@@ -58,12 +58,12 @@ var EnvAccessAllowlist = []EnvAccessException{
 		Why:      "Windows sandbox indicators, plus USERNAME/USERPROFILE for the Defender Application Guard account.",
 	},
 	{
-		File: "security/antidebug_linux.go", Func: "hasDebuggerEnvironmentMarkers", Lines: 2,
+		File: "security/antidebug_linux.go", Func: "hasDebuggerEnvironmentMarkers", Lines: 1,
 		Category: "detection",
 		Why:      "LD_PRELOAD and Linux debugger markers, read as indicators of compromise.",
 	},
 	{
-		File: "security/antidebug_darwin.go", Func: "hasDebuggerEnvironmentMarkersDarwin", Lines: 2,
+		File: "security/antidebug_darwin.go", Func: "hasDebuggerEnvironmentMarkersDarwin", Lines: 1,
 		Category: "detection",
 		Why:      "DYLD_INSERT_LIBRARIES and macOS debugger markers, read as indicators of compromise.",
 	},
@@ -71,11 +71,6 @@ var EnvAccessAllowlist = []EnvAccessException{
 		File: "security/antitamper_detectors.go", Func: "detectFridaPtrace", Lines: 1,
 		Category: "detection",
 		Why:      "Frida instrumentation markers left in the environment by the injector.",
-	},
-	{
-		File: "security/antitamper_windows.go", Func: "findInjectionEnvMarkers", Lines: 1,
-		Category: "detection",
-		Why:      "Windows library-injection indicators, reported as probe detail.",
 	},
 
 	// evidence -- Mutant reporting on a subject process. The value is output, not
@@ -142,9 +137,29 @@ var EnvAccessAllowlist = []EnvAccessException{
 	// regression -- a test that sets a variable in its own process to prove
 	// that nothing follows it.
 	{
+		File: "security/antidebug_env_markers_linux_test.go", Func: "TestLinuxDebuggerEnvironmentMarkersNeedAValue", Lines: 4,
+		Category: "regression",
+		Why: "Clears the Linux debugger markers and sets variables one at a time: an empty LD_PRELOAD or LD_AUDIT and " +
+			"a GDBHISTFILE must not count as a debugger attached to the process, and each listed variable holding a " +
+			"value must (M26-TMP-010).",
+	},
+	{
+		File: "security/antidebug_env_markers_darwin_test.go", Func: "TestDarwinDebuggerEnvironmentMarkersNeedAValue", Lines: 4,
+		Category: "regression",
+		Why: "Clears the macOS debugger markers and sets variables one at a time: an empty DYLD_INSERT_LIBRARIES, a " +
+			"GDBHISTFILE and an XCODE_VERSION_ACTUAL must not count as a debugger attached to the process, and each " +
+			"listed variable holding a value must (M26-TMP-010).",
+	},
+	{
 		File: "security/key_bootstrap_test.go", Func: "TestTheKeystoreDoesNotFollowTheEnvironment", Lines: 1,
 		Category: "regression",
 		Why:      "Points HOME and USERPROFILE at two directories in turn and requires the keystore not to move (M26-DOC3-001).",
+	},
+	{
+		File: "security/process_injection_env_windows_test.go", Func: "TestProcessInjectionIgnoresConfigurationVariables", Lines: 1,
+		Category: "regression",
+		Why: "Sets _NT_SYMBOL_PATH, JAVA_TOOL_OPTIONS and the three COR_ profiler variables and requires " +
+			"process_injection to report none of them (M26-TMP-004).",
 	},
 	{
 		File: "builtin/http_environment_test.go", Func: "TestTheHTTPBuiltinsDoNotFollowTheProxyVariables", Lines: 1,
@@ -167,5 +182,11 @@ var EnvAccessAllowlist = []EnvAccessException{
 		File: "builtin/process_host_proc_linux_test.go", Func: "TestTheProcessBuiltinsReadTheRealProc", Lines: 1,
 		Category: "regression",
 		Why:      "Names a planted /proc in HOST_PROC and requires every process_* builtin to report from /proc (M26-NET-025).",
+	},
+	{
+		File: "security/sandbox_virtualbox_installer_windows_test.go", Func: "TestWindowsSandboxIgnoresTheVirtualBoxInstallerVariables", Lines: 1,
+		Category: "regression",
+		Why: "Sets VBOX_INSTALL_PATH and VBOX_MSI_INSTALL_PATH, which VirtualBox's installers set on the host they install it on, " +
+			"and requires the Windows sandbox detector not to read either as a VirtualBox guest (M26-TMP-012).",
 	},
 }

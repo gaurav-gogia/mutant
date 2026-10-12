@@ -2,18 +2,12 @@ package security
 
 func probeOne(name string) AntiTamperSignal {
 	switch name {
-	case ProbeHardwareBreakpoint:
-		return detectHardwareBreakpoint()
 	case ProbeTiming:
 		return detectTiming()
-	case ProbeSyscall:
-		return detectSyscall()
 	case ProbeFridaPtrace:
 		return detectFridaPtrace()
-	case ProbeCPUIDHypervisor:
-		return detectCPUIDHypervisor()
-	case ProbeRDTSCDrift:
-		return detectRDTSCDrift()
+	case ProbeSleepDrift:
+		return detectSleepDrift()
 	case ProbeIATGOT:
 		return detectIATGOT()
 	case ProbeSyscallTable:

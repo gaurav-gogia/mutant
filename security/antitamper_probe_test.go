@@ -7,7 +7,7 @@ func TestRunAntiTamperProbeDisabled(t *testing.T) {
 	SetAntiTamperProbeEnabledForTesting(false)
 	defer SetAntiTamperProbeEnabledForTesting(true)
 
-	signals, enabled, err := RunAntiTamperProbe([]string{ProbeCPUIDHypervisor}, "test-disabled")
+	signals, enabled, err := RunAntiTamperProbe([]string{ProbeTiming}, "test-disabled")
 	if err != nil {
 		t.Fatalf("expected nil error when anti-tamper probe disabled, got: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestRunAntiTamperProbeEnabled(t *testing.T) {
 	ResetSecurityTelemetry()
 	SetAntiTamperProbeEnabledForTesting(true)
 
-	signals, enabled, err := RunAntiTamperProbe([]string{ProbeCPUIDHypervisor}, "test-enabled")
+	signals, enabled, err := RunAntiTamperProbe([]string{ProbeTiming}, "test-enabled")
 	if !enabled {
 		t.Fatalf("expected enabled=true")
 	}
@@ -38,8 +38,8 @@ func TestRunAntiTamperProbeEnabled(t *testing.T) {
 	if len(signals) != 1 {
 		t.Fatalf("expected one signal, got %d", len(signals))
 	}
-	if signals[0].Name != ProbeCPUIDHypervisor {
-		t.Fatalf("expected %s signal, got %q", ProbeCPUIDHypervisor, signals[0].Name)
+	if signals[0].Name != ProbeTiming {
+		t.Fatalf("expected %s signal, got %q", ProbeTiming, signals[0].Name)
 	}
 
 	snapshot := SecurityTelemetrySnapshot()

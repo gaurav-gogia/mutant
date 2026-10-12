@@ -69,28 +69,38 @@ Interpretation:
 
 ## 4. Implemented Probes (Current)
 
-1. `hardware_breakpoint`
-2. `timing`
-3. `syscall`
-4. `frida_ptrace`
-5. `cpuid_hypervisor`
-6. `rdtsc_drift`
-7. `iat_got`
-8. `syscall_table`
-9. `trampoline`
-10. `process_injection`
-11. `module_integrity`
-12. `memory_page_anomaly`
+1. `timing`
+2. `frida_ptrace`
+3. `sleep_drift`
+4. `iat_got`
+5. `syscall_table`
+6. `trampoline`
+7. `process_injection`
+8. `module_integrity`
+9. `memory_page_anomaly`
 
-Three names were listed here until 2.6.0 and measured nothing, so they are no
-longer probes; asking for one returns the `unknown probe` signal.
+Six names were listed here until 2.6.0 and are no longer probes; asking for
+one returns the `unknown probe` signal.
 
-- `acpi_pci` re-reported the sandbox detector's verdict, which
-  `cpuid_hypervisor` already reports, and read no ACPI table or PCI device.
+- `acpi_pci` re-reported the sandbox detector's verdict, which `sandbox_status`
+  reports in its own fields, and read no ACPI table or PCI device.
+- `cpuid_hypervisor` re-reported the same verdict and read no CPUID of its own,
+  so on a host whose CPUID reports a hypervisor it could answer "no hypervisor
+  signal". The CPUID reading the sandbox detector takes is one of
+  `sandbox_status`'s indicators.
+- `hardware_breakpoint` and `syscall` re-reported the debugger detector's
+  verdict -- a parent process named `gdb` came out as a hardware breakpoint at
+  confidence 70 and as a syscall finding at 80 -- and neither read a debug
+  register or made any check of its own. The checks the debugger detector ran
+  are `debug_status`'s indicators (section 5).
 - `gpu_feature` was a placeholder that answered "not implemented yet".
 - `ld_preload` answered "env-based preload checks disabled". It could not have
   seen anything: a release is built with `CGO_ENABLED=0` and statically linked,
   so the dynamic loader that `LD_PRELOAD` works through never runs.
+
+One more was renamed: `sleep_drift` was called `rdtsc_drift`, which named an
+RDTSC check it never made. It times short sleeps on the OS clock and reports,
+in `sleep_ms` and `drift_ms`, how far their total ran from what they asked for.
 
 ## 5. Runner Enforcement vs Builtin Diagnostics
 
@@ -116,11 +126,40 @@ Builtin diagnostics (`builtin/security_status.go`) use broader probe sets for
 visibility and troubleshooting. This is expected and independent of runner
 enforcement scope.
 
+`debug_status` reports one reading of the debugger detector beside its probes:
+
+1. `detected` is the platform detector's verdict, by its own rule. The Windows
+   detector, for one, wants two heuristics before it reports a debugger on
+   heuristics alone.
+2. `indicators` are the checks that fired, as `security_diagnostics` names them
+   (`windows:is_debugger_present`, `linux:parent_debugger_process`, ...).
+3. `confidence` follows from which checks those are. A direct check reads the
+   operating system's own record of a debugger: `windows:is_debugger_present`,
+   `windows:check_remote_debugger_present`, `windows:process_debug_port`,
+   `windows:process_debug_object_handle`,
+   `windows:system_debug_control_query_version`, `linux:tracer_pid` and
+   `darwin:p_traced`. When one fired, `confidence` is 100. Every other check --
+   a debugger's name on the parent process, a debugger's environment variable,
+   OutputDebugString timing, a debugger's DLL loaded -- is a heuristic, and
+   heuristics alone give 35 for one and 70 for two or more. Nothing fired is 0.
+
+Before 2.6.0 `confidence` was 100 for any detection and `indicators` was
+always empty, so a parent process that happened to be named `gdb` read exactly
+as a debugger the kernel says is attached. Because `detected` is the
+detector's rule and `confidence` is this one, a reading can be detected below
+100, or not detected above 0: one heuristic on Windows reads
+`detected: false` with `confidence: 35`.
+
 ## 6. Platform Notes
 
 Windows:
 
-1. `process_injection` uses environment and tasklist marker heuristics.
+1. `process_injection` uses tasklist marker heuristics. It reads no
+   environment variable: the five it read before 2.6.0 configure the .NET
+   runtime, a Java VM and symbol handlers such as dbghelp's, none of which runs
+   in Mutant's process (see
+   [PROCESS_INJECTION_DETECTION_LLD.md](PROCESS_INJECTION_DETECTION_LLD.md),
+   section 4.1).
 2. `trampoline` checks selected API prologues for common hook patterns.
 3. `iat_got` checks sensitive export memory ownership against expected module.
 4. `module_integrity` checks suspicious loaded module markers.

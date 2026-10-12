@@ -9,24 +9,6 @@ import (
 	"time"
 )
 
-func detectHardwareBreakpoint() AntiTamperSignal {
-	detected, methods := DetectDebuggerDetails()
-	if !detected {
-		return makeSignal(ProbeHardwareBreakpoint, false, ConfidenceNone, "no debugger method detected")
-	}
-
-	if len(methods) == 0 {
-		return makeSignal(ProbeHardwareBreakpoint, true, ConfidenceHardwareBreakpointDetected, "debugger detected without named method")
-	}
-
-	return makeSignal(
-		ProbeHardwareBreakpoint,
-		true,
-		ConfidenceHardwareBreakpointNamed,
-		"debugger_methods="+strings.Join(methods, ","),
-	)
-}
-
 func detectTiming() AntiTamperSignal {
 	start := time.Now()
 	var acc uint64
@@ -46,20 +28,6 @@ func detectTiming() AntiTamperSignal {
 		confidence,
 		"loop_us="+strconv.FormatInt(elapsedUs, 10)+";acc="+strconv.FormatUint(acc, 10),
 	)
-}
-
-func detectSyscall() AntiTamperSignal {
-	detected, methods := DetectDebuggerDetails()
-	if !detected {
-		return makeSignal(ProbeSyscall, false, ConfidenceNone, "no debugger API signal detected")
-	}
-
-	detail := "debugger signal detected"
-	if len(methods) > 0 {
-		detail = "api_hits=" + strings.Join(methods, ",")
-	}
-
-	return makeSignal(ProbeSyscall, true, ConfidenceSyscallDetected, detail)
 }
 
 func detectFridaPtrace() AntiTamperSignal {
@@ -90,43 +58,36 @@ func detectFridaPtrace() AntiTamperSignal {
 	return makeSignal(ProbeFridaPtrace, false, ConfidenceNone, "no frida/ptrace heuristic triggered")
 }
 
-func detectCPUIDHypervisor() AntiTamperSignal {
-	sandboxType, confidence, err := DetectSandboxType()
-	if err != nil {
-		return unmeasuredSignal(ProbeCPUIDHypervisor, "not measured: the sandbox detector failed: "+err.Error())
-	}
-	if sandboxType != SandboxTypeNone && confidence >= SandboxDetectedThreshold {
-		return makeSignal(ProbeCPUIDHypervisor, true, ConfidenceCPUIDHypervisorDetected, "sandbox_type="+sandboxType)
-	}
-
-	return makeSignal(ProbeCPUIDHypervisor, false, ConfidenceNone, "no hypervisor signal")
-}
-
-// rdtscDriftSleep is one of the drift probe's naps: the shortest sleep worth
-// asking the scheduler for.
+// sleepDriftNap is one of the sleep_drift probe's naps: the shortest sleep
+// worth asking the scheduler for.
 //
 //mutant:limit duration
-const rdtscDriftSleep = time.Millisecond
+const sleepDriftNap = time.Millisecond
 
-func detectRDTSCDrift() AntiTamperSignal {
+// detectSleepDrift times SleepDriftNaps naps on the OS clock and reports how far
+// their total ran from what they asked for. It was called rdtsc_drift, and that
+// named a check it does not make: an RDTSC check reads the processor's
+// timestamp counter, and this compares the OS clock with its own sleeps
+// (M26-TMP-014).
+func detectSleepDrift() AntiTamperSignal {
 	start := time.Now()
-	for i := 0; i < RDTSCDriftSleepIterations; i++ {
-		time.Sleep(rdtscDriftSleep)
+	for i := 0; i < SleepDriftNaps; i++ {
+		time.Sleep(sleepDriftNap)
 	}
 	elapsedMs := int(time.Since(start).Milliseconds())
-	drift := elapsedMs - RDTSCDriftSleepIterations*int(rdtscDriftSleep/time.Millisecond)
+	drift := elapsedMs - SleepDriftNaps*int(sleepDriftNap/time.Millisecond)
 	if drift < 0 {
 		drift = -drift
 	}
 
-	suspicious := drift > RDTSCDriftThresholdMs
+	suspicious := drift > SleepDriftThresholdMs
 	confidence := ConfidenceNone
 	if suspicious {
-		confidence = ConfidenceRDTSCDriftSuspicious
+		confidence = ConfidenceSleepDriftSuspicious
 	}
 
 	return makeSignal(
-		ProbeRDTSCDrift,
+		ProbeSleepDrift,
 		suspicious,
 		confidence,
 		"sleep_ms="+strconv.Itoa(elapsedMs)+";drift_ms="+strconv.Itoa(drift),

@@ -146,3 +146,41 @@ func DebuggerTamperDetail() TamperDetail {
 
 	return TamperDetail{Detector: "debugger", Signals: methods}
 }
+
+// debuggerEnvironmentMarkerSet reports whether any of names holds a value in
+// the environment getenv reads. It is the rule the Linux and macOS
+// environment checks share; each keeps its own list of names, and the rule
+// lives here so that it can be run from any host.
+//
+// Being present used to be enough, so an empty LD_PRELOAD counted as a
+// debugger attached to this process, and in secure mode that ends the run
+// (M26-TMP-010). An empty variable holds no value, and nor does one of the
+// loader's lists (loaderListSeparators) made only of separators: it gives the
+// loader nothing to use, and it is what LD_PRELOAD=$LD_PRELOAD:$EXTRA leaves
+// when both are empty.
+func debuggerEnvironmentMarkerSet(names []string, getenv func(string) string) bool {
+	for _, name := range names {
+		if strings.Trim(getenv(name), loaderListSeparators[name]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// loaderListSeparators holds, for each dynamic-loader variable on
+// linuxDebuggerEnvVars or darwinDebuggerEnvVars whose value is a list of
+// paths, the characters the loader splits that value at. glibc's ld.so splits
+// LD_PRELOAD at spaces and colons and LD_AUDIT at colons; dyld splits
+// DYLD_INSERT_LIBRARIES, the libraries it inserts, at colons. Any other
+// character can be part of a path, so a value with one in it names something
+// for the loader to use. A variable with no entry here is not a list, and any
+// value it holds counts.
+//
+// DYLD_ROOT_PATH has no entry. dyld has read it only in a simulator process
+// since macOS 12 (dyld-940), and there as one path rather than a list; Go has
+// required macOS 12 or later since Go 1.25.
+var loaderListSeparators = map[string]string{
+	"LD_PRELOAD":            " :",
+	"LD_AUDIT":              ":",
+	"DYLD_INSERT_LIBRARIES": ":",
+}

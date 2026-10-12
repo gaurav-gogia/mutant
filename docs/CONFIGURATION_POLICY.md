@@ -109,7 +109,6 @@ Mutant user.
 | `security/antidebug_linux.go` — `hasDebuggerEnvironmentMarkers` | `LD_PRELOAD` and Linux debugger markers |
 | `security/antidebug_darwin.go` — `hasDebuggerEnvironmentMarkersDarwin` | `DYLD_INSERT_LIBRARIES` and macOS debugger markers |
 | `security/antitamper_detectors.go` — `detectFridaPtrace` | Frida instrumentation markers |
-| `security/antitamper_windows.go` — `findInjectionEnvMarkers` | Windows injection indicators |
 
 > **Accepted property.** Because detection can halt a secure-mode run, someone
 > who can set `SANDBOXIE=1` in Mutant's environment can make Mutant refuse to

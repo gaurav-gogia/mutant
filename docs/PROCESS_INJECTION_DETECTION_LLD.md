@@ -84,15 +84,9 @@ that varies per run is the response to a detection: `terminate` in secure mode,
 
 Function: detectProcessInjection()
 
-Signal sources:
+Signal source:
 
-1. Environment markers
-   - COR_ENABLE_PROFILING
-   - COR_PROFILER
-   - COR_PROFILER_PATH
-   - JAVA_TOOL_OPTIONS
-   - _NT_SYMBOL_PATH
-2. Process list markers via tasklist output
+1. Process list markers via tasklist output
    - processhacker
    - x64dbg
    - ollydbg
@@ -102,9 +96,16 @@ Signal sources:
 
 Confidence strategy:
 
-- Base marker hit: 70
-- Environment-only hit: 90
-- Env + process hit: 95
+- Process marker hit: 70. That is below the runner's 80, and the runner weighs
+  each signal alone, so this probe never stops a run.
+
+No environment variable is a signal. Before 2.6.0 the probe also read
+`COR_ENABLE_PROFILING`, `COR_PROFILER`, `COR_PROFILER_PATH`,
+`JAVA_TOOL_OPTIONS` and `_NT_SYMBOL_PATH`, and scored any of them 90 (95 beside
+a process marker), which stopped a secure-mode run. They configure the .NET
+runtime, a Java VM and symbol handlers such as dbghelp's, none of which runs in
+Mutant's process, so a symbol path set for WinDbg, or a profiler set for .NET
+programs, stopped the run as injection when nothing had been injected.
 
 ### 4.2 Probe: trampoline
 
@@ -205,7 +206,7 @@ sequenceDiagram
 ## 6. Why this design is useful
 
 1. Fast and low-overhead.
-2. Cross-checks different evidence types (env/process/hooks/pages/modules).
+2. Cross-checks different evidence types (process/hooks/pages/modules).
 3. Confidence model avoids hard fail on weak single marker.
 4. Runner enforces policy at two useful stages.
 

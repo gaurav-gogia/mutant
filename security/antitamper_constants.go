@@ -1,43 +1,34 @@
 package security
 
 const (
-	ProbeHardwareBreakpoint = "hardware_breakpoint"
-	ProbeTiming             = "timing"
-	ProbeSyscall            = "syscall"
-	ProbeFridaPtrace        = "frida_ptrace"
-	ProbeCPUIDHypervisor    = "cpuid_hypervisor"
-	ProbeRDTSCDrift         = "rdtsc_drift"
-	ProbeIATGOT             = "iat_got"
-	ProbeSyscallTable       = "syscall_table"
-	ProbeTrampoline         = "trampoline"
-	ProbeProcessInjection   = "process_injection"
-	ProbeModuleIntegrity    = "module_integrity"
-	ProbeMemoryPageAnomaly  = "memory_page_anomaly"
+	ProbeTiming            = "timing"
+	ProbeFridaPtrace       = "frida_ptrace"
+	ProbeSleepDrift        = "sleep_drift"
+	ProbeIATGOT            = "iat_got"
+	ProbeSyscallTable      = "syscall_table"
+	ProbeTrampoline        = "trampoline"
+	ProbeProcessInjection  = "process_injection"
+	ProbeModuleIntegrity   = "module_integrity"
+	ProbeMemoryPageAnomaly = "memory_page_anomaly"
 
 	AntiTamperUnknownStage = "unknown"
 
 	AntiTamperDetailUnknownProbe = "unknown probe"
 
-	ConfidenceNone                        = 0
-	ConfidenceTimingBaseline              = 5
-	ConfidenceRDTSCDriftSuspicious        = 35
-	ConfidenceTimingSuspicious            = 40
-	ConfidenceHardwareBreakpointDetected  = 65
-	ConfidenceCPUIDHypervisorDetected     = 70
-	ConfidenceHardwareBreakpointNamed     = 70
-	ConfidenceProcessInjectionDetected    = 70
-	ConfidenceTrampolineDetected          = 75
-	ConfidenceFridaPtraceTracerDetected   = 75
-	ConfidenceSyscallDetected             = 80
-	ConfidenceSyscallTableDetected        = 82
-	ConfidenceFridaTasklistDetected       = 85
-	ConfidenceModuleIntegrityDetected     = 85
-	ConfidenceIATGOTDetected              = 90
-	ConfidenceFridaEnvMarkerDetected      = 90
-	ConfidenceProcessInjectionEnvDetected = 90
-	ConfidenceTrampolineMultiHit          = 90
-	ConfidenceMemoryPageAnomalyDetected   = 92
-	ConfidenceProcessInjectionCombined    = 95
+	ConfidenceNone                      = 0
+	ConfidenceTimingBaseline            = 5
+	ConfidenceSleepDriftSuspicious      = 35
+	ConfidenceTimingSuspicious          = 40
+	ConfidenceProcessInjectionDetected  = 70
+	ConfidenceTrampolineDetected        = 75
+	ConfidenceFridaPtraceTracerDetected = 75
+	ConfidenceSyscallTableDetected      = 82
+	ConfidenceFridaTasklistDetected     = 85
+	ConfidenceModuleIntegrityDetected   = 85
+	ConfidenceIATGOTDetected            = 90
+	ConfidenceFridaEnvMarkerDetected    = 90
+	ConfidenceTrampolineMultiHit        = 90
+	ConfidenceMemoryPageAnomalyDetected = 92
 
 	// TimingLoopIterations is the length of the timing probe's loop: enough
 	// work to be timed, little enough to cost nothing.
@@ -54,18 +45,18 @@ const (
 	//mutant:limit microseconds
 	TimingSuspiciousThresholdUs = 200000
 
-	// RDTSCDriftSleepIterations is how many rdtscDriftSleep naps the drift
-	// probe times.
+	// SleepDriftNaps is how many sleepDriftNap naps the sleep_drift probe
+	// times.
 	//
 	//mutant:limit iterations
-	RDTSCDriftSleepIterations = 3
-	// RDTSCDriftThresholdMs is how far the naps' total may run past what they
+	SleepDriftNaps = 3
+	// SleepDriftThresholdMs is how far the naps' total may run past what they
 	// asked for before the probe reports it. Three 1 ms naps take four to six
 	// milliseconds on an idle Windows machine; ten more than asked for is a
 	// thread that was stopped, not one that was scheduled late.
 	//
 	//mutant:limit milliseconds
-	RDTSCDriftThresholdMs = 10
+	SleepDriftThresholdMs = 10
 
 	LinuxProcSelfStatusPath = "/proc/self/status"
 )
@@ -74,22 +65,23 @@ var (
 	fridaEnvMarkers  = []string{"FRIDA", "FRIDA_AGENT", "FRIDA_GADGET"}
 	fridaTaskMarkers = []string{"frida", "frida-helper", "frida-server", "frida-agent"}
 
-	windowsInjectionEnvMarkers = []string{"COR_ENABLE_PROFILING", "COR_PROFILER", "COR_PROFILER_PATH", "__COMPAT_LAYER"}
-
-	// AntiTamperSupportedProbes are the probes that measure something. Three
-	// names that did not left the list in 2.6.0 and are unknown probes now:
-	// acpi_pci re-reported the sandbox detector, which cpuid_hypervisor
-	// reports; gpu_feature was never implemented; and ld_preload could not
-	// have seen anything, because a statically linked build (CGO_ENABLED=0,
-	// as every release is) never runs the dynamic loader LD_PRELOAD works
-	// through. docs/ANTITAMPER_PROBE.md says the same.
+	// AntiTamperSupportedProbes are the names probeOne routes to a probe; any
+	// other name is answered with the unknown probe signal. Six names left the
+	// list in 2.6.0 and are unknown probes now. acpi_pci and cpuid_hypervisor
+	// re-reported the sandbox detector, which sandbox_status reports in its own
+	// fields, and read no ACPI table, PCI device or CPUID of their own.
+	// hardware_breakpoint and syscall re-reported the debugger detector, whose
+	// checks are debug_status's indicators, and made no check of their own:
+	// neither read a debug register (M26-TMP-014). gpu_feature was never
+	// implemented. And ld_preload could not have seen anything, because a
+	// statically linked build (CGO_ENABLED=0, as every release is) never runs
+	// the dynamic loader LD_PRELOAD works through. rdtsc_drift is called
+	// sleep_drift, after what it times -- short sleeps, on the OS clock --
+	// because it made no RDTSC check. docs/ANTITAMPER_PROBE.md says the same.
 	AntiTamperSupportedProbes = []string{
-		ProbeHardwareBreakpoint,
 		ProbeTiming,
-		ProbeSyscall,
 		ProbeFridaPtrace,
-		ProbeCPUIDHypervisor,
-		ProbeRDTSCDrift,
+		ProbeSleepDrift,
 		ProbeIATGOT,
 		ProbeSyscallTable,
 		ProbeTrampoline,
