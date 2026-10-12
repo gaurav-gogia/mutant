@@ -1,6 +1,6 @@
 === GrapheneDB Example With Enums ===
 opened graph db, handle: 1
-added nodes: alice=1 bob=2 carol=3 doc=4
+added nodes: person_a=1 person_b=2 person_c=3 doc=4
 added edges: 1 2 3
 person nodes: 3 document nodes: 1
 graph stats — nodes: 4 edges: 3

@@ -4,15 +4,15 @@
 
 ---
 
-Meridian Logistics moves freight. Four hundred people, one finance team, one
+Example Corp moves freight. Four hundred people, one finance team, one
 quarterly close that has to be filed on the 15th.
 
 On **12 March 2026** finance cannot open the close. The files are where they
 should be. They are the right size. They open to garbage.
 
 IT rebuilt the machine before anyone thought to image it. What you have is one
-triage collection from `MRD-FIN-07`, an accounts-payable workstation belonging
-to **r. mehta** — a folder of files, and a bodyfile giving four timestamps for
+triage collection from `FIN-WS-07`, an accounts-payable workstation belonging
+to **the clerk** — a folder of files, and a bodyfile giving four timestamps for
 every object that was ever on it, including the ones that are not there any
 more.
 

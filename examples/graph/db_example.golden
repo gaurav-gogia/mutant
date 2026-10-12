@@ -1,15 +1,15 @@
 === GrapheneDB In-Memory Graph ===
 opened graph db, handle: 1
-added nodes: alice=1 bob=2 carol=3 doc=4
+added nodes: person_a=1 person_b=2 person_c=3 doc=4
 added edges: 1 2 3
 indexed properties
 graph stats — nodes: 4  edges: 3
 
-=== BFS from Alice (depth 2, outbound) ===
+=== BFS from Person A (depth 2, outbound) ===
 nodes reachable: 4
 edges traversed: 3
 
-=== Shortest Path: Alice -> Carol ===
+=== Shortest Path: Person A -> Person C ===
 path node count: 3
   node id: 1
   node id: 2

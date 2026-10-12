@@ -269,8 +269,8 @@ let payload = "{" +
     "\"status\":\"ok\"," +
     "\"page\":1," +
     "\"records\":[" +
-        "{\"id\":1,\"name\":\"alice\",\"roles\":[\"admin\",\"ops\"],\"meta\":{\"active\":true,\"score\":91.5}}," +
-        "{\"id\":2,\"name\":\"bob\",\"roles\":[\"ops\"],\"meta\":{\"active\":false,\"score\":42.0}}" +
+        "{\"id\":1,\"name\":\"analyst\",\"roles\":[\"admin\",\"ops\"],\"meta\":{\"active\":true,\"score\":91.5}}," +
+        "{\"id\":2,\"name\":\"operator\",\"roles\":[\"ops\"],\"meta\":{\"active\":false,\"score\":42.0}}" +
     "]" +
 "}";
 
@@ -307,7 +307,7 @@ Add a computed field, rename a key, drop a field, and build a fresh array —
 then serialize the result.
 
 ```
-let record = { "id": 7, "name": "carol", "score": 88 };
+let record = { "id": 7, "name": "reviewer", "score": 88 };
 
 // add: a derived field.
 let with_grade = set(record, "grade", "B+");
@@ -348,7 +348,7 @@ if (err2) {
 ### 6.3 Encoding round-trips
 
 ```
-let blob = "{\"user\":\"alice\",\"token\":\"s3cr3t\"}";
+let blob = "{\"user\":\"analyst\",\"token\":\"s3cr3t\"}";
 
 // base64: safe for embedding JSON in text-only channels (headers, URLs, etc).
 let b64 = base64_encode(blob);
@@ -371,7 +371,7 @@ if (err2) {
 };
 
 // url_encode: safe query parameters from arbitrary text.
-let query_value = url_encode("alice smith & co");
+let query_value = url_encode("example & co");
 putln("encoded query param:", query_value);
 let decoded_value, err3 = url_decode(query_value);
 if (err3) {

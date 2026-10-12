@@ -14,24 +14,24 @@ let db, err = db_open();
 check(err, "db_open");
 putf("opened graph db, handle: %v\n", db);
 
-let alice, _ = db_add_node(db, NodeType.PERSON);
-let bob, _ = db_add_node(db, NodeType.PERSON);
-let carol, _ = db_add_node(db, NodeType.PERSON);
+let person_a, _ = db_add_node(db, NodeType.PERSON);
+let person_b, _ = db_add_node(db, NodeType.PERSON);
+let person_c, _ = db_add_node(db, NodeType.PERSON);
 let doc, err = db_add_node(db, NodeType.DOCUMENT);
 check(err, "db_add_node DOCUMENT");
-putf("added nodes: alice=%v bob=%v carol=%v doc=%v\n", alice, bob, carol, doc);
+putf("added nodes: person_a=%v person_b=%v person_c=%v doc=%v\n", person_a, person_b, person_c, doc);
 
-let e1, _ = db_add_edge(db, alice, bob, EdgeType.KNOWS);
-let e2, _ = db_add_edge(db, bob, carol, EdgeType.KNOWS);
-let e3, err = db_add_edge(db, alice, doc, EdgeType.AUTHORED);
+let e1, _ = db_add_edge(db, person_a, person_b, EdgeType.KNOWS);
+let e2, _ = db_add_edge(db, person_b, person_c, EdgeType.KNOWS);
+let e3, err = db_add_edge(db, person_a, doc, EdgeType.AUTHORED);
 check(err, "db_add_edge AUTHORED");
 putf("added edges: %v %v %v\n", e1, e2, e3);
 
-let _, err = db_index_prop(db, alice, "name", "Alice");
+let _, err = db_index_prop(db, person_a, "name", "Person A");
 check(err, "db_index_prop");
-let _, err = db_index_prop(db, bob, "name", "Bob");
+let _, err = db_index_prop(db, person_b, "name", "Person B");
 check(err, "db_index_prop");
-let _, err = db_index_prop(db, carol, "name", "Carol");
+let _, err = db_index_prop(db, person_c, "name", "Person C");
 check(err, "db_index_prop");
 
 let people, _ = db_query_nodes(db, NodeType.PERSON);

@@ -1,6 +1,6 @@
 putln("=== IOC Normalizer Pipeline ===");
 
-let raw = " URL=http://evil.example/login?user=alice  ";
+let raw = " URL=http://evil.example/login?user=analyst  ";
 let lowered = text_replace(raw, "URL=", "url=");
 
 let compact, err = regex_replace("\\s+", lowered, "");

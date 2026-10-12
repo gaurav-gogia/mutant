@@ -45,7 +45,7 @@ putln("fields:    ", rule["fields"]);
 let suspicious = {
     "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     "CommandLine": "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4A",
-    "User": "CORP\\jdoe"
+    "User": "CORP\\user01"
 };
 let hit, err = sigma_match(rule, suspicious);
 putln("");

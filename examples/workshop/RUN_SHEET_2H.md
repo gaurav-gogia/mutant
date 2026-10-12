@@ -218,7 +218,7 @@ they are all this question needs.
 
 ### The run keys — `run_keys.mut`
 
-**Ask:** what starts when r.mehta logs on, and since when?
+**Ask:** what starts when the clerk logs on, and since when?
 
 **The twist:** a key's last-write time is when it last changed, so the Run key
 dates the persistence, and that time belongs on the timeline from beat 5. The

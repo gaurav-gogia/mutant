@@ -2,7 +2,7 @@ putln("=== Detection Builtins ===");
 
 let persistence_facts = {
     "autorun_keys": ["HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\Bad"],
-    "startup_files": ["C:\\Users\\alice\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\evil.lnk"],
+    "startup_files": ["C:\\Users\\victim\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\evil.lnk"],
     "scheduled_tasks": ["\\Microsoft\\Windows\\Defrag\\ScheduledDefrag"]
 };
 let persistence, err = detect_persistence(persistence_facts);

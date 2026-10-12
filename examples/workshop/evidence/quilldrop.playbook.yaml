@@ -62,23 +62,23 @@
 start: 2026-03-11T09:00:00Z
 
 variables:
-  victim: r.mehta
-  host: MRD-FIN-07
+  victim: clerk
+  host: FIN-WS-07
   c2: 203.0.113.47
-  lure: Invoice_MRD-88412
+  lure: Invoice_88412
   # One host for the lure link, the Mark-of-the-Web and the browser history, so
   # the three agree and beat 3's correlation is real rather than arranged. It
-  # imitates the firm's own domain, meridianlogistics.example.
-  lure_host: meridian-logistics-billing.example
+  # imitates the firm's own domain, corp.example.
+  lure_host: corp-billing.example
   # The ad network the clerk's click went through, and a tracker its ad
   # embedded. The clerk never visited the tracker.
-  ad_net: adnet.test
-  tracker: px.trackco.test
+  ad_net: ads.test
+  tracker: px.tracker.test
 
 actors:
   # The clerk's user profile: where the intrusion lands.
   - name: clerk
-    base: Users/r.mehta
+    base: Users/clerk
 
   # Machine-wide state: the implant's own log directory.
   - name: machine
@@ -87,7 +87,7 @@ actors:
   # Ordinary business activity. This exists so the students have to FILTER.
   # A signal in a folder of ten files is not a finding, it is a coincidence.
   - name: business
-    base: Users/r.mehta/Documents
+    base: Users/clerk/Documents
 
 # ---------------------------------------------------------------------------
 steps:
@@ -122,13 +122,13 @@ steps:
             - path: Software\Microsoft\Windows\CurrentVersion\Run
               last_written: 2025-09-15T08:12:40Z
               values:
-                - { name: ContosoChat, data: '"C:\Program Files\Contoso\Chat\chat.exe" --minimized' }
-                - { name: FabrikamSync, data: '"C:\Program Files (x86)\Fabrikam\Sync\fsync.exe" /background' }
-                - { name: NorthwindNotes, data: 'C:\Users\r.mehta\AppData\Local\Programs\Northwind Notes\notes.exe' }
+                - { name: VendorAChat, data: '"C:\Program Files\Vendor A\Chat\chat.exe" --minimized' }
+                - { name: VendorBSync, data: '"C:\Program Files (x86)\Vendor B\Sync\fsync.exe" /background' }
+                - { name: VendorCNotes, data: 'C:\Users\clerk\AppData\Local\Programs\Vendor C Notes\notes.exe' }
             - path: Software\Microsoft\Windows\CurrentVersion\RunOnce
               last_written: 2026-03-10T17:02:11Z
               values:
-                - { name: TailspinCleanup, data: '"C:\Program Files\Tailspin\cleanup.exe" /once' }
+                - { name: VendorDCleanup, data: '"C:\Program Files\Vendor D\cleanup.exe" /once' }
             - path: Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
               last_written: 2025-06-02T10:30:00Z
               values:
@@ -157,23 +157,23 @@ steps:
         path: Inbox/invoice.eml
         email:
           from: accounts@${VAR:lure_host}
-          to: ["r.mehta@meridianlogistics.example"]
+          to: ["clerk@corp.example"]
           reply_to: billing-desk@${VAR:lure_host}
-          subject: "OVERDUE: Invoice MRD-88412 - final notice before referral"
+          subject: "OVERDUE: Invoice INV-88412 - final notice before referral"
           date: 2026-03-11T09:14:02Z
           message_id: "<88412.quill@${VAR:lure_host}>"
           body_text: |
             Dear Accounts Payable,
 
-            Invoice MRD-88412 is overdue and will be referred for collection
+            Invoice INV-88412 is overdue and will be referred for collection
             on Friday. Retrieve the statement here:
 
                 https://${VAR:lure_host}/inv/88412
 
             Regards,
-            Meridian Logistics Billing Desk
+            Example Corp Billing Desk
           attachments:
-            - name: Invoice_MRD-88412.pdf.exe
+            - name: Invoice_88412.pdf.exe
               content_type: application/vnd.microsoft.portable-executable
               content: |
                 This stands in for the attached body. The exhibit the steps
@@ -193,15 +193,15 @@ steps:
         format: chrome_history
         history:
           visits:
-            - url: https://meridianlogistics.example/ap/queue
+            - url: https://corp.example/ap/queue
               title: AP queue
               time: 2026-03-11T08:51:00Z
               transition: typed
-            - url: https://search.example/?q=meridian+invoice+MRD-88412
-              title: meridian invoice MRD-88412 - Search
+            - url: https://search.example/?q=invoice+INV-88412
+              title: invoice INV-88412 - Search
               time: 2026-03-11T09:15:31Z
               transition: typed
-            - url: https://clk.${VAR:ad_net}/c?ad=50513&q=MRD-88412
+            - url: https://clk.${VAR:ad_net}/c?ad=50513&q=INV-88412
               time: 2026-03-11T09:16:05Z
               from_visit: 2
             - url: https://rtb.${VAR:ad_net}/r?ad=50513
@@ -209,7 +209,7 @@ steps:
               from_visit: 3
               redirect: server
             - url: https://${VAR:lure_host}/inv/88412
-              title: Invoice MRD-88412
+              title: Invoice INV-88412
               time: 2026-03-11T09:16:07Z
               from_visit: 4
               redirect: server
@@ -219,7 +219,7 @@ steps:
               from_visit: 5
           downloads:
             - url: https://${VAR:lure_host}/inv/88412/download
-              target_path: C:\Users\r.mehta\Downloads\Invoice_MRD-88412.pdf.exe
+              target_path: C:\Users\clerk\Downloads\Invoice_88412.pdf.exe
               start: 2026-03-11T09:16:41Z
               end: 2026-03-11T09:16:44Z
               received_bytes: 36864
@@ -242,7 +242,7 @@ steps:
         format: chrome_cookies
         cookies:
           entries:
-            - { host: meridianlogistics.example, name: ap_session, value: 7c1e0b2a, created: '2026-03-11T08:51:00Z', secure: true, httponly: true }
+            - { host: corp.example, name: ap_session, value: 7c1e0b2a, created: '2026-03-11T08:51:00Z', secure: true, httponly: true }
             - { host: .search.example, name: prefs, value: 'lang=en-GB&safe=1', created: '2026-02-03T09:00:12Z', expires: '2027-02-03T09:00:12Z', secure: true, samesite: lax }
             - { host: '.${VAR:tracker}', name: px_id, value: 9f3d2c71e4, created: '2026-03-11T09:15:32Z', expires: '2026-06-09T09:15:32Z', secure: true, samesite: none }
             - { host: '.${VAR:ad_net}', name: uid, value: a8e55d0c19b2, created: '2026-03-11T09:16:05Z', expires: '2027-03-11T09:16:05Z', secure: true, samesite: none }
@@ -268,7 +268,7 @@ steps:
             - urlmon.dll!URLDownloadToFileW
           version:
             file_version: 1.0.0.0
-            company_name: Meridian Logistics
+            company_name: Example Corp
             file_description: Invoice Viewer
             original_filename: InvoiceViewer.exe
       - action: motw
@@ -284,7 +284,7 @@ steps:
     offset: 20m
     actions:
       - action: create
-        path: AppData/Roaming/MeridianSync/updater.exe
+        path: AppData/Roaming/SyncAgent/updater.exe
         content_len: 94208
         content_kind: bytes
         pe:
@@ -298,15 +298,15 @@ steps:
             - ws2_32.dll!connect
           version:
             file_version: 10.0.19041.1
-            company_name: Meridian Logistics
-            file_description: MeridianSync Updater
+            company_name: Example Corp
+            file_description: SyncAgent Updater
       # ANTI-FORENSICS, the first. The implant backdates itself to look like
       # it arrived with last autumn's updates. SetFileTime writes
       # $STANDARD_INFORMATION; the $FILE_NAME times stay at 09:20 today. On an
       # NTFS volume that is stomp_two_clocks's finding: a file created before
       # it was given its name.
       - action: timestomp
-        path: AppData/Roaming/MeridianSync/updater.exe
+        path: AppData/Roaming/SyncAgent/updater.exe
         atime: "2025-11-04T10:12:00Z"
         mtime: "2025-11-04T10:12:00Z"
         crtime: "2025-11-04T10:12:00Z"
@@ -327,14 +327,14 @@ steps:
             - path: Software\Microsoft\Windows\CurrentVersion\Run
               last_written: 2026-03-11T09:22:00Z
               values:
-                - { name: ContosoChat, data: '"C:\Program Files\Contoso\Chat\chat.exe" --minimized' }
-                - { name: FabrikamSync, data: '"C:\Program Files (x86)\Fabrikam\Sync\fsync.exe" /background' }
-                - { name: NorthwindNotes, data: 'C:\Users\r.mehta\AppData\Local\Programs\Northwind Notes\notes.exe' }
-                - { name: MeridianSync, data: 'C:\Users\r.mehta\AppData\Roaming\MeridianSync\updater.exe' }
+                - { name: VendorAChat, data: '"C:\Program Files\Vendor A\Chat\chat.exe" --minimized' }
+                - { name: VendorBSync, data: '"C:\Program Files (x86)\Vendor B\Sync\fsync.exe" /background' }
+                - { name: VendorCNotes, data: 'C:\Users\clerk\AppData\Local\Programs\Vendor C Notes\notes.exe' }
+                - { name: SyncAgent, data: 'C:\Users\clerk\AppData\Roaming\SyncAgent\updater.exe' }
             - path: Software\Microsoft\Windows\CurrentVersion\RunOnce
               last_written: 2026-03-10T17:02:11Z
               values:
-                - { name: TailspinCleanup, data: '"C:\Program Files\Tailspin\cleanup.exe" /once' }
+                - { name: VendorDCleanup, data: '"C:\Program Files\Vendor D\cleanup.exe" /once' }
             - path: Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
               last_written: 2025-06-02T10:30:00Z
               values:
@@ -345,7 +345,7 @@ steps:
           Windows Registry Editor Version 5.00
 
           [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run]
-          "MeridianSync"="C:\\Users\\r.mehta\\AppData\\Roaming\\MeridianSync\\updater.exe"
+          "SyncAgent"="C:\\Users\\clerk\\AppData\\Roaming\\SyncAgent\\updater.exe"
 
   # -- 6. Beaconing, all day (09:25 onward) ---------------------------------
   - actor: machine
@@ -354,7 +354,7 @@ steps:
     repeat: 28
     actions:
       - action: append
-        path: MeridianSync/sync.log
+        path: SyncAgent/sync.log
         content: "${DATE:2006-01-02T15:04:05Z07:00} SYNC host=${VAR:host} peer=${VAR:c2}:443 status=OK\n"
 
   # -- 7. Collection staged (00:00, the small hours) ------------------------

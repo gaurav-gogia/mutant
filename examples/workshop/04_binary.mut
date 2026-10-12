@@ -2,7 +2,7 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 4/10  the binary");
 
-let implant = quilldrop.path("Users/r.mehta/AppData/Roaming/MeridianSync/updater.exe");
+let implant = quilldrop.path("Users/clerk/AppData/Roaming/SyncAgent/updater.exe");
 
 if (quilldrop.ready(quilldrop.root)) {
     let pe, _ = bin_pe_parse(implant);

@@ -5,8 +5,8 @@
 
 putln("=== Typosquat detection ===");
 
-let brand = "paypal.com";
-let seen = ["paypa1.com", "paypal.com", "paypal-login.com", "google.com", "paypaI.com"];
+let brand = "examplebank.test";
+let seen = ["examp1ebank.test", "examplebank.test", "examplebank-login.test", "search.example", "exampIebank.test"];
 
 each(seen, fn(d) {
     let distance = text_levenshtein(brand, d); // edits to turn one into the other

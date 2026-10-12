@@ -2,7 +2,7 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP  the run keys");
 
-let hive = quilldrop.path("Users/r.mehta/NTUSER.DAT");
+let hive = quilldrop.path("Users/clerk/NTUSER.DAT");
 let base = "Software\\Microsoft\\Windows\\CurrentVersion";
 let odd = "(?i)appdata|programdata|powershell|\\btemp\\b";
 
