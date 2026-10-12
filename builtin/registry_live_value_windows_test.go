@@ -37,12 +37,14 @@ import (
 // a test that depends on this machine's registry contents is not a test. The
 // key is removed again in Cleanup, including when the test fails.
 //
-// One case is deliberately not covered: a value of type REG_NONE itself.
+// One case is deliberately not covered here: a value of type REG_NONE itself.
 // x/sys/windows/registry has no generic setter -- SetStringValue,
 // SetBinaryValue and the rest all write a known type -- so REG_NONE cannot be
-// created from Go here. The discrimination that matters is present-and-empty
+// created through it. The discrimination that matters is present-and-empty
 // against not-present, and an empty REG_SZ and a zero-length REG_BINARY make
-// that same distinction, so both are used below.
+// that same distinction, so both are used below. A present REG_NONE, empty and
+// not, is written with RegSetValueExW and read back in
+// registry_live_undecoded_windows_test.go (M26-NET-006).
 
 const liveRegTestSubKey = `Software\MutantReview-M26-NET-004`
 

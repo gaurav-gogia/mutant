@@ -1,7 +1,6 @@
 package builtin
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
@@ -360,13 +359,17 @@ func collectURLs(header mail.Header, body string) []string {
 	urlRe := regexp.MustCompile(`https?://[^\s<>"]+`)
 	matches := map[string]struct{}{}
 
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	for scanner.Scan() {
-		line := scanner.Text()
-		for _, match := range urlRe.FindAllString(line, -1) {
-			trimmed := strings.TrimRight(match, ".,;)")
-			matches[trimmed] = struct{}{}
-		}
+	// The body is matched whole. It used to be read line by line through a
+	// bufio.Scanner with its default 64 KiB buffer limit, which ended the scan at
+	// the first line of 64 KiB or more (counting a CR before the line feed) --
+	// minified HTML, an inline data: image -- and, with Err() never checked,
+	// every URL on that line and after it was dropped without a word
+	// (M26-ART-014). A match cannot span a line break, because \s covers \r and
+	// \n, so matching the whole body finds every URL the line-by-line scan found
+	// on the lines it reached.
+	for _, match := range urlRe.FindAllString(body, -1) {
+		trimmed := strings.TrimRight(match, ".,;)")
+		matches[trimmed] = struct{}{}
 	}
 
 	for _, field := range []string{"List-Unsubscribe", "Message-ID"} {
@@ -380,7 +383,9 @@ func collectURLs(header mail.Header, body string) []string {
 
 	out := make([]string, 0, len(matches))
 	for match := range matches {
-		out = append(out, match)
+		// A match is a slice of the string it was found in, and the body can be
+		// megabytes: a copy keeps a returned URL from holding all of it in memory.
+		out = append(out, strings.Clone(match))
 	}
 	sort.Strings(out)
 	return out

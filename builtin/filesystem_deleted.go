@@ -644,7 +644,7 @@ func (s *realNTFSSession) ScanDeleted() (fsDeletedScan, error) {
 		if row.inUse {
 			continue
 		}
-		scan.add(ntfsDeletedEntry(row, paths[row.record], content[row.record]))
+		scan.add(ntfsDeletedEntry(row, paths[row.record].path, content[row.record]))
 	}
 
 	s.recovery.remember(scan.Entries)

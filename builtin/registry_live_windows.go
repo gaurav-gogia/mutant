@@ -146,13 +146,15 @@ func (b *liveRegistryBackend) getValue(path, name string) (regEntry, error) {
 //
 // A nil buffer is what makes the first call cheap: RegQueryValueEx with no
 // output buffer reports the type and the size it would need. ErrShortBuffer is
-// still tolerated, as before, rather than relied on not to happen.
+// still tolerated, as before, rather than relied on not to happen. Only the
+// default branch uses that size, to read the bytes of a type it does not
+// decode; the typed getters size their own buffers.
 func readLiveRegistryValue(k registry.Key, name string) (regEntry, error) {
 	displayName := name
 	if displayName == "" {
 		displayName = "(default)"
 	}
-	_, valType, err := k.GetValue(name, nil)
+	size, valType, err := k.GetValue(name, nil)
 	if err != nil && err != registry.ErrShortBuffer {
 		return regEntry{}, err
 	}
@@ -198,11 +200,54 @@ func readLiveRegistryValue(k registry.Key, name string) (regEntry, error) {
 		}
 		return regEntry{name: displayName, typ: "REG_BINARY", data: stringObj(hex.EncodeToString(buf)), raw: buf}, nil
 	default:
-		// An unrecognised type reports no data on a live key, so there are no bytes
-		// to attach either. The regf backend hex-encodes the same types instead of
-		// dropping them; that difference predates this and is left alone here.
-		return regEntry{name: displayName, typ: fmt.Sprintf("REG_TYPE(%d)", valType), data: stringObj("")}, nil
+		// Every other type -- REG_NONE, REG_DWORD_BIG_ENDIAN, REG_LINK, the three
+		// resource descriptor types, and numbers no Windows header names -- comes
+		// back as its stored bytes: hex in data, and the same bytes in raw, which
+		// regEntryHash reports as data_bytes. That is what reg_get_value and
+		// reg_enum_values document for a type the reader does not recognise, and
+		// what the regf backend does with each type it does not decode itself.
+		//
+		// This branch used to answer data "" with no bytes, so a 140-byte
+		// REG_RESOURCE_LIST read as an empty value (M26-NET-006).
+		raw, err := readLiveRegistryRaw(k, name, valType, size)
+		if err != nil {
+			return regEntry{}, err
+		}
+		return regEntry{name: displayName, typ: fmt.Sprintf("REG_TYPE(%d)", valType), data: stringObj(hex.EncodeToString(raw)), raw: raw}, nil
 	}
+}
+
+// readLiveRegistryRaw reads the stored bytes of a value whose type the caller
+// has already read as valType, and whose length that same read reported as
+// size.
+//
+// The value can change between the two reads. Deleted, it comes back as
+// registry.ErrNotExist, which getValue reports as not found, as it does when a
+// typed getter meets the same race. Retyped, it is refused, because its bytes
+// would be reported under a type that is no longer its own. Grown past size, it
+// no longer fits and nothing is read, so that is refused too, naming both
+// lengths. A value that shrank still fits, and RegQueryValueEx reports its new
+// length.
+//
+// The buffer is allocated here and handed on as raw, so, as with
+// GetBinaryValue's, nothing else holds it. An empty value yields an empty
+// slice and not nil, so data_bytes is present and empty, as it is for a
+// zero-length REG_BINARY on this backend.
+func readLiveRegistryRaw(k registry.Key, name string, valType uint32, size int) ([]byte, error) {
+	buf := make([]byte, size)
+	n, typ, err := k.GetValue(name, buf)
+	// With an empty buffer RegQueryValueEx only reports the length, without an
+	// error, so a value that was empty and no longer is shows up as n > len(buf).
+	if err == registry.ErrShortBuffer || (err == nil && n > len(buf)) {
+		return nil, fmt.Errorf("value grew from %d to %d bytes while it was being read", size, n)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if typ != valType {
+		return nil, fmt.Errorf("value changed type from %d to %d while it was being read", valType, typ)
+	}
+	return buf[:n], nil
 }
 
 func (b *liveRegistryBackend) deletedKeys() []string     { return nil }

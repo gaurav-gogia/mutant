@@ -53,7 +53,7 @@ func FsDeleted(args ...object.Object) (result object.Object) {
 		if r.inUse {
 			continue
 		}
-		entries = append(entries, deletedEntryHash(r, paths[r.record], recovered[r.record]))
+		entries = append(entries, deletedEntryHash(r, paths[r.record].path, recovered[r.record]))
 	}
 
 	return resultAndError(makeHashObject(map[string]object.Object{

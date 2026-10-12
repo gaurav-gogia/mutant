@@ -66,25 +66,47 @@ func DetectInjection(args ...object.Object) object.Object {
 
 	reasons := make([]object.Object, 0)
 	matched := make([]object.Object, 0)
+	chance := make([]object.Object, 0)
 	score := int64(0)
 	shellHits := 0
 
-	mzOffsets := carveOffsets(data, []byte{0x4d, 0x5a})
-	if len(mzOffsets) > 1 {
+	// Only a confirmed PE header counts: an MZ marker whose e_lfanew leads to
+	// "PE\0\0", the test mem_find_pe applies. Every bare 0x4D 0x5A pair used to
+	// count, and random bytes hold one about every 64 KiB, so a buffer of a few
+	// hundred KiB scored 40 for PE headers it did not contain (M26-ART-026).
+	peHeaders := confirmedPEHeaders(data)
+	if peHeaders > 1 {
 		score += 40
 		reasons = append(reasons, stringObj("multiple_pe_headers"))
 	}
 
+	// A signature shorter than injectionDensityBelowBytes counts by density,
+	// not presence: only when it turns up more often than random bytes of the
+	// same length would explain (signatureBeyondChance). Random bytes hold the
+	// two-byte cld; call prologue about once per 64 KiB, so counted on presence
+	// it scored 20 in almost every buffer of a few hundred KiB, and with the 40
+	// that bare MZ pairs used to score, random bytes came to 60 and detected
+	// (M26-ART-026). A count that chance explains is not dropped: it is listed
+	// in chance_signatures, beside the count random bytes would hold, and adds
+	// nothing to the score. The longer signatures count on presence.
 	for _, s := range injectionSignatures {
 		hits := len(carveOffsets(data, s.sig))
-		if hits > 0 {
-			score += s.weight
-			shellHits += hits
-			matched = append(matched, makeHashObject(map[string]object.Object{
-				"name":  stringObj(s.name),
-				"count": intObj(int64(hits)),
-			}))
+		if hits == 0 {
+			continue
 		}
+		if len(s.sig) < injectionDensityBelowBytes {
+			expected := randomPatternHits(len(data)-len(s.sig)+1, 8*len(s.sig))
+			if !signatureBeyondChance(hits, expected) {
+				chance = append(chance, chanceSignatureEntry(s.name, hits, expected))
+				continue
+			}
+		}
+		score += s.weight
+		shellHits += hits
+		matched = append(matched, makeHashObject(map[string]object.Object{
+			"name":  stringObj(s.name),
+			"count": intObj(int64(hits)),
+		}))
 	}
 
 	// GetPC via "call $+5; pop reg" — a position-independent-code hallmark that a
@@ -119,15 +141,89 @@ func DetectInjection(args ...object.Object) object.Object {
 	return resultAndError(makeHashObject(map[string]object.Object{
 		"detected":           boolObj(score >= 60),
 		"score":              intObj(score),
-		"pe_headers":         intObj(int64(len(mzOffsets))),
+		"pe_headers":         intObj(int64(peHeaders)),
 		"shellcode_hits":     intObj(int64(shellHits)),
 		"matched_signatures": &object.Array{Elements: matched},
+		"chance_signatures":  &object.Array{Elements: chance},
 		"reasons":            &object.Array{Elements: reasons},
 	}), nil)
 }
 
+// injectionDensityBelowBytes is the signature length below which
+// detect_injection weighs a signature by density rather than presence.
+// Uniformly random bytes hold a given two-byte pattern about once per 64 KiB,
+// a three-byte one about once per 16 MiB and a four-byte one about once per
+// 4 GiB.
+const injectionDensityBelowBytes = 4
+
+// injectionChanceLevel is how rare the hit count of a signature shorter than
+// injectionDensityBelowBytes has to be in random bytes before detect_injection
+// counts the signature: a count that more than one buffer of random bytes in a
+// thousand would reach is chance, not evidence.
+const injectionChanceLevel = 1e-3
+
+// confirmedPEHeaders counts the distinct PE headers in data. A header is
+// confirmed the way mem_find_pe confirms one, by an MZ marker whose e_lfanew
+// leads to "PE\0\0" (validatePEAt); two markers that lead to the same header
+// are one header.
+func confirmedPEHeaders(data []byte) int {
+	headers := map[int]bool{}
+	for _, mz := range carveOffsets(data, []byte{0x4d, 0x5a}) {
+		if pe, _, ok := validatePEAt(data, mz); ok {
+			headers[pe] = true
+		}
+	}
+	return len(headers)
+}
+
+// randomPatternHits is how many times a pattern that fixes bits bits turns up
+// on average when it is tried at positions places in uniformly random bytes.
+func randomPatternHits(positions, bits int) float64 {
+	if positions <= 0 {
+		return 0
+	}
+	return math.Ldexp(float64(positions), -bits)
+}
+
+// signatureBeyondChance reports whether hits occurrences of a pattern are more
+// than random bytes would explain, where random bytes hold expected occurrences
+// on average: whether P(X >= hits), for X ~ Poisson(expected), is at most
+// injectionChanceLevel. The tail is bounded from above rather than estimated.
+// For k > expected each term after P(X = k) is at most expected/(k+1) times the
+// one before it, so P(X >= k) <= P(X = k) / (1 - expected/(k+1)), and a count
+// passes only when even that bound is small enough.
+func signatureBeyondChance(hits int, expected float64) bool {
+	if hits <= 0 {
+		return false
+	}
+	if expected <= 0 {
+		// Random bytes this short cannot hold the pattern at all.
+		return true
+	}
+	k := float64(hits)
+	if k <= expected {
+		return false
+	}
+	logFactorial, _ := math.Lgamma(k + 1)
+	logPointMass := -expected + k*math.Log(expected) - logFactorial
+	logTail := logPointMass - math.Log1p(-expected/(k+1))
+	return logTail <= math.Log(injectionChanceLevel)
+}
+
+// chanceSignatureEntry describes a signature whose hits chance explains: how
+// many there were, and how many random bytes of the same length hold on average.
+func chanceSignatureEntry(name string, hits int, expected float64) object.Object {
+	return makeHashObject(map[string]object.Object{
+		"name":     stringObj(name),
+		"count":    intObj(int64(hits)),
+		"expected": &object.Float{Value: expected},
+	})
+}
+
 // injectionSignature is a named, weighted byte pattern characteristic of
-// shellcode / injected code. Weights feed the injection score (capped at 100).
+// shellcode / injected code. Weights feed the injection score (capped at 100);
+// a signature shorter than injectionDensityBelowBytes adds its weight only when
+// chance does not explain its hits (signatureBeyondChance).
 type injectionSignature struct {
 	name   string
 	weight int64

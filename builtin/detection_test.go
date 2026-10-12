@@ -311,11 +311,28 @@ func dtWriteMemoryFixture(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "inject.bin")
-	data := []byte{0x4d, 0x5a, 0x00, 0x00, 0x90, 0x90, 0x90, 0xfc, 0xe8, 0x4d, 0x5a}
+	// Two PE images and a NOP sled: 40 for there being two PE headers and 25
+	// for the sled. Each image is a DOS header whose e_lfanew leads to
+	// "PE\0\0", which is what makes it a PE header. The fixture used to be two
+	// bare "MZ" byte pairs around a cld; call, byte pairs that random bytes hold
+	// about once per 64 KiB each (M26-ART-026).
+	data := append(dtPEImage(), dtPEImage()...)
+	data = append(data, bytes.Repeat([]byte{0x90}, 16)...)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	return path
+}
+
+// dtPEImage is a byte string mem_find_pe confirms as a PE header: a 64-byte
+// DOS header whose e_lfanew (+0x3C) points just past it, at "PE\0\0" and an
+// i386 machine type.
+func dtPEImage() []byte {
+	image := make([]byte, 0x46)
+	image[0], image[1] = 'M', 'Z'
+	image[0x3C] = 0x40
+	copy(image[0x40:], []byte{'P', 'E', 0, 0, 0x4c, 0x01})
+	return image
 }
 
 func dtWriteFileFixtures(t *testing.T) []string {

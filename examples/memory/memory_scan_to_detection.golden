@@ -2,4 +2,4 @@
 mem_strings count: 3 err:
 mem_find_pe candidates: 1 confirmed: 0 err:
 mem_find_shellcode count: 0 err:
-detect_injection: {detected: false, matched_signatures: [], pe_headers: 1, reasons: [], score: 0, shellcode_hits: 0} err:
+detect_injection: {chance_signatures: [], detected: false, matched_signatures: [], pe_headers: 0, reasons: [], score: 0, shellcode_hits: 0} err:
