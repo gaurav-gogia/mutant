@@ -1,0 +1,49 @@
+putln("QUILLDROP  timestomping");
+
+let disk = "examples/workshop/case_quilldrop.img";
+let mft = "examples/workshop/case_quilldrop.mft";
+
+let born_before_named = fn(volume) {
+    let _, _ = fs_delete(mft);
+    let _, _ = ntfs_extract_file(volume["handle"], "$MFT", mft);
+    let _, _ = ntfs_close(volume["handle"]);
+    let records, err = mft_parse(mft);
+    if (err) {
+        putln("  cannot parse $MFT:", err);
+        return;
+    }
+    for (e in records["entries"]) {
+        if (!is_null(e["si_created"]) && !is_null(e["fn_created"]) && e["si_created"] < e["fn_created"]) {
+            putln("  born before its name:", e["path"], e["si_created_iso"], e["fn_created_iso"]);
+        }
+    }
+    putln("  checked", records["count"], "records");
+};
+
+let there, _ = fs_exists(disk);
+if (!there) {
+    putln("  missing", disk, "- see examples/workshop/README.md");
+} else {
+    let table, err = table_open(disk);
+    if (err) {
+        let volume, verr = ntfs_open(disk);
+        if (verr) {
+            putln("  not a raw disk or NTFS volume (convert an E01 to raw first):", verr);
+        } else {
+            born_before_named(volume);
+        }
+    } else {
+        let parts, _ = table_list_partitions(table["handle"]);
+        let _, _ = table_close(table["handle"]);
+        for (p in parts) {
+            if (!p["allocated"]) {
+                continue;
+            }
+            let volume, verr = ntfs_open(disk, p);
+            if (!verr) {
+                putln("  partition", p["index"], p["type_name"]);
+                born_before_named(volume);
+            }
+        }
+    }
+}

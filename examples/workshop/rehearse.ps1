@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   RUN_SHEET_2H.md tells the instructor to prepare alone before the room
-  arrives. This runs the ten beats in order and then the four deep dives, times
+  arrives. This runs the ten beats in order and then the four dfrws/ programs, times
   each one and says whether it did what the run sheet promises, so a beat that cannot work on this machine is
   found the evening before rather than in front of attendees.
 
@@ -57,7 +57,7 @@ Param(
 
 $beats = @("01_scene", "02_lure", "03_download", "04_binary", "05_timeline",
     "06_lies", "07_inventory", "08_rules", "09_verdict", "10_seal",
-    "stomp_two_clocks", "ad_redirects", "ad_cookies", "run_keys")
+    "dfrws/1_timestomp", "dfrws/2a_ad_redirects", "dfrws/2b_ad_cookies", "dfrws/3_run_keys")
 $ws = "examples/workshop"
 $caseDir = "$ws/case"
 $body = "$ws/case_quilldrop.body"
@@ -122,8 +122,8 @@ $null = Invoke-Captured -Arguments @("--version") -OutFile "$versionOut.out" -Er
 $version = (Get-Content "$versionOut.out" -ErrorAction SilentlyContinue | Select-Object -First 1)
 Remove-Item -LiteralPath "$versionOut.out", "$versionOut.err" -Force -ErrorAction SilentlyContinue
 Write-Host "  version  : $version"
-if ($version -notlike "*2.6.0*") {
-    Write-Host "             note: the workshop targets v2.6.0, which is what attendees"
+if ($version -notlike "*2.6.1*") {
+    Write-Host "             note: the workshop targets v2.6.1, which is what attendees"
     Write-Host "             will have downloaded. A newer build runs it fine; this is"
     Write-Host "             only a reminder that you are not rehearsing their binary."
 }
@@ -182,7 +182,7 @@ if ($compare) {
     Write-Host "  mode     : NO CORPUS. The goldens record real output, so every beat will"
     Write-Host "             print its `"missing`" line instead and nothing can be compared."
     Write-Host "             Build the corpus and run this again:"
-    Write-Host "               go install github.com/aoiflux/fsagen@v0.1.0"
+    Write-Host "               go install github.com/aoiflux/fsagen@latest"
     Write-Host "               .\examples\workshop\evidence\build_evidence.ps1"
 } else {
     Write-Host "  mode     : CASE. The goldens record the empty case, so they are not"
@@ -194,14 +194,14 @@ if ($mode -eq "guard") {
         Write-Host ""
         Write-Host "             This tests the guard in lib/quilldrop.mut, not the case. To"
         Write-Host "             rehearse the case itself, build the corpus first:"
-        Write-Host "               go install github.com/aoiflux/fsagen@v0.1.0"
+        Write-Host "               go install github.com/aoiflux/fsagen@latest"
         Write-Host "               .\examples\workshop\evidence\build_evidence.ps1"
     }
 } else {
     if ($haveCase) {
         $files = (Get-ChildItem -LiteralPath $caseDir -Recurse -File -ErrorAction SilentlyContinue).Count
-        Write-Host "  corpus   : $caseDir, $files files (the run sheet says 98)"
-        if ($files -ne 98) {
+        Write-Host "  corpus   : $caseDir, $files files (the run sheet says 100)"
+        if ($files -ne 100) {
             Write-Host "             MISMATCH. Check evidence/README.md before teaching this."
         }
     } else {
@@ -209,8 +209,8 @@ if ($mode -eq "guard") {
     }
     if ($haveBody) {
         $rows = (Get-Content -LiteralPath $body).Count
-        Write-Host "  timeline : $body, $rows rows (the run sheet says 131)"
-        if ($rows -ne 131) {
+        Write-Host "  timeline : $body, $rows rows (the run sheet says 136)"
+        if ($rows -ne 136) {
             Write-Host "             MISMATCH. Check evidence/README.md before teaching this."
         }
     } else {
@@ -219,7 +219,7 @@ if ($mode -eq "guard") {
 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("quilldrop-rehearse-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory -Force $tmp | Out-Null
+New-Item -ItemType Directory -Force "$tmp/dfrws" | Out-Null
 $summary = New-Object System.Collections.Generic.List[string]
 $failed = 0
 $ran = 0
@@ -234,7 +234,7 @@ foreach ($b in $beats) {
         continue
     }
     $ran++
-    Write-Host ("{0,-17} " -f $b) -NoNewline
+    Write-Host ("{0,-22} " -f $b) -NoNewline
     $watch = [Diagnostics.Stopwatch]::StartNew()
 
     $genRc = Invoke-Captured -Arguments @("gen", "--src", "$ws/$b.mut", "--dev") `
@@ -245,7 +245,7 @@ foreach ($b in $beats) {
         Write-Host "COMPILE (${elapsed}s) mutant gen refused the source"
         Get-Content "$tmp/$b.gen.out", "$tmp/$b.gen.err" -ErrorAction SilentlyContinue |
             Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
-        $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
+        $summary.Add(("{0,-22} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
         $failed++
         continue
     }
@@ -310,7 +310,7 @@ foreach ($b in $beats) {
         Write-Host "    unexpected on stderr:"
         $otherErr | Select-Object -First 10 | ForEach-Object { Write-Host "      $_" }
     }
-    $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
+    $summary.Add(("{0,-22} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
 }
 Write-Host "----------------------------------------------------------------------"
 

@@ -1,0 +1,125 @@
+# Case QUILLDROP, topic: timestomping -- the disk image dfrws/1 reads
+#
+#   fsagen --seed 88412 --playbook examples/workshop/evidence/topics/timestomp.playbook.yaml \
+#          --clean --image examples/workshop/case_quilldrop.img --image-fs ntfs \
+#          --image-size 64M --partition gpt --image-time 2026-03-12T06:00:00Z
+#
+# or: build_evidence.ps1 -Topic timestomp / build_evidence.sh --topic timestomp
+#
+# Only what the timestomp question needs, from the case's own story: the
+# clerk's ordinary documents to search through, the implant that backdates
+# itself, and the archive whose modification time is pushed back to 2024. Every
+# step is copied unchanged from ../quilldrop.playbook.yaml, which tells the
+# whole case; sweep/workshop_topics_test.go fails if the two drift apart.
+#
+# --partition gpt lays the disk out as Windows Setup does (EFI system,
+# Microsoft reserved, basic data, recovery), so dfrws/1_timestomp has to find
+# the volume rather than assume one partition. The volume keeps a change
+# journal, which records when updater.exe was really created and when its times
+# were changed.
+#
+# What a learner should find:
+# - updater.exe: $STANDARD_INFORMATION says it was created on 2025-11-04;
+#   $FILE_NAME says 09:20 on 2026-03-11. A file created before it was given its
+#   name has been timestomped. $STANDARD_INFORMATION's own change time says
+#   when the times were set, and the journal holds a BASIC_INFO_CHANGE then.
+# - bkp_20260311.zip: modified in 2024, created in 2026. Only the modification
+#   time moved, so both clocks agree on its birth.
+# - The twelve staging files the archive was built from are deleted; their MFT
+#   records and journal entries are still on the volume.
+#
+# Nothing on the host scans a file inside a disk image, so the generated PE in
+# here cannot be refused by an antivirus the way the case tree's can.
+
+start: 2026-03-11T09:00:00Z
+
+# A real disk keeps times to 100 ns, so a scheduled time gets a seeded fraction
+# of a second. An explicit time, such as the timestomp's, stays on the whole
+# second, as a stomping tool usually leaves it.
+subsecond_jitter: true
+
+actors:
+  # The clerk's user profile: where the intrusion lands.
+  - name: clerk
+    base: Users/clerk
+
+  # Ordinary business activity, so the stomped file is one record among many.
+  - name: business
+    base: Users/clerk/Documents
+
+steps:
+
+  # -- 0. Background: a normal working week ---------------------------------
+  - actor: business
+    offset: 0m
+    every: 22m
+    repeat: 40
+    actions:
+      - action: create
+        path: finance/close/wk${SEQ}_ledger.csv
+        content_len: 4096
+      - action: create
+        path: hr/onboarding/emp_${SEQ}.docx
+        content_len: 8192
+
+  # -- 4. The implant installs itself and backdates itself (09:20) ----------
+  - actor: clerk
+    offset: 20m
+    actions:
+      - action: create
+        path: AppData/Roaming/SyncAgent/updater.exe
+        content_len: 94208
+        content_kind: bytes
+        pe:
+          machine: amd64
+          subsystem: gui
+          timestamp: 0
+          imports:
+            - kernel32.dll!CreateFileW
+            - kernel32.dll!WriteFile
+            - advapi32.dll!RegSetValueExW
+            - ws2_32.dll!connect
+          version:
+            file_version: 10.0.19041.1
+            company_name: Example Corp
+            file_description: SyncAgent Updater
+      - action: timestomp
+        path: AppData/Roaming/SyncAgent/updater.exe
+        atime: "2025-11-04T10:12:00Z"
+        mtime: "2025-11-04T10:12:00Z"
+        crtime: "2025-11-04T10:12:00Z"
+
+  # -- 7. Collection staged (00:00, the small hours) ------------------------
+  - actor: clerk
+    offset: 15h
+    every: 2s
+    repeat: 12
+    actions:
+      - action: create
+        path: AppData/Local/Temp/staging/stg_${ITER}.tmp
+        id: staging
+        content_len: 32768
+        content_kind: bytes
+
+  # -- 8. The archive (00:10) -----------------------------------------------
+  - actor: clerk
+    offset: 15h10m
+    actions:
+      - action: archive
+        path: AppData/Local/Temp/bkp_20260311.zip
+        archive:
+          method: store
+          comment: QUILLDROP staging
+          base: AppData/Local/Temp/staging
+          member_refs:
+            - staging
+
+  # -- 9. The archive backdated, the staging deleted (00:15) ----------------
+  - actor: clerk
+    offset: 15h15m
+    actions:
+      - action: mace
+        path: AppData/Local/Temp/bkp_20260311.zip
+        mtime: 2024-07-02T11:00:00Z
+      - action: delete
+        refs: staging

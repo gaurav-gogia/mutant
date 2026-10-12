@@ -951,6 +951,6 @@ language is for.
   semantics
 - **[Why Mutant, and when not to](COMPARISON.md)** — how this compares with
   plaso, Velociraptor, osquery and a YARA+Sigma pipeline
-- **`examples/`** — 127 runnable programs, including `examples/workshop/` for
+- **`examples/`** — 131 runnable programs, including `examples/workshop/` for
   guided exercises and `examples/forensics/supertimeline.mut` for a longer
   timeline build

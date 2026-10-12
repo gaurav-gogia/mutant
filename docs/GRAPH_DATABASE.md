@@ -109,13 +109,13 @@ enum EdgeType { DATA, KNOWS, AUTHORED };
 let db, err = db_open();
 if (err) { putln("[error] db_open: ", err); };
 
-let alice, err = db_add_node(db, NodeType.PERSON);
-let bob, err = db_add_node(db, NodeType.PERSON);
+let person_a, err = db_add_node(db, NodeType.PERSON);
+let person_b, err = db_add_node(db, NodeType.PERSON);
 let doc, err = db_add_node(db, NodeType.DOCUMENT);
 if (err) { putln("[error] db_add_node: ", err); };
 
-let e1, err = db_add_edge(db, alice, bob, EdgeType.KNOWS);
-let e2, err = db_add_edge(db, alice, doc, EdgeType.AUTHORED);
+let e1, err = db_add_edge(db, person_a, person_b, EdgeType.KNOWS);
+let e2, err = db_add_edge(db, person_a, doc, EdgeType.AUTHORED);
 if (err) { putln("[error] db_add_edge: ", err); };
 ```
 

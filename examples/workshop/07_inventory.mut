@@ -2,8 +2,10 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 7/10  the inventory");
 
-if (quilldrop.ready(quilldrop.root)) {
-    let zip, _ = zip_open(quilldrop.path("Users/r.mehta/AppData/Local/Temp/bkp_20260311.zip"));
+let backup = quilldrop.path("Users/clerk/AppData/Local/Temp/bkp_20260311.zip");
+
+if (quilldrop.ready(quilldrop.root) && quilldrop.ready(backup)) {
+    let zip, _ = zip_open(backup);
     let items, _ = zip_entries(zip["handle"]);
     for (e in items) {
         let when, _ = timestamp_normalize(e["modified"], "unix");

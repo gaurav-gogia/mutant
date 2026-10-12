@@ -1,0 +1,42 @@
+putln("QUILLDROP  the redirect chain");
+
+let history = "examples/workshop/case/Users/clerk/AppData/Local/Google/Chrome/User Data/Default/History";
+let sql = "select v.id, v.from_visit, v.transition, v.visit_time, u.url from visits v join urls u on u.id = v.url order by v.id";
+
+let how = fn(visit) {
+    let transition = visit["transition"] & 4294967295;
+    if (transition & 2147483648 > 0) {
+        return "server redirect";
+    }
+    if (transition & 1073741824 > 0) {
+        return "client redirect";
+    }
+    return "navigated";
+};
+
+let chain_end = fn(visit) {
+    return visit["transition"] & 536870912 > 0 && how(visit) != "navigated";
+};
+
+let there, _ = fs_exists(history);
+if (!there) {
+    putln("  missing", history, "- see examples/workshop/README.md");
+} else {
+    let rows, _ = sqlite_query(history, sql);
+    let visits = {};
+    for (r in rows["rows"]) {
+        visits[r["id"]] = r;
+    }
+    for (r in filter(rows["rows"], chain_end)) {
+        putln("  chain ending at visit", r["id"]);
+        let hop = r;
+        while (!is_null(hop)) {
+            let when, _ = timestamp_normalize(hop["visit_time"], "webkit");
+            putln("    ", when["iso"], how(hop), hop["url"]);
+            if (how(hop) == "navigated") {
+                break;
+            }
+            hop = visits[hop["from_visit"]];
+        }
+    }
+}

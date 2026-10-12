@@ -6,18 +6,22 @@ if (quilldrop.ready(quilldrop.disk)) {
     let table, _ = table_open(quilldrop.disk);
     let parts, _ = table_list_partitions(table["handle"]);
     let _, _ = table_close(table["handle"]);
-    let ntfs = filter(parts, fn(p) {
-        return p["allocated"];
-    });
-    let volume, _ = ntfs_open(quilldrop.disk, ntfs[0]);
-    let _, _ = fs_delete(quilldrop.mft);
-    let _, _ = ntfs_extract_file(volume["handle"], "$MFT", quilldrop.mft);
-    let _, _ = ntfs_close(volume["handle"]);
-    let mft, _ = mft_parse(quilldrop.mft);
-    for (e in mft["entries"]) {
-        if (!is_null(e["fn_created"]) && e["si_created"] < e["fn_created"]) {
-            putln("  born before its name:", e["path"], e["si_created_iso"], e["fn_created_iso"]);
+    for (p in parts) {
+        if (!p["allocated"]) {
+            continue;
+        }
+        let volume, err = ntfs_open(quilldrop.disk, p);
+        if (!err) {
+            let _, _ = fs_delete(quilldrop.mft);
+            let _, _ = ntfs_extract_file(volume["handle"], "$MFT", quilldrop.mft);
+            let _, _ = ntfs_close(volume["handle"]);
+            let mft, _ = mft_parse(quilldrop.mft);
+            for (e in mft["entries"]) {
+                if (!is_null(e["si_created"]) && !is_null(e["fn_created"]) && e["si_created"] < e["fn_created"]) {
+                    putln("  born before its name:", e["path"], e["si_created_iso"], e["fn_created_iso"]);
+                }
+            }
+            putln("  partition", p["index"], mft["count"], "records");
         }
     }
-    putln(mft["count"], "records");
 }

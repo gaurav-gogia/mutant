@@ -1,0 +1,28 @@
+putln("QUILLDROP  the cookie jar");
+
+let profile = "examples/workshop/case/Users/clerk/AppData/Local/Google/Chrome/User Data/Default";
+let history = profile + "/History";
+let cookies = profile + "/Network/Cookies";
+
+let site = fn(host) {
+    let parts = tld_extract(host);
+    if (parts["etld1"] == "") {
+        return parts["domain"];
+    }
+    return parts["etld1"];
+};
+
+let there, _ = fs_exists(cookies);
+if (!there) {
+    putln("  missing", cookies, "- see examples/workshop/README.md");
+} else {
+    let visits, _ = browser_history(history);
+    let jar, _ = browser_cookies(cookies);
+    let visited = {};
+    for (v in visits["entries"]) {
+        visited[site(domain_extract(v["url"]))] = true;
+    }
+    for (c in jar["entries"]) {
+        putln("  ", site(c["host"]), c["name"], "visited:", has_key(visited, site(c["host"])));
+    }
+}

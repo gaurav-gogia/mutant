@@ -1,0 +1,107 @@
+# Case QUILLDROP, topic: malware through ads -- the redirect hops and the
+# cookie jar dfrws/2a and 2b read
+#
+#   fsagen --seed 88412 --playbook examples/workshop/evidence/topics/ads.playbook.yaml \
+#          --into-existing --meta examples/workshop/case.ads.fsagen \
+#          examples/workshop/case
+#
+# or: build_evidence.ps1 -Topic ads / build_evidence.sh --topic ads
+#
+# Only the clerk's Chrome History and Cookies, at the paths the case tree has
+# them, so dfrws/2a_ad_redirects and dfrws/2b_ad_cookies read them unchanged.
+# Every step is copied unchanged from ../quilldrop.playbook.yaml, which tells
+# the whole case; sweep/workshop_topics_test.go fails if the two drift apart.
+#
+# --into-existing merges into examples/workshop/case, overwriting these two
+# files if the case tree is already there, and --meta keeps this run's records
+# apart from the case tree's own.
+#
+# Nothing here is an executable: the history names the download but does not
+# hold it. So no antivirus has anything to refuse, and this topic builds on a
+# Windows machine with Defender on.
+#
+# What a learner should find:
+# - History: walk from_visit back from the invoice page. The search result was
+#   clicked; the two hops after it carry the server-redirect bit (0x80000000):
+#   the ad network moved the browser, nobody clicked them.
+# - Cookies: every host on the chain set one. px.tracker.test set one too,
+#   although the history never visited it: an embedded ad's tracker.
+
+start: 2026-03-11T09:00:00Z
+
+subsecond_jitter: true
+
+variables:
+  # The invoice host the email linked and the chain ended at.
+  lure_host: corp-billing.example
+  # The ad network the clerk's click went through, and a tracker its ad
+  # embedded. The clerk never visited the tracker.
+  ad_net: ads.test
+  tracker: px.tracker.test
+
+actors:
+  - name: clerk
+    base: Users/clerk
+
+steps:
+
+  # -- 2. The clerk searches for the invoice and clicks the ad (09:15) ------
+  - actor: clerk
+    offset: 16m
+    actions:
+      - action: create
+        path: AppData/Local/Google/Chrome/User Data/Default/History
+        format: chrome_history
+        history:
+          visits:
+            - url: https://corp.example/ap/queue
+              title: AP queue
+              time: 2026-03-11T08:51:00Z
+              transition: typed
+            - url: https://search.example/?q=invoice+INV-88412
+              title: invoice INV-88412 - Search
+              time: 2026-03-11T09:15:31Z
+              transition: typed
+            - url: https://clk.${VAR:ad_net}/c?ad=50513&q=INV-88412
+              time: 2026-03-11T09:16:05Z
+              from_visit: 2
+            - url: https://rtb.${VAR:ad_net}/r?ad=50513
+              time: 2026-03-11T09:16:06Z
+              from_visit: 3
+              redirect: server
+            - url: https://${VAR:lure_host}/inv/88412
+              title: Invoice INV-88412
+              time: 2026-03-11T09:16:07Z
+              from_visit: 4
+              redirect: server
+            - url: https://${VAR:lure_host}/inv/88412/download
+              title: Download statement
+              time: 2026-03-11T09:16:40Z
+              from_visit: 5
+          downloads:
+            - url: https://${VAR:lure_host}/inv/88412/download
+              target_path: C:\Users\clerk\Downloads\Invoice_88412.pdf.exe
+              start: 2026-03-11T09:16:41Z
+              end: 2026-03-11T09:16:44Z
+              received_bytes: 36864
+              total_bytes: 36864
+              mime_type: application/octet-stream
+              referrer: https://${VAR:lure_host}/inv/88412
+              tab_url: https://${VAR:lure_host}/inv/88412/download
+              tab_referrer_url: https://${VAR:lure_host}/inv/88412
+
+  # -- 2b. The cookies that click left behind (09:16) -----------------------
+  - actor: clerk
+    offset: 16m
+    actions:
+      - action: create
+        path: AppData/Local/Google/Chrome/User Data/Default/Network/Cookies
+        format: chrome_cookies
+        cookies:
+          entries:
+            - { host: corp.example, name: ap_session, value: 7c1e0b2a, created: '2026-03-11T08:51:00Z', secure: true, httponly: true }
+            - { host: .search.example, name: prefs, value: 'lang=en-GB&safe=1', created: '2026-02-03T09:00:12Z', expires: '2027-02-03T09:00:12Z', secure: true, samesite: lax }
+            - { host: '.${VAR:tracker}', name: px_id, value: 9f3d2c71e4, created: '2026-03-11T09:15:32Z', expires: '2026-06-09T09:15:32Z', secure: true, samesite: none }
+            - { host: '.${VAR:ad_net}', name: uid, value: a8e55d0c19b2, created: '2026-03-11T09:16:05Z', expires: '2027-03-11T09:16:05Z', secure: true, samesite: none }
+            - { host: 'rtb.${VAR:ad_net}', name: seg, value: 'fin,ap,b2b', created: '2026-03-11T09:16:06Z', expires: '2026-04-10T09:16:06Z', secure: true, samesite: none }
+            - { host: '${VAR:lure_host}', name: inv_sess, value: q88412s, created: '2026-03-11T09:16:07Z', secure: true, httponly: true }

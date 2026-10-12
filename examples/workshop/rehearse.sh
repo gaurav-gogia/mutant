@@ -58,7 +58,7 @@ case "$ONLY" in
     [1-9]) ONLY="0$ONLY" ;;
 esac
 
-BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal stomp_two_clocks ad_redirects ad_cookies run_keys"
+BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal dfrws/1_timestomp dfrws/2a_ad_redirects dfrws/2b_ad_cookies dfrws/3_run_keys"
 COUNT=$(echo $BEATS | wc -w | tr -d ' ')
 WS="examples/workshop"
 CASE_DIR="$WS/case"
@@ -94,8 +94,8 @@ echo "  mutant   : $MUTANT"
 VERSION=$("$MUTANT" --version 2>&1 | head -n 1)
 echo "  version  : $VERSION"
 case "$VERSION" in
-    *2.6.0*) : ;;
-    *) echo "             note: the workshop targets v2.6.0, which is what attendees"
+    *2.6.1*) : ;;
+    *) echo "             note: the workshop targets v2.6.1, which is what attendees"
        echo "             will have downloaded. A newer build runs it fine; this is"
        echo "             only a reminder that you are not rehearsing their binary." ;;
 esac
@@ -163,7 +163,7 @@ elif [ "$MODE" = guard ]; then
     echo "  mode     : NO CORPUS. The goldens record real output, so every beat will"
     echo "             print its \"missing\" line instead and nothing can be compared."
     echo "             Build the corpus and run this again:"
-    echo "               go install github.com/aoiflux/fsagen@v0.1.0"
+    echo "               go install github.com/aoiflux/fsagen@latest"
     echo "               ./examples/workshop/evidence/build_evidence.sh"
 else
     echo "  mode     : CASE. The goldens record the empty case, so they are not"
@@ -175,14 +175,14 @@ if [ "$MODE" = guard ]; then
         echo ""
         echo "             This tests the guard in lib/quilldrop.mut, not the case. To"
         echo "             rehearse the case itself, build the corpus first:"
-        echo "               go install github.com/aoiflux/fsagen@v0.1.0"
+        echo "               go install github.com/aoiflux/fsagen@latest"
         echo "               ./examples/workshop/evidence/build_evidence.sh"
     fi
 else
     if [ "$HAVE_CASE" -eq 1 ]; then
         FILES=$(find "$CASE_DIR" -type f | wc -l | tr -d ' ')
-        echo "  corpus   : $CASE_DIR, $FILES files (the run sheet says 98)"
-        if [ "$FILES" -ne 98 ]; then
+        echo "  corpus   : $CASE_DIR, $FILES files (the run sheet says 100)"
+        if [ "$FILES" -ne 100 ]; then
             echo "             MISMATCH. Check evidence/README.md before teaching this."
         fi
     else
@@ -190,8 +190,8 @@ else
     fi
     if [ "$HAVE_BODY" -eq 1 ]; then
         ROWS=$(wc -l < "$BODY" | tr -d ' ')
-        echo "  timeline : $BODY, $ROWS rows (the run sheet says 131)"
-        if [ "$ROWS" -ne 131 ]; then
+        echo "  timeline : $BODY, $ROWS rows (the run sheet says 136)"
+        if [ "$ROWS" -ne 136 ]; then
             echo "             MISMATCH. Check evidence/README.md before teaching this."
         fi
     else
@@ -200,11 +200,13 @@ else
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/quilldrop-rehearse-XXXXXXXX")
+mkdir -p "$TMP/dfrws"
 SUMMARY="$TMP/summary"
 : > "$SUMMARY"
 FAILED=0
 RUN_TOTAL=0
 SANDBOX=0
+UNPROBED=0
 RAN=0
 
 echo ""
@@ -213,7 +215,7 @@ for b in $BEATS; do
     if [ -n "$ONLY" ] && [ "$b" != "$ONLY" ] && [ "${b#*_}" != "$ONLY" ] && [ "${b%%_*}" != "$ONLY" ]; then
         continue
     fi
-    printf '%-17s ' "$b"
+    printf '%-22s ' "$b"
     RAN=$((RAN + 1))
     started=$(date +%s)
 
@@ -225,7 +227,7 @@ for b in $BEATS; do
         elapsed=$(( $(date +%s) - started ))
         echo "COMPILE (${elapsed}s) mutant gen refused the source"
         cat "$TMP/$b.gen.out" "$TMP/$b.gen.err" | sed 's/^/    /' | head -n 20
-        printf '%-17s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
+        printf '%-22s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
         FAILED=$((FAILED + 1))
         continue
     fi
@@ -236,15 +238,21 @@ for b in $BEATS; do
     RUN_TOTAL=$((RUN_TOTAL + elapsed))
     lines=$(wc -l < "$TMP/$b.out" | tr -d ' ')
 
-    # The two stderr lines that are a property of how this script invokes
-    # mutant rather than of the beat: the development-key notice, and one
-    # sandbox warning per stage where the host looks like an analysis machine.
-    # Anything else on stderr is the beat's own and is shown.
+    # The stderr lines that are a property of how this script invokes mutant,
+    # or of the host, rather than of the beat: the development-key notice, one
+    # sandbox warning per stage where the host looks like an analysis machine,
+    # and, on Linux and macOS, the one-line note that process protection has no
+    # probe that can run there. Anything else on stderr is the beat's own and is
+    # shown.
     if grep -q 'event=sandbox_detected' "$TMP/$b.err" 2>/dev/null; then
         SANDBOX=$((SANDBOX + 1))
     fi
+    if grep -q '^\[security\] process protection measured nothing ' "$TMP/$b.err" 2>/dev/null; then
+        UNPROBED=$((UNPROBED + 1))
+    fi
     grep -v '^\[dev\] ' "$TMP/$b.err" 2>/dev/null \
-        | grep -v '^\[security\] event=sandbox_detected ' > "$TMP/$b.err.other"
+        | grep -v '^\[security\] event=sandbox_detected ' \
+        | grep -v '^\[security\] process protection measured nothing ' > "$TMP/$b.err.other"
 
     status=OK
     note=""
@@ -285,7 +293,7 @@ for b in $BEATS; do
         echo "    unexpected on stderr:"
         sed 's/^/      /' "$TMP/$b.err.other" | head -n 10
     fi
-    printf '%-17s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
+    printf '%-22s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
 done
 echo "----------------------------------------------------------------------"
 
@@ -333,6 +341,13 @@ if [ "$SANDBOX" -gt 0 ]; then
     echo "warned). --dev downgrades that to a warning, which is why they ran. An"
     echo "attendee who drops --dev here is halted instead, so teach from PowerShell"
     echo "or cmd on Windows, as README.md says."
+fi
+
+if [ "$UNPROBED" -gt 0 ]; then
+    echo ""
+    echo "mutant noted that its process protection has no probe that can run on"
+    echo "this OS ($UNPROBED of the beats said so). That is a property of the host,"
+    echo "not of the beats, so it is not listed under each one."
 fi
 
 echo ""

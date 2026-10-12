@@ -2444,7 +2444,7 @@ for.
 An investigation ends in a report, not a stdout dump.
 
 ```mutant
-let opened, err = report_new("Laptop triage", {"examiner": "G. Gogia", "case_id": "IR-2026-0413"});
+let opened, err = report_new("Laptop triage", {"examiner": "example examiner", "case_id": "IR-2026-0413"});
 let narrated, err = report_text(opened, "Two hosts beaconed to the same domain within four minutes.");
 let sectioned, err = report_section(narrated, "Indicators");
 let document, err = report_table(sectioned, iocs, {"columns": ["type", "value", "first_seen"]});
@@ -2521,7 +2521,7 @@ A forensic answer is only worth what its provenance is worth. `case_open` starts
 a session that records the investigation as it happens:
 
 ```mutant
-let opened, err = case_open("IR-2026-0413", "G. Gogia", {"hash": "sha256", "role": "case_owner"});
+let opened, err = case_open("IR-2026-0413", "example examiner", {"hash": "sha256", "role": "case_owner"});
 
 let image, err = raw_open("/evidence/laptop.E01");     // recorded: path, size, digest
 let header, err = raw_read_at(image["handle"], 0, 2);  // recorded: raw_read_at x1
@@ -2566,7 +2566,7 @@ Attach before you define anything. `case_transition(ledger, "active", reason)`
 moves the case along registered, active, in_review, concluded, retained and
 disposed, and each state refuses what it cannot take: nothing is sealed while a
 case is in review, concluded or retained, and a disposed case takes nothing but
-a withdrawal and the movement of an exhibit it already holds. `case_assign(ledger, "bob", "investigator", reason)` records a
+a withdrawal and the movement of an exhibit it already holds. `case_assign(ledger, "lab examiner", "investigator", reason)` records a
 role in the case, and the ledger's assignments decide the role each examiner
 attaches under. Keys and grants are never read back from the ledger.
 
@@ -2582,8 +2582,8 @@ case_transition(ledger, "active", "evidence received");
 
 **An exhibit has a custody chain.** `evidence_intake(ledger, "EXH-1", path)`
 takes a file into the attached case: it is hashed with SHA-256 and the ledger
-records who holds it. `evidence_release(ledger, "EXH-1", "bob", reason)` hands
-it to another examiner the case assigns, and bob, in their own run, records
+records who holds it. `evidence_release(ledger, "EXH-1", "lab examiner", reason)` hands
+it to another examiner the case assigns, and that examiner, in their own run, records
 taking it with `evidence_accept(ledger, "EXH-1", path)`, which hashes what they
 were handed and refuses a file that does not match the intake unless they state
 what happened with `{"discrepancy": "..."}`. `evidence_return` returns an
@@ -2598,8 +2598,8 @@ an accept by anybody but the person it was released to, or has a hash check its
 own digests contradict.
 
 ```mutant
-evidence_intake(ledger, "EXH-1", "evidence/laptop.E01", {"received_from": "DC Rao"});
-evidence_release(ledger, "EXH-1", "bob", "to the lab for imaging");
+evidence_intake(ledger, "EXH-1", "evidence/laptop.E01", {"received_from": "submitting officer"});
+evidence_release(ledger, "EXH-1", "lab examiner", "to the lab for imaging");
 let history, err = evidence_history(ledger, {"exhibit": "EXH-1"});
 putln(history["exhibits"][0]["where"]);
 ```

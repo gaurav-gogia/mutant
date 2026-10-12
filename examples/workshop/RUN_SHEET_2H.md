@@ -13,11 +13,16 @@ them.
 
 ## Before anyone arrives
 
-1. `go install github.com/aoiflux/fsagen@v0.1.0` — the version, not `@latest`,
-   which is now v0.2.0 — and run
-   `.\examples\workshop\evidence\build_evidence.ps1` on your own machine.
+1. `go install github.com/aoiflux/fsagen@latest` and run
+   `.\examples\workshop\evidence\build_evidence.ps1` on your own machine. It
+   checks that this fsagen has every feature the playbooks use, then builds the
+   disk image and the case tree. If the case tree fails, it also builds the ads
+   and registry topics, so the deep dives still have their input.
+   `-Topic timestomp,ads,registry` builds only what the four deep dives read,
+   with no executable outside the image. Hand out one fsagen release to the room: a
+   newer generator version writes other bytes for the same seed.
    Confirm it finishes and check the file count against
-   [evidence/README.md](evidence/README.md): **98 files, 131 timeline rows**.
+   [evidence/README.md](evidence/README.md): **100 files, 136 timeline rows**.
    Generate on **NTFS**. On a volume with no birth time the script still
    produces a corpus, but the timeline has no creation times and beat 6's
    central finding cannot fire. Measured on WSL ext4; **APFS is unmeasured and
@@ -31,7 +36,7 @@ them.
    generated PE files and its verdict is not stable across runs; Windows Search
    adds an `OECustomProperty` stream to `.eml` files in indexed folders within
    seconds, which would corrupt beat 3.
-3. Build or download **v2.6.0**. Every program uses only v2.6.0 builtins;
+3. Build or download **v2.6.1**. Every program uses only v2.6.0 builtins;
    running it on a newer build is fine, but the release is what attendees will
    have.
 4. Decide the password story. `--dev` is simplest and is what the README
@@ -177,12 +182,15 @@ custody buys you. Put the word back and run it once more.
 
 ---
 
-## The four deep dives
+## The three DFRWS topics — `dfrws/`
 
-Each has the same ten-minute shape as a beat. Use one in place of a beat, run
-them after the seal, or spend the thirty minutes below on them.
+These are the outline's hands-on segments, and they come first when time is
+short. Each program stands alone and names its input on one line, so it can run
+on evidence the room brings as well as on the case. Each has the same
+ten-minute shape as a beat. [dfrws/README.md](dfrws/README.md) says which line
+to change for other evidence.
 
-### The two clocks — `stomp_two_clocks.mut`
+### The two clocks — `dfrws/1_timestomp.mut`
 
 **Ask:** which file says it was created before it was given its name?
 
@@ -196,18 +204,20 @@ file whose `$STANDARD_INFORMATION` creation time is earlier than its
 clocks leaves nothing here to find, so when the script prints no file, say that
 too.
 
-### The redirect chain — `ad_redirects.mut`
+### The redirect chain — `dfrws/2a_ad_redirects.mut`
 
 **Ask:** how did the browser get to the download?
 
-Chrome records each visit with `from_visit`, the visit that led to it. The
-script walks that link back from the last visit.
+Chrome records each visit with `from_visit`, the visit that led to it, and
+marks the visit that ends a redirect chain. The script walks each chain back to
+the visit that started it.
 
 **The twist:** the user clicked one ad. The ad network's own servers then
-redirected the browser on to the download page. `redirect: true` is the high bit of
-`transition`; Mutant has no hex literals, so the script names it in decimal.
+redirected the browser on to the download page. A server redirect is the high
+bit of `transition`; Mutant has no hex literals, so the script names it in
+decimal.
 
-### The cookie jar — `ad_cookies.mut`
+### The cookie jar — `dfrws/2b_ad_cookies.mut`
 
 **Ask:** which sites knew this browser was there?
 
@@ -216,9 +226,9 @@ something embedded in a page the user did visit, such as an ad or a tracker.
 Chrome encrypts cookie values. The host, name and expiry are not encrypted, and
 they are all this question needs.
 
-### The run keys — `run_keys.mut`
+### The run keys — `dfrws/3_run_keys.mut`
 
-**Ask:** what starts when r.mehta logs on, and since when?
+**Ask:** what starts when the clerk logs on, and since when?
 
 **The twist:** a key's last-write time is when it last changed, so the Run key
 dates the persistence, and that time belongs on the timeline from beat 5. The

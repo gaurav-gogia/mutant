@@ -2,7 +2,7 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP  the redirect chain");
 
-let history = quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome/History");
+let history = quilldrop.path("Users/clerk/AppData/Local/Google/Chrome/User Data/Default/History");
 let sql = "select v.id, v.from_visit, v.transition, v.visit_time, u.url from visits v join urls u on u.id = v.url order by v.id";
 let server_redirect = 2147483648;
 

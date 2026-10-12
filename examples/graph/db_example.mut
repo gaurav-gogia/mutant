@@ -16,23 +16,23 @@ let NODE_DOCUMENT = 2;
 let EDGE_KNOWS = 1;
 let EDGE_AUTHORED = 2;
 
-let alice, _ = db_add_node(db, NODE_PERSON);
-let bob, _ = db_add_node(db, NODE_PERSON);
-let carol, _ = db_add_node(db, NODE_PERSON);
+let person_a, _ = db_add_node(db, NODE_PERSON);
+let person_b, _ = db_add_node(db, NODE_PERSON);
+let person_c, _ = db_add_node(db, NODE_PERSON);
 let doc, err = db_add_node(db, NODE_DOCUMENT);
 check(err, "db_add_node document");
-putf("added nodes: alice=%v bob=%v carol=%v doc=%v\n", alice, bob, carol, doc);
+putf("added nodes: person_a=%v person_b=%v person_c=%v doc=%v\n", person_a, person_b, person_c, doc);
 
-let e1, _ = db_add_edge(db, alice, bob, EDGE_KNOWS);
-let e2, _ = db_add_edge(db, bob, carol, EDGE_KNOWS);
-let e3, err = db_add_edge(db, alice, doc, EDGE_AUTHORED);
+let e1, _ = db_add_edge(db, person_a, person_b, EDGE_KNOWS);
+let e2, _ = db_add_edge(db, person_b, person_c, EDGE_KNOWS);
+let e3, err = db_add_edge(db, person_a, doc, EDGE_AUTHORED);
 check(err, "db_add_edge authored");
 putf("added edges: %v %v %v\n", e1, e2, e3);
 
-db_index_prop(db, alice, "name", "Alice");
-db_index_prop(db, bob, "name", "Bob");
-let _, err = db_index_prop(db, carol, "name", "Carol");
-check(err, "db_index_prop Carol");
+db_index_prop(db, person_a, "name", "Person A");
+db_index_prop(db, person_b, "name", "Person B");
+let _, err = db_index_prop(db, person_c, "name", "Person C");
+check(err, "db_index_prop Person C");
 putln("indexed properties");
 
 let stats, err = db_stats(db);
@@ -40,15 +40,15 @@ check(err, "db_stats");
 putf("graph stats — nodes: %v  edges: %v\n", stats["nodes"], stats["edges"]);
 
 putln("");
-putln("=== BFS from Alice (depth 2, outbound) ===");
-let bfs, err = db_bfs(db, alice, 2, "out");
+putln("=== BFS from Person A (depth 2, outbound) ===");
+let bfs, err = db_bfs(db, person_a, 2, "out");
 check(err, "db_bfs");
 putf("nodes reachable: %d\n", len(bfs["nodes"]));
 putf("edges traversed: %d\n", len(bfs["edges"]));
 
 putln("");
-putln("=== Shortest Path: Alice -> Carol ===");
-let path, err = db_shortest_path(db, alice, carol);
+putln("=== Shortest Path: Person A -> Person C ===");
+let path, err = db_shortest_path(db, person_a, person_c);
 check(err, "db_shortest_path");
 putf("path node count: %d\n", len(path));
 for (id in path) {

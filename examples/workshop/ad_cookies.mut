@@ -2,11 +2,11 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP  the cookie jar");
 
-let chrome = quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome");
+let chrome = quilldrop.path("Users/clerk/AppData/Local/Google/Chrome/User Data/Default");
 
-if (quilldrop.ready(chrome + "/Cookies")) {
+if (quilldrop.ready(chrome + "/Network/Cookies")) {
     let history, _ = browser_history(chrome + "/History");
-    let jar, _ = browser_cookies(chrome + "/Cookies");
+    let jar, _ = browser_cookies(chrome + "/Network/Cookies");
     let visited = {};
     for (v in history["entries"]) {
         visited[tld_extract(domain_extract(v["url"]))["etld1"]] = true;

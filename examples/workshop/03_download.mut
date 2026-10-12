@@ -2,12 +2,12 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 3/10  the download");
 
-let dropped = quilldrop.path("Users/r.mehta/Downloads/Invoice_MRD-88412.pdf.exe");
+let dropped = quilldrop.path("Users/clerk/Downloads/Invoice_88412.pdf.exe");
 
-if (quilldrop.ready(quilldrop.root)) {
+if (quilldrop.ready(quilldrop.root) && quilldrop.ready(dropped)) {
     let kind, _ = fs_magic(dropped);
     putln("  magic", kind["type"], kind["mime"]);
-    let hist, _ = sqlite_query(quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome/History"), "select url from urls");
+    let hist, _ = sqlite_query(quilldrop.path("Users/clerk/AppData/Local/Google/Chrome/User Data/Default/History"), "select url from urls");
     for (r in hist["rows"]) {
         putln("  visited", r["url"]);
     }

@@ -1,0 +1,90 @@
+# Case QUILLDROP, topic: malicious registry entries -- the hive dfrws/3 reads
+#
+#   fsagen --seed 88412 --playbook examples/workshop/evidence/topics/registry.playbook.yaml \
+#          --into-existing --meta examples/workshop/case.registry.fsagen \
+#          examples/workshop/case
+#
+# or: build_evidence.ps1 -Topic registry / build_evidence.sh --topic registry
+#
+# Only the clerk's NTUSER.DAT, as it stood that morning and after the implant
+# added itself, at the path the case tree has it, so dfrws/3_run_keys reads it
+# unchanged. Every step is copied unchanged from ../quilldrop.playbook.yaml,
+# which tells the whole case; sweep/workshop_topics_test.go fails if the two
+# drift apart.
+#
+# --into-existing merges into examples/workshop/case, overwriting the hive if
+# the case tree is already there, and --meta keeps this run's records apart
+# from the case tree's own.
+#
+# A hive is not an executable, so no antivirus has anything to refuse, and
+# this topic builds on a Windows machine with Defender on.
+#
+# What a learner should find:
+# - Software\Microsoft\Windows\CurrentVersion\Run: SyncAgent starts a program
+#   from the clerk's AppData\Roaming. The key's last-write time, 09:22 on
+#   2026-03-11, is when it was added; the other values were there in 2025.
+# - Decoy: VendorCNotes is installed per user under AppData\Local\Programs, a
+#   path a naive rule flags too. Where a value points is a question, not a
+#   verdict; its time is what tells it apart.
+# - RunOnce holds an ordinary cleanup from the evening before.
+
+start: 2026-03-11T09:00:00Z
+
+subsecond_jitter: true
+
+actors:
+  - name: clerk
+    base: Users/clerk
+
+steps:
+
+  # -- 0a. The clerk's own hive, as it stood that morning --------------------
+  - actor: clerk
+    offset: 0m
+    actions:
+      - action: create
+        path: NTUSER.DAT
+        format: regf
+        registry:
+          keys:
+            - path: Software\Microsoft\Windows\CurrentVersion\Run
+              last_written: 2025-09-15T08:12:40Z
+              values:
+                - { name: VendorAChat, data: '"C:\Program Files\Vendor A\Chat\chat.exe" --minimized' }
+                - { name: VendorBSync, data: '"C:\Program Files (x86)\Vendor B\Sync\fsync.exe" /background' }
+                - { name: VendorCNotes, data: 'C:\Users\clerk\AppData\Local\Programs\Vendor C Notes\notes.exe' }
+            - path: Software\Microsoft\Windows\CurrentVersion\RunOnce
+              last_written: 2026-03-10T17:02:11Z
+              values:
+                - { name: VendorDCleanup, data: '"C:\Program Files\Vendor D\cleanup.exe" /once' }
+            - path: Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+              last_written: 2025-06-02T10:30:00Z
+              values:
+                - { name: HideFileExt, type: REG_DWORD, data: "1" }
+
+  # -- 5. Persistence (09:22) -----------------------------------------------
+  # The implant adds itself to the Run key, which moves the key's last-write
+  # time to now.
+  - actor: clerk
+    offset: 22m
+    actions:
+      - action: update
+        path: NTUSER.DAT
+        format: regf
+        registry:
+          keys:
+            - path: Software\Microsoft\Windows\CurrentVersion\Run
+              last_written: 2026-03-11T09:22:00Z
+              values:
+                - { name: VendorAChat, data: '"C:\Program Files\Vendor A\Chat\chat.exe" --minimized' }
+                - { name: VendorBSync, data: '"C:\Program Files (x86)\Vendor B\Sync\fsync.exe" /background' }
+                - { name: VendorCNotes, data: 'C:\Users\clerk\AppData\Local\Programs\Vendor C Notes\notes.exe' }
+                - { name: SyncAgent, data: 'C:\Users\clerk\AppData\Roaming\SyncAgent\updater.exe' }
+            - path: Software\Microsoft\Windows\CurrentVersion\RunOnce
+              last_written: 2026-03-10T17:02:11Z
+              values:
+                - { name: VendorDCleanup, data: '"C:\Program Files\Vendor D\cleanup.exe" /once' }
+            - path: Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+              last_written: 2025-06-02T10:30:00Z
+              values:
+                - { name: HideFileExt, type: REG_DWORD, data: "1" }

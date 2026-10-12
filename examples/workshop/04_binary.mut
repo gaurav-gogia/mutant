@@ -2,9 +2,9 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 4/10  the binary");
 
-let implant = quilldrop.path("Users/r.mehta/AppData/Roaming/MeridianSync/updater.exe");
+let implant = quilldrop.path("Users/clerk/AppData/Roaming/SyncAgent/updater.exe");
 
-if (quilldrop.ready(quilldrop.root)) {
+if (quilldrop.ready(quilldrop.root) && quilldrop.ready(implant)) {
     let pe, _ = bin_pe_parse(implant);
     let built, _ = timestamp_normalize(pe["timestamp"], "unix");
     let ih, _ = imphash(implant);

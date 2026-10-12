@@ -2,8 +2,10 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 2/10  the lure");
 
-if (quilldrop.ready(quilldrop.root)) {
-    let raw, _ = fs_read(quilldrop.path("Users/r.mehta/Inbox/invoice.eml"));
+let lure = quilldrop.path("Users/clerk/Inbox/invoice.eml");
+
+if (quilldrop.ready(quilldrop.root) && quilldrop.ready(lure)) {
+    let raw, _ = fs_read(lure);
     let msg, _ = email_parse(raw);
     putln("  from", msg["from"]);
     putln("  subject", msg["subject"]);

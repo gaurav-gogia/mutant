@@ -63,7 +63,7 @@ Check it:
 
 ```bash
 $ mutant --version
-Version: 2.6.0
+Version: 2.6.1
 ```
 
 Now write a first program. Call it `hello.mut`:
@@ -565,7 +565,7 @@ $ printf '%s' "$SECRET" | mutant gen --src triage.mut --password-stdin
 - **[Language reference](MUTANT_LANGUAGE_REFERENCE.md)** — structs, enums,
   macros, concurrency (`spawn`, channels, `pmap`), and the `bytes` type for
   binary data.
-- **[`examples/`](../examples/)** — 127 runnable programs grouped by subject.
+- **[`examples/`](../examples/)** — 131 runnable programs grouped by subject.
   `examples/workshop/` is the closest thing to a continuation of this tutorial.
 - **[What is Mutant?](WHAT_IS_MUTANT.md)** — why the language exists and what it
   is for.

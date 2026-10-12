@@ -1,0 +1,34 @@
+putln("QUILLDROP  the run keys");
+
+let hive = "examples/workshop/case/Users/clerk/NTUSER.DAT";
+let bases = ["Software\\Microsoft\\Windows\\CurrentVersion", "Microsoft\\Windows\\CurrentVersion", "Wow6432Node\\Microsoft\\Windows\\CurrentVersion"];
+let odd = "(?i)appdata|programdata|powershell|\\btemp\\b";
+
+let there, _ = fs_exists(hive);
+if (!there) {
+    putln("  missing", hive, "- see examples/workshop/README.md");
+} else {
+    let reg, _ = hive_open(hive);
+    for (base in bases) {
+        let keys, err = hive_list_keys(reg["handle"], base);
+        if (err) {
+            continue;
+        }
+        for (key in keys) {
+            let is_run, _ = regex_match("(?i)^run", key);
+            if (!is_run) {
+                continue;
+            }
+            let at = base + "\\" + key;
+            let info, _ = hive_key_info(reg["handle"], at);
+            let values, _ = hive_list_values(reg["handle"], at);
+            putln("  ", at, "written", info["last_write_iso"]);
+            for (v in values) {
+                let data = to_string(v["data"]);
+                let is_odd, _ = regex_match(odd, data);
+                putln("    ", v["name"], data, "odd:", is_odd);
+            }
+        }
+    }
+    let _, _ = hive_close(reg["handle"]);
+}

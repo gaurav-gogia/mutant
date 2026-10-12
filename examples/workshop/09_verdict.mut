@@ -2,9 +2,9 @@ import "lib/quilldrop.mut";
 
 putln("QUILLDROP 9/10  the verdict");
 
-let exhibits = ["Users/r.mehta/Inbox/invoice.eml", "Users/r.mehta/AppData/Roaming/MeridianSync/updater.exe", "Users/r.mehta/AppData/Local/Temp/bkp_20260311.zip"];
+let exhibits = ["Users/clerk/Inbox/invoice.eml", "Users/clerk/AppData/Roaming/SyncAgent/updater.exe", "Users/clerk/AppData/Local/Temp/bkp_20260311.zip"];
 
-if (quilldrop.ready(quilldrop.root)) {
+if (quilldrop.ready(quilldrop.root) && quilldrop.ready(quilldrop.path(exhibits[1])) && quilldrop.ready(quilldrop.path(exhibits[2]))) {
     let _, _ = case_open("QUILLDROP", "workshop", {"hash": "sha256"});
     for (name in exhibits) {
         let e, _ = case_evidence(quilldrop.path(name));
