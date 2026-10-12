@@ -8,14 +8,14 @@
 # repository-relative paths. This is the twin of rehearse.ps1.
 #
 # What it is for. RUN_SHEET_2H.md tells the instructor to prepare alone before
-# the room arrives. This runs all ten beats in order, times each one and says
-# whether it did what the run sheet promises, so a beat that cannot work on
+# the room arrives. This runs the ten beats in order and then the four deep
+# dives, times each one and says whether it did what the run sheet promises, so a beat that cannot work on
 # this machine is found the evening before rather than in front of attendees.
 #
-# It behaves differently depending on what is on disk, because the ten .golden
+# It behaves differently depending on what is on disk, because the .golden
 # files describe the empty case and not the solved one:
 #
-#   no corpus   the ten beats each print one "missing" line and exit cleanly.
+#   no corpus   every program prints one "missing" line and exits cleanly.
 #               That is exactly what the .golden files record, so every beat is
 #               compared against its golden byte for byte.
 #   corpus      the goldens no longer apply. A beat passes if it exits zero,
@@ -58,7 +58,8 @@ case "$ONLY" in
     [1-9]) ONLY="0$ONLY" ;;
 esac
 
-BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal"
+BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal stomp_two_clocks ad_redirects ad_cookies run_keys"
+COUNT=$(echo $BEATS | wc -w | tr -d ' ')
 WS="examples/workshop"
 CASE_DIR="$WS/case"
 BODY="$WS/case_quilldrop.body"
@@ -93,8 +94,8 @@ echo "  mutant   : $MUTANT"
 VERSION=$("$MUTANT" --version 2>&1 | head -n 1)
 echo "  version  : $VERSION"
 case "$VERSION" in
-    *2.5.0*) : ;;
-    *) echo "             note: the story targets v2.5.0, which is what attendees"
+    *2.6.0*) : ;;
+    *) echo "             note: the workshop targets v2.6.0, which is what attendees"
        echo "             will have downloaded. A newer build runs it fine; this is"
        echo "             only a reminder that you are not rehearsing their binary." ;;
 esac
@@ -127,7 +128,7 @@ for b in $BEATS; do
         EMPTY_GOLDENS=$((EMPTY_GOLDENS + 1))
     fi
 done
-if [ "$EMPTY_GOLDENS" -eq 10 ]; then
+if [ "$EMPTY_GOLDENS" -eq "$COUNT" ]; then
     GOLDEN_WORLD=empty
 elif [ "$EMPTY_GOLDENS" -eq 0 ]; then
     GOLDEN_WORLD=case
@@ -145,9 +146,9 @@ else
     echo "  evidence : present"
 fi
 case "$GOLDEN_WORLD" in
-    empty) echo "  goldens  : record the empty case ($EMPTY_GOLDENS of 10 hold the \"missing\" line)" ;;
-    case)  echo "  goldens  : record real output ($EMPTY_GOLDENS of 10 hold the \"missing\" line)" ;;
-    *)     echo "  goldens  : are mixed ($EMPTY_GOLDENS of 10 hold the \"missing\" line)" ;;
+    empty) echo "  goldens  : record the empty case ($EMPTY_GOLDENS of $COUNT hold the \"missing\" line)" ;;
+    case)  echo "  goldens  : record real output ($EMPTY_GOLDENS of $COUNT hold the \"missing\" line)" ;;
+    *)     echo "  goldens  : are mixed ($EMPTY_GOLDENS of $COUNT hold the \"missing\" line)" ;;
 esac
 if [ "$GOLDEN_WORLD" = mixed ]; then
     echo "             MIXED, which no single state of the tree produces. Some goldens"
@@ -212,7 +213,7 @@ for b in $BEATS; do
     if [ -n "$ONLY" ] && [ "$b" != "$ONLY" ] && [ "${b#*_}" != "$ONLY" ] && [ "${b%%_*}" != "$ONLY" ]; then
         continue
     fi
-    printf '%-14s ' "$b"
+    printf '%-17s ' "$b"
     RAN=$((RAN + 1))
     started=$(date +%s)
 
@@ -224,7 +225,7 @@ for b in $BEATS; do
         elapsed=$(( $(date +%s) - started ))
         echo "COMPILE (${elapsed}s) mutant gen refused the source"
         cat "$TMP/$b.gen.out" "$TMP/$b.gen.err" | sed 's/^/    /' | head -n 20
-        printf '%-14s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
+        printf '%-17s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
         FAILED=$((FAILED + 1))
         continue
     fi
@@ -284,7 +285,7 @@ for b in $BEATS; do
         echo "    unexpected on stderr:"
         sed 's/^/      /' "$TMP/$b.err.other" | head -n 10
     fi
-    printf '%-14s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
+    printf '%-17s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
 done
 echo "----------------------------------------------------------------------"
 
@@ -344,7 +345,7 @@ echo "  question, writing the file and reading the output, which is teaching tim
 echo "  and is not measured here."
 
 # A .mu is build output: mutant gen rewrites one in about a second from a
-# committed source, and *.mu is gitignored. All ten go, not only the ones this
+# committed source, and *.mu is gitignored. All of them go, not only the ones this
 # run made -- preserving whatever happened to be there already meant the litter
 # from one interrupted run stayed for every later run to step around, and made
 # the count printed below depend on history rather than on the tree. --keep is
@@ -370,11 +371,11 @@ if [ "$FAILED" -gt 0 ]; then
     echo "$FAILED beat(s) did not do what this mode expects. Not ready to teach."
     exit 1
 fi
-# "All ten" is only true of a whole run: --beat names one, and saying ten of it
+# "All" is only true of a whole run: --beat names one, and saying all of it
 # would be the kind of claim this script exists to stop someone making.
-WHICH="All ten beats"
-if [ "$RAN" -ne 10 ]; then
-    WHICH="$RAN of ten beats (--beat)"
+WHICH="All $RAN programs"
+if [ "$RAN" -ne "$COUNT" ]; then
+    WHICH="$RAN of $COUNT programs (--beat)"
 fi
 if [ "$COMPARE" -eq 1 ] && [ "$MODE" = guard ]; then
     echo "$WHICH printed what the golden records. The guard works, and the case"

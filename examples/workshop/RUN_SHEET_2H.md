@@ -31,8 +31,9 @@ them.
    generated PE files and its verdict is not stable across runs; Windows Search
    adds an `OECustomProperty` stream to `.eml` files in indexed folders within
    seconds, which would corrupt beat 3.
-3. Build or download **v2.5.0**. The story uses only v2.5.0 builtins; running it
-   on a newer build is fine, but the release is what attendees will have.
+3. Build or download **v2.6.0**. Every program uses only v2.6.0 builtins;
+   running it on a newer build is fine, but the release is what attendees will
+   have.
 4. Decide the password story. `--dev` is simplest and is what the README
    teaches; if you want them to feel the key material, use `--password-stdin`.
 5. Tell everyone: **PowerShell or cmd, never Git Bash.** The sandbox detector
@@ -175,6 +176,54 @@ recorded when the bundle was written. The seal did not catch the edit; the
 custody buys you. Put the word back and run it once more.
 
 ---
+
+## The four deep dives
+
+Each has the same ten-minute shape as a beat. Use one in place of a beat, run
+them after the seal, or spend the thirty minutes below on them.
+
+### The two clocks — `stomp_two_clocks.mut`
+
+**Ask:** which file says it was created before it was given its name?
+
+NTFS keeps two sets of times per file. `$STANDARD_INFORMATION` is what
+`SetFileTime` writes, so a timestomping tool writes it. `$FILE_NAME` is written
+when the name is made, and the usual tools leave it alone.
+
+**The twist:** the clock that is easy to change is the one every tool shows. A
+file whose `$STANDARD_INFORMATION` creation time is earlier than its
+`$FILE_NAME` one was rewritten after it was named. A tool that writes both
+clocks leaves nothing here to find, so when the script prints no file, say that
+too.
+
+### The redirect chain — `ad_redirects.mut`
+
+**Ask:** how did the browser get to the download?
+
+Chrome records each visit with `from_visit`, the visit that led to it. The
+script walks that link back from the last visit.
+
+**The twist:** the user clicked one ad. The ad network's own servers then
+redirected the browser on to the download page. `redirect: true` is the high bit of
+`transition`; Mutant has no hex literals, so the script names it in decimal.
+
+### The cookie jar — `ad_cookies.mut`
+
+**Ask:** which sites knew this browser was there?
+
+**The twist:** a cookie from a site the history never visited came from
+something embedded in a page the user did visit, such as an ad or a tracker.
+Chrome encrypts cookie values. The host, name and expiry are not encrypted, and
+they are all this question needs.
+
+### The run keys — `run_keys.mut`
+
+**Ask:** what starts when r.mehta logs on, and since when?
+
+**The twist:** a key's last-write time is when it last changed, so the Run key
+dates the persistence, and that time belongs on the timeline from beat 5. The
+`odd` rule is one regular expression. It is ours, not a vendor's, and that is
+the point: change it and run it again.
 
 ## If you have thirty more minutes
 

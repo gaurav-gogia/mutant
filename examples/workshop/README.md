@@ -2,11 +2,12 @@
 
 Ten programs, none longer than eighteen lines, that take one workstation's
 files and turn them into a signed handover. Read them in order: each one starts
-where the last one stopped.
+where the last one stopped. Four deep dives then go further into the same
+workstation: its disk, its browser and its registry.
 
-Everything here targets **Mutant v2.5.0**, the released version. Nothing in the
-story calls a builtin that shipped after the tag, so an attendee who downloaded
-the release can run all ten.
+Everything here targets **Mutant v2.6.0**, the released version. Nothing here
+calls a builtin that shipped after it, so an attendee who downloaded the release
+can run every program.
 
 ## The story
 
@@ -23,8 +24,20 @@ the release can run all ten.
 | 9 | [09_verdict.mut](09_verdict.mut) | Can we hand this to a lawyer? |
 | 10 | [10_seal.mut](10_seal.mut) | Can they tell if we changed it afterwards? |
 
-All ten share one file: [lib/quilldrop.mut](lib/quilldrop.mut), sixteen lines
-that know where the evidence is and say so when it is missing. The Sigma
+## Four deep dives
+
+One for each hands-on segment of the DFRWS outline that the story does not
+reach on its own.
+
+| Segment | File | The question it answers |
+|---------|------|-------------------------|
+| Detecting timestomping | [stomp_two_clocks.mut](stomp_two_clocks.mut) | Which file says it was created before it was given its name? |
+| Malware hidden in ads | [ad_redirects.mut](ad_redirects.mut) | How did the browser get to the download, and which hops did the user never click? |
+| Malware hidden in ads | [ad_cookies.mut](ad_cookies.mut) | Which sites left a cookie, and which of them was never visited? |
+| Malicious registry entries | [run_keys.mut](run_keys.mut) | What starts at logon, since when, and from where? |
+
+All fourteen share one file: [lib/quilldrop.mut](lib/quilldrop.mut), eighteen
+lines that know where the evidence is and say so when it is missing. The Sigma
 ruleset that step 8 runs is [quilldrop.sigma.yaml](quilldrop.sigma.yaml).
 
 Read [CASE_QUILLDROP.md](CASE_QUILLDROP.md) for the brief and
@@ -42,9 +55,10 @@ go install github.com/aoiflux/fsagen@v0.1.0
 ```
 
 Run it from the repository root. See [evidence/README.md](evidence/README.md)
-for what it produces and which findings need NTFS. Until you run it, each of
-the ten prints one line saying what is missing and exits cleanly — that is what
-the `.golden` files record.
+for what it produces and which findings need NTFS. Until you run it, each
+program prints one line saying what is missing and exits cleanly — that is what
+the `.golden` files record. The deep dives read a disk image, a registry hive and
+a cookie database as well; the same README lists them.
 
 ## Running a file
 
@@ -71,8 +85,7 @@ Use a native shell, or pass `--compat` to downgrade that to a warning.
 
 ### Language gotchas worth knowing before you start
 
-Every row here is true of **v2.5.0**. The last two are fixed on the development
-branch and will not bite you on a later release.
+Every row here is true of **v2.6.0**.
 
 | Gotcha | What you see | Fix |
 |---|---|---|
@@ -80,9 +93,11 @@ branch and will not bite you on a later release.
 | Not every builtin is fallible | the second name is always null | `mactime`, `slice`, `len`, `extract_iocs` return one value |
 | There is no `null` literal | `undefined variable: null` | a bare `return;` yields null; test with `is_null()` |
 | A program ending in a loop prints `<iterator>` | a stray line after your output | end on a `putln`, not on a `for` |
-| No string literal inside `${...}` | parse error naming the line *inside* the string | bind a local, then `${local}` |
 | Builtins are not first-class values | `map(xs, defang)` fails | `map(xs, fn(d) { return defang(d); })` |
-| `while` / C-style `for` inside a `for…in` | `loop cursor was replaced on the stack` | `for…in` nests inside `for…in` fine |
+| A missing field is null, and null does not compare | `unknown operator: 59 (INTEGER NULL)` | test it with `is_null()` before `<` |
+| There are no hex literals | `0xF0000000 is not a number` | write the decimal, `4026531840` |
+| Assigning a name you never declared | `cannot assign to y: y is not declared` | `let y = ...` first |
+| `let` inside a block makes a new variable | the outer one keeps its old value | assign without `let` to change the outer one |
 | `rand.` `sort.` `assert.` `gunzip.` under the VM | works in the REPL, fails in a compiled `.mu` | use the underscore spelling |
 
 ---

@@ -50,11 +50,24 @@ step.
 | `Finance/*.xlsx.enc` (≥3) | high-entropy content, so `fs_entropy` reads above 7.9. **Not `.xlsx`**: fsagen v0.1.0 refuses to fill a name that promises an OOXML spreadsheet, and both escapes it offers write text, which cannot clear 7.9. `.enc` is what an encrypted spreadsheet looks like on disk in any case. Measured 7.997 on the 64 KiB exhibits the playbook writes | 1 |
 | `Users/r.mehta/Inbox/invoice.eml` | real RFC 5322, one http(s) link, one attachment named `Invoice_MRD-88412.pdf.exe` | 2 |
 | `Users/r.mehta/Downloads/Invoice_MRD-88412.pdf.exe` | a PE, plus a Mark-of-the-Web whose `HostUrl` host equals the email link's host | 3 |
-| `Users/r.mehta/AppData/Local/Google/Chrome/History` | Chrome history containing that same URL | 3 |
+| `Users/r.mehta/AppData/Local/Google/Chrome/History` | Chrome history containing that same URL. For the deep dives, the last visit leads back through `from_visit` to an ad click, and at least one hop on the way has the server-redirect bit (`0x80000000`) set in `transition` | 3, `ad_redirects`, `ad_cookies` |
+| `Users/r.mehta/AppData/Local/Google/Chrome/Cookies` | Chrome's cookie database, holding cookies from the ad hosts in that chain and from at least one host the history never visited | `ad_cookies` |
+| `Users/r.mehta/NTUSER.DAT` | a regf hive whose `Software\Microsoft\Windows\CurrentVersion\Run` key names `updater.exe` | `run_keys` |
 | `Users/r.mehta/AppData/Roaming/MeridianSync/updater.exe` | a PE with `TimeDateStamp` zero and at least two imported DLLs | 4, 9 |
 | `Users/r.mehta/AppData/Local/Temp/bkp_20260311.zip` | ≥12 members whose dates predate the archive; then backdated so `mtime` lands in 2024 while `crtime` stays at its true 2026 value | 6, 7, 9 |
 | `Users/r.mehta/AppData/Local/Temp/staging/…` | deleted — present in the modelled bodyfile, absent on disk | 6 |
 | `Users/r.mehta/AppData/Roaming/persistence.reg` | a `.reg` text export writing a Run key naming `updater.exe` | 1 |
+
+One more input sits beside `case/` rather than in it:
+`examples/workshop/case_quilldrop.img`, a disk image with an MBR and one NTFS
+partition, in which at least one file's `$STANDARD_INFORMATION` creation time is
+earlier than its `$FILE_NAME` one. `stomp_two_clocks` reads it and writes
+`examples/workshop/case_quilldrop.mft` beside it, a copy of the volume's `$MFT`.
+Both are gitignored.
+
+The playbook pinned above makes none of the deep dives' inputs yet: the
+`Cookies` database, the hive, the image, or the redirect hops in the history.
+Until it does, a deep dive whose input is absent prints its "missing" line.
 
 Two rules on the bodyfile:
 

@@ -4,17 +4,17 @@
 
 .DESCRIPTION
   RUN_SHEET_2H.md tells the instructor to prepare alone before the room
-  arrives. This runs all ten beats in order, times each one and says whether it
-  did what the run sheet promises, so a beat that cannot work on this machine is
+  arrives. This runs the ten beats in order and then the four deep dives, times
+  each one and says whether it did what the run sheet promises, so a beat that cannot work on this machine is
   found the evening before rather than in front of attendees.
 
   Run it from the repository root: every beat names its evidence with
   repository-relative paths. This is the twin of rehearse.sh.
 
-  It behaves differently depending on what is on disk, because the ten .golden
+  It behaves differently depending on what is on disk, because the .golden
   files describe the empty case and not the solved one:
 
-    no corpus   the ten beats each print one "missing" line and exit cleanly.
+    no corpus   every program prints one "missing" line and exits cleanly.
                 That is exactly what the .golden files record, so every beat is
                 compared against its golden byte for byte.
     corpus      the goldens no longer apply. A beat passes if it exits zero,
@@ -56,7 +56,8 @@ Param(
 )
 
 $beats = @("01_scene", "02_lure", "03_download", "04_binary", "05_timeline",
-    "06_lies", "07_inventory", "08_rules", "09_verdict", "10_seal")
+    "06_lies", "07_inventory", "08_rules", "09_verdict", "10_seal",
+    "stomp_two_clocks", "ad_redirects", "ad_cookies", "run_keys")
 $ws = "examples/workshop"
 $caseDir = "$ws/case"
 $body = "$ws/case_quilldrop.body"
@@ -121,8 +122,8 @@ $null = Invoke-Captured -Arguments @("--version") -OutFile "$versionOut.out" -Er
 $version = (Get-Content "$versionOut.out" -ErrorAction SilentlyContinue | Select-Object -First 1)
 Remove-Item -LiteralPath "$versionOut.out", "$versionOut.err" -Force -ErrorAction SilentlyContinue
 Write-Host "  version  : $version"
-if ($version -notlike "*2.5.0*") {
-    Write-Host "             note: the story targets v2.5.0, which is what attendees"
+if ($version -notlike "*2.6.0*") {
+    Write-Host "             note: the workshop targets v2.6.0, which is what attendees"
     Write-Host "             will have downloaded. A newer build runs it fine; this is"
     Write-Host "             only a reminder that you are not rehearsing their binary."
 }
@@ -150,7 +151,7 @@ foreach ($b in $beats) {
         $emptyGoldens++
     }
 }
-if ($emptyGoldens -eq 10) { $goldenWorld = "empty" }
+if ($emptyGoldens -eq $beats.Count) { $goldenWorld = "empty" }
 elseif ($emptyGoldens -eq 0) { $goldenWorld = "case" }
 else { $goldenWorld = "mixed" }
 $compare = ($goldenWorld -eq "empty" -and $mode -eq "guard") -or ($goldenWorld -eq "case" -and $mode -eq "case")
@@ -162,11 +163,11 @@ if ($mode -eq "guard") {
     Write-Host "  evidence : present"
 }
 if ($goldenWorld -eq "empty") {
-    Write-Host "  goldens  : record the empty case ($emptyGoldens of 10 hold the `"missing`" line)"
+    Write-Host "  goldens  : record the empty case ($emptyGoldens of $($beats.Count) hold the `"missing`" line)"
 } elseif ($goldenWorld -eq "case") {
-    Write-Host "  goldens  : record real output ($emptyGoldens of 10 hold the `"missing`" line)"
+    Write-Host "  goldens  : record real output ($emptyGoldens of $($beats.Count) hold the `"missing`" line)"
 } else {
-    Write-Host "  goldens  : are mixed ($emptyGoldens of 10 hold the `"missing`" line)"
+    Write-Host "  goldens  : are mixed ($emptyGoldens of $($beats.Count) hold the `"missing`" line)"
 }
 if ($goldenWorld -eq "mixed") {
     Write-Host "             MIXED, which no single state of the tree produces. Some goldens"
@@ -233,7 +234,7 @@ foreach ($b in $beats) {
         continue
     }
     $ran++
-    Write-Host ("{0,-14} " -f $b) -NoNewline
+    Write-Host ("{0,-17} " -f $b) -NoNewline
     $watch = [Diagnostics.Stopwatch]::StartNew()
 
     $genRc = Invoke-Captured -Arguments @("gen", "--src", "$ws/$b.mut", "--dev") `
@@ -244,7 +245,7 @@ foreach ($b in $beats) {
         Write-Host "COMPILE (${elapsed}s) mutant gen refused the source"
         Get-Content "$tmp/$b.gen.out", "$tmp/$b.gen.err" -ErrorAction SilentlyContinue |
             Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
-        $summary.Add(("{0,-14} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
+        $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
         $failed++
         continue
     }
@@ -309,7 +310,7 @@ foreach ($b in $beats) {
         Write-Host "    unexpected on stderr:"
         $otherErr | Select-Object -First 10 | ForEach-Object { Write-Host "      $_" }
     }
-    $summary.Add(("{0,-14} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
+    $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
 }
 Write-Host "----------------------------------------------------------------------"
 
@@ -370,7 +371,7 @@ Write-Host "  question, writing the file and reading the output, which is teachi
 Write-Host "  and is not measured here."
 
 # A .mu is build output: mutant gen rewrites one in about a second from a
-# committed source, and *.mu is gitignored. All ten go, not only the ones this
+# committed source, and *.mu is gitignored. All of them go, not only the ones this
 # run made -- preserving whatever happened to be there already meant the litter
 # from one interrupted run stayed for every later run to step around, and made
 # the count printed below depend on history rather than on the tree. -Keep is
@@ -394,9 +395,9 @@ if ($failed -gt 0) {
     Write-Host "$failed beat(s) did not do what this mode expects. Not ready to teach."
     exit 1
 }
-# "All ten" is only true of a whole run: -Beat names one, and saying ten of it
+# "All" is only true of a whole run: -Beat names one, and saying all of it
 # would be the kind of claim this script exists to stop someone making.
-if ($ran -eq 10) { $which = "All ten beats" } else { $which = "$ran of ten beats (-Beat)" }
+if ($ran -eq $beats.Count) { $which = "All $ran programs" } else { $which = "$ran of $($beats.Count) programs (-Beat)" }
 if ($compare -and $mode -eq "guard") {
     Write-Host "$which printed what the golden records. The guard works, and the case"
     Write-Host "itself is untested until you build the corpus and run this again."

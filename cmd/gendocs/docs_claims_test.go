@@ -222,6 +222,8 @@ var notInAClone = map[string]string{
 	"examples/wasm-repl/mutant_repl.wasm":   "written by scripts/build.{sh,ps1}",
 	"examples/wasm-repl/wasm_exec.js":       "copied from the Go toolchain by scripts/build.{sh,ps1}",
 	"examples/workshop/case_quilldrop.body": "the generated bodyfile, which the evidence README cites relative to case_quilldrop/",
+	"examples/workshop/case_quilldrop.img":  "the generated disk image the timestomping deep dive reads",
+	"examples/workshop/case_quilldrop.mft":  "the $MFT that deep dive copies out of the image",
 	".vscode/launch.json":                   "the reader's own workspace file",
 	".vscode/tasks.json":                    "the reader's own workspace file",
 	"dist":                                  "written by scripts/build.{sh,ps1}",

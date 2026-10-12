@@ -1,0 +1,21 @@
+import "lib/quilldrop.mut";
+
+putln("QUILLDROP  the redirect chain");
+
+let history = quilldrop.path("Users/r.mehta/AppData/Local/Google/Chrome/History");
+let sql = "select v.id, v.from_visit, v.transition, v.visit_time, u.url from visits v join urls u on u.id = v.url order by v.id";
+let server_redirect = 2147483648;
+
+if (quilldrop.ready(history)) {
+    let rows, _ = sqlite_query(history, sql);
+    let visits = {};
+    for (r in rows["rows"]) {
+        visits[r["id"]] = r;
+    }
+    let hop = rows["rows"][rows["row_count"] - 1];
+    while (!is_null(hop)) {
+        let when, _ = timestamp_normalize(hop["visit_time"], "webkit");
+        putln("  ", when["iso"], hop["url"], "redirect:", hop["transition"] & server_redirect > 0);
+        hop = visits[hop["from_visit"]];
+    }
+}
