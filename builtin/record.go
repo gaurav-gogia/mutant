@@ -292,6 +292,9 @@ func recordSealImpl(op string, args []object.Object, quantised bool) object.Obje
 	if errObj != nil {
 		return resultAndError(nil, errObj)
 	}
+	if errObj := recordResolveRangeClasses(op, ranges); errObj != nil {
+		return resultAndError(nil, errObj)
+	}
 	sign, errObj := opts.boolean(recordSignOption, true)
 	if errObj != nil {
 		return resultAndError(nil, errObj)
@@ -526,6 +529,36 @@ func recordRangesArg(op string, arg object.Object) ([]recordRange, *object.Error
 		ranges = append(ranges, entry)
 	}
 	return ranges, nil
+}
+
+// recordResolveRangeClasses checks that each range's label and tag name one
+// declared class, and rewrites both to the class's own spelling.
+//
+// recordRangesArg reads the two fields as given, and the seal is bound to the
+// tag alone. A range written or edited by hand could therefore carry a tag no
+// class declares -- the new secret class nobody recognises that class_define
+// exists to prevent -- or a label that disagrees with its tag, where editing
+// the label had no effect: a range relabelled "restricted" was sealed under the
+// tag of the class it was built for. So the label is resolved exactly as
+// record_classify_range resolves it, and a tag that is not that class's tag is
+// refused by range number. Hex case is not a difference in the tag, so a tag
+// spelled in upper case is accepted and sealed in the case's own spelling.
+func recordResolveRangeClasses(op string, ranges []recordRange) *object.Error {
+	for i := range ranges {
+		class, errObj := recordLookupClass(fmt.Sprintf("%s: range %d", op, i+1), ranges[i].label)
+		if errObj != nil {
+			return errObj
+		}
+		if !strings.EqualFold(ranges[i].tag, class.Tag) {
+			return newError("%s: range %d is labelled %q but its %q is not the tag this case declared for %q, "+
+				"so the label and the tag name two different classes, or the tag names none. A seal is bound "+
+				"to the tag, and sealing it would put these bytes in a class the label does not say. Build "+
+				"ranges with `%s(offset, length, label)` rather than writing or editing the hash by hand",
+				op, i+1, ranges[i].label, "class", class.Label, BuiltinNameRecordClassifyRange)
+		}
+		ranges[i].label, ranges[i].tag = class.Label, class.Tag
+	}
+	return nil
 }
 
 func recordRangeShapeError(op string, index int, field string) *object.Error {

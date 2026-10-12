@@ -54,9 +54,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/aoiflux/graphene"
 	"github.com/aoiflux/graphene/store"
+	"golang.org/x/text/unicode/norm"
 
 	"mutant/object"
 )
@@ -475,6 +477,23 @@ type disclosureRecordFacts struct {
 	bytes        int64
 	headerSHA256 string
 	classes      []disclosureClassTally
+	// check is the read that gave sha256 and bytes, when that read also
+	// verified the signature over the bytes it hashed. A writer that hashed
+	// the file without checking it leaves check nil.
+	check *disclosureRecordCheck
+}
+
+// withSignatureValid adds record.signature_valid to a Record node's properties
+// when, and only when, the signature was verified over the very bytes whose
+// digest the node records. Two bits and never one: record.signed says the
+// record claims a signature, record.signature_valid whether it held over those
+// bytes. A writer that did not check leaves the property out rather than copy
+// record_open's answer, which is about the file as it was when it was opened.
+func (f disclosureRecordFacts) withSignatureValid(props map[string]string) map[string]string {
+	if f.check != nil {
+		props["record.signature_valid"] = strconv.FormatBool(f.check.signatureValid)
+	}
+	return props
 }
 
 // recordNode finds or adds a record's node, and on adding it writes the
@@ -491,7 +510,7 @@ func (d *disclosureTx) recordNode(g *graphene.Graph, facts disclosureRecordFacts
 	if err != nil {
 		return 0, err
 	}
-	recordID, recordNew, err := d.findOrAdd(g, disclosureNodeRecord, "record.uid", map[string]string{
+	recordID, recordNew, err := d.findOrAdd(g, disclosureNodeRecord, "record.uid", facts.withSignatureValid(map[string]string{
 		"record.uid":              strings.ToLower(header.RecordUID),
 		"record.case_uid":         strings.ToLower(header.CaseUID),
 		"record.sha256":           facts.sha256,
@@ -505,7 +524,7 @@ func (d *disclosureTx) recordNode(g *graphene.Graph, facts disclosureRecordFacts
 		"record.examiner":         header.Examiner,
 		"record.signed":           strconv.FormatBool(facts.record.signed),
 		"record.public_key":       facts.record.footer.PublicKey,
-	}, "record.sha256", "record.header_sha256")
+	}), "record.sha256", "record.header_sha256")
 	if err != nil || !recordNew {
 		return recordID, err
 	}
@@ -616,6 +635,9 @@ type disclosureIssue struct {
 	recordBytes   int64
 	headerSHA256  string
 	recordClasses []disclosureClassTally
+	// recordCheck is the read that gave recordSHA256 and recordBytes, and
+	// says whether the signature holds over the bytes it hashed.
+	recordCheck *disclosureRecordCheck
 
 	runs            [][2]uint64
 	grantedSegments int64
@@ -693,6 +715,73 @@ func disclosureRecipientFingerprint(name string) string {
 	return ledgerHash(sha256Of("mutant-recipient-v1|" + name))
 }
 
+// disclosureRecipientWithdrawalKey is the form in which a withdrawal's
+// recipient and a new disclosure's recipient are compared (M26-REC-009). The
+// fingerprint above is taken over the exact spelling, so "Counsel", "counsel",
+// "Counsel  for X" and the decomposed form of an accented name are four
+// fingerprints for what a report shows as one person, and a withdrawal keyed
+// on the fingerprint stopped only the one spelling it was made under.
+//
+// The rule starts from canonicalLabel's, which class labels and view names
+// are held to for the same reason: NFC, outer space trimmed, inner whitespace
+// collapsed to one space, NFC again at the end because changing case can undo
+// composition. It departs from it twice. canonicalLabel refuses control and
+// format characters; a recipient is not refused for them, so here the
+// characters recipientIgnorable names are dropped instead. And canonicalLabel
+// lowers case, which leaves a name and its upper-case spelling two names
+// wherever lowering the upper case does not give back the original letter --
+// "ΝΊΚΟΣ" lowers to "νίκοσ", never to "Νίκος"'s final "ς" -- so here each
+// letter is taken to the lower case of its upper case. That gives every letter
+// the same key as its upper, lower and title case and as every other member
+// of its simple case-folding orbit, so a name written in another case is the
+// same key. It also makes Turkish dotless "ı" and dotted "i" one letter, as
+// upper-casing them both to "I" already does. Like canonicalLabel it maps one
+// letter to one letter, so "ß" and "ss" stay two spellings, and it leaves
+// punctuation alone: "Counsel, X" and "Counsel X" stay two names.
+//
+// It is a comparison key and nothing is stored under it: the Recipient node,
+// the assignment chain and every disclosure still carry the fingerprint of the
+// spelling the examiner asserted, so no recipient a ledger already holds is
+// re-keyed.
+func disclosureRecipientWithdrawalKey(name string) string {
+	kept := strings.Map(func(r rune) rune {
+		if recipientIgnorable(r) {
+			return -1
+		}
+		return r
+	}, norm.NFC.String(name))
+	caseless := strings.Map(func(r rune) rune {
+		return unicode.ToLower(unicode.ToUpper(r))
+	}, strings.Join(strings.Fields(kept), " "))
+	return norm.NFC.String(caseless)
+}
+
+// recipientIgnorable reports whether r is left out of a recipient's
+// withdrawal key: a control character that is not whitespace, or a
+// Default_Ignorable_Code_Point -- Unicode's set of characters a renderer may
+// display as nothing, among them the zero-width space, joiner and non-joiner,
+// the byte order mark, the soft hyphen, variation selectors, Hangul fillers
+// and tag characters. Go's unicode package has no table for that property, so
+// it is derived here the way DerivedCoreProperties.txt derives it for Unicode
+// 15.0.0, the version the package implements: Other_Default_Ignorable_Code_Point,
+// Cf and Variation_Selector, less White_Space, the interlinear annotation
+// characters U+FFF9..U+FFFB, the Egyptian hieroglyph format controls
+// U+13430..U+1343F and Prepended_Concatenation_Mark. The last three are format
+// characters that are drawn, U+0600 ARABIC NUMBER SIGN among them, so they
+// stay in the key.
+func recipientIgnorable(r rune) bool {
+	switch {
+	case unicode.IsSpace(r):
+		return false
+	case unicode.IsControl(r):
+		return true
+	case r >= 0xFFF9 && r <= 0xFFFB, r >= 0x13430 && r <= 0x1343F,
+		unicode.Is(unicode.Prepended_Concatenation_Mark, r):
+		return false
+	}
+	return unicode.In(r, unicode.Other_Default_Ignorable_Code_Point, unicode.Cf, unicode.Variation_Selector)
+}
+
 // disclosureRefusal says why the ledger rules out disclosing this record to
 // this recipient, or returns the recipient's assignment in force: the case's
 // lifecycle state takes no disclosure; the ledger holds redactions made before
@@ -717,7 +806,7 @@ func disclosureRefusal(session *ledgerSession, record *recordSession, recipient 
 			"classification is not the one in force. Disclose the record that superseded it",
 			record.header.RecordUID, event.get("reclass.record_uid"), event.get("reclass.at"))
 	}
-	if withdrawn, err := disclosureWithdrawnFor(g, recordUID, disclosureRecipientFingerprint(recipient)); err != nil {
+	if withdrawn, err := disclosureWithdrawnFor(g, recordUID, recipient); err != nil {
 		return caseAssignment{}, err
 	} else if withdrawn != "" {
 		return caseAssignment{}, fmt.Errorf("an earlier disclosure of record %s to %q was withdrawn (%s), and a "+
@@ -813,6 +902,7 @@ func disclosureWriteIssue(session *ledgerSession, issue *disclosureIssue) (store
 		bytes:        issue.recordBytes,
 		headerSHA256: issue.headerSHA256,
 		classes:      issue.recordClasses,
+		check:        issue.recordCheck,
 	}, w.caseN, classNode)
 	if err != nil {
 		return 0, err
@@ -901,23 +991,32 @@ func disclosureWithdrawalOf(g *graphene.Graph, uid string) (disclosureNode, bool
 }
 
 // disclosureWithdrawnFor reports the uid and time of a withdrawn disclosure of
-// this record to this recipient, or "" when there is none.
+// this record to this recipient, or "" when there is none. The recipient is
+// matched by disclosureRecipientWithdrawalKey, which disregards case, spacing,
+// Unicode normalization form, controls and default-ignorable characters, not
+// only in the spelling the withdrawal names, and a match under another
+// spelling quotes that spelling.
 //
 // Asked of the Withdrawal nodes, which name the record and the recipient
 // themselves, and not through the Disclosure each withdraws: a disclosure a
 // redaction removed before the schema was guarded (M26-CUS-021) took its
 // index entries with it, and its withdrawal, still in the ledger, still stops
 // a new grant.
-func disclosureWithdrawnFor(g *graphene.Graph, recordUID, recipientFP string) (string, error) {
+func disclosureWithdrawnFor(g *graphene.Graph, recordUID, recipient string) (string, error) {
 	withdrawals, err := disclosureAll(g, disclosureNodeWithdrawal)
 	if err != nil {
 		return "", err
 	}
+	key := disclosureRecipientWithdrawalKey(recipient)
 	for _, withdrawal := range withdrawals {
 		if withdrawal.get("withdrawal.record_uid") == recordUID &&
-			disclosureRecipientFingerprint(withdrawal.get("withdrawal.recipient")) == recipientFP {
-			return fmt.Sprintf("disclosure %s, withdrawn at %s", withdrawal.get("withdrawal.disclosure_uid"),
-				withdrawal.get("withdrawal.at")), nil
+			disclosureRecipientWithdrawalKey(withdrawal.get("withdrawal.recipient")) == key {
+			found := fmt.Sprintf("disclosure %s, withdrawn at %s", withdrawal.get("withdrawal.disclosure_uid"),
+				withdrawal.get("withdrawal.at"))
+			if spelled := withdrawal.get("withdrawal.recipient"); spelled != recipient {
+				found += fmt.Sprintf(", made to the same name spelled %q", spelled)
+			}
+			return found, nil
 		}
 	}
 	return "", nil

@@ -424,7 +424,9 @@ type caseDefinitions struct {
 // class_define, view_define and role_define write while a case is attached.
 // Each class is tagged again under tagKey and compared with the tag the ledger
 // holds; each view's fingerprint is recomputed from what it grants, and each
-// bundle's from the views it holds.
+// bundle's from its role and the views it holds. Every field a bundle's
+// definition and node carry that names its role -- the label, the canonical
+// form, the role's name and its id -- must name the same one.
 func caseDefinitionsRead(ledger *ledgerSession, caseNode store.NodeID, fingerprint string,
 	tagKey []byte) (caseDefinitions, error) {
 	edges, err := ledger.store.EdgesOf(caseNode, store.DirectionInbound, []store.EdgeType{disclosureEdgeInCase})
@@ -575,6 +577,18 @@ func caseDefinitionsRead(ledger *ledgerSession, caseNode store.NodeID, fingerpri
 			seenRoles[name] {
 			return caseDefinitions{}, fmt.Errorf("the ledger's definition of a bundle for %q does not name a "+
 				"recipient role, does not match the bundle it points at, or defines it twice", name)
+		}
+		// role_define writes the role's name as the canonical form and the
+		// role's id beside its name. Neither is free text, so a disagreement
+		// is a bundle naming two roles, and which one it grants for is not
+		// the ledger's to leave open.
+		if canonical := d.props["def.canonical"]; canonical != name {
+			return caseDefinitions{}, fmt.Errorf("the ledger defines a bundle for role %s with the canonical "+
+				"form %q, which is not that role's name", name, canonical)
+		}
+		if id := d.node.get("bundle.role_id"); id != strconv.FormatUint(uint64(role.ID), 10) {
+			return caseDefinitions{}, fmt.Errorf("the ledger's bundle for role %s carries role id %s, and role "+
+				"%s is id %d", name, id, name, role.ID)
 		}
 		seenRoles[name] = true
 		bundle := caseBundle{Role: role, Description: d.props["def.description"], Index: i, DefinedAt: at,

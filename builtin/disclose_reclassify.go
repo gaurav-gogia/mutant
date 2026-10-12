@@ -289,6 +289,29 @@ func reclassWrite(op string, session *ledgerSession, facts disclosureCaseFacts, 
 		}
 		return existing, false, nil
 	}
+	// A reclassification goes one way: the new record supersedes the old. If the
+	// old one already supersedes the new, directly or through the records it
+	// supersedes in turn, the edge would close a cycle and the ledger would hold
+	// a history in which each record is the other's reclassification, which no
+	// sealing can make. Checked before the successor refusal below, whose advice
+	// names where a line ends and must not send the caller round the cycle, and
+	// under the same lock, so two callers cannot each write half of one
+	// (M26-REC-024). A record reclassifying two stays allowed: that is a
+	// consolidation, and it closes no cycle.
+	cycle, err := reclassSupersessionPath(session, oldUID, newUID)
+	if err != nil {
+		return disclosureNode{}, false, newError("%s: %s", op, err.Error())
+	}
+	if cycle != nil {
+		steps := make([]string, 0, len(cycle)-1)
+		for i := 0; i+1 < len(cycle); i++ {
+			steps = append(steps, cycle[i]+" reclassifies "+cycle[i+1])
+		}
+		return disclosureNode{}, false, newError("%s: record %s already supersedes record %s (%s), so recording %s "+
+			"as reclassifying %s would make each of them the other's reclassification. A reclassification seals "+
+			"the evidence again after the record it supersedes, and no record comes after itself", op, oldUID,
+			newUID, strings.Join(steps, ", "), newUID, oldUID)
+	}
 	// One record is reclassified once. A second reclassification of the same
 	// record is a forward fork, and both successors walk back to one line and
 	// share its chain of versions: disclosing them in turn wrote a version each
@@ -394,6 +417,45 @@ func reclassWrite(op string, session *ledgerSession, facts disclosureCaseFacts, 
 		return disclosureNode{}, false, newError("%s: the reclassification could not be recorded: %s", op, err.Error())
 	}
 	return disclosureNode{id: eventID, props: props}, true, nil
+}
+
+// reclassSupersessionPath returns the records from `from` to `to` along the
+// SUPERSEDES edges the ledger records -- from, a record it reclassifies, a
+// record that one reclassifies, and so on -- or nil when `to` is not reached
+// that way. A record may reclassify more than one, so every branch is
+// followed. Each record is visited once, so a ledger that already holds a cycle
+// (written by hand, or by a build without this check) is walked to its end
+// rather than round it, and the walk is breadth first, so the path returned is
+// a shortest one.
+func reclassSupersessionPath(ledger *ledgerSession, from, to string) ([]string, error) {
+	parent := map[string]string{from: ""}
+	queue := []string{from}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		previous, err := redactionReclassifies(ledger, current)
+		if err != nil {
+			return nil, err
+		}
+		for _, uid := range previous {
+			if _, seen := parent[uid]; seen {
+				continue
+			}
+			parent[uid] = current
+			if uid == to {
+				path := []string{uid}
+				for at := current; at != ""; at = parent[at] {
+					path = append(path, at)
+				}
+				for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+					path[i], path[j] = path[j], path[i]
+				}
+				return path, nil
+			}
+			queue = append(queue, uid)
+		}
+	}
+	return nil, nil
 }
 
 // reclassAffected lists every disclosure of the superseded record whose granted

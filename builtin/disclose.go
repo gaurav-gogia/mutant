@@ -356,6 +356,16 @@ func DiscloseToPassphrase(args ...object.Object) object.Object {
 		return resultAndError(nil, newError("%s: this record was opened under a grant, and a grant opens "+
 			"segments without being able to issue them. Only the case that sealed a record can disclose it", op))
 	}
+	// A record that claims a signature which does not verify cannot be shown
+	// to be the file that was sealed, and a recipient's check of it would
+	// fail; disclosing it anyway, with the ledger saying record.signed=true,
+	// is the silent failure M26-REC-011 found. An unsigned record is not
+	// refused: it claims nothing, and the manifest and the ledger say so.
+	if record.signed && !record.signatureValid {
+		return resultAndError(nil, newError("%s: the record claims a signature that does not verify (%s), so it "+
+			"cannot be shown to be the file that was sealed and is not disclosed. Disclose the case's intact copy",
+			op, record.signatureNote))
+	}
 
 	facts, errObj := disclosureCase(op)
 	if errObj != nil {
@@ -393,10 +403,20 @@ func DiscloseToPassphrase(args ...object.Object) object.Object {
 	}
 	defer grant.Zero()
 
-	recordSHA, recordBytes, err := disclosureFileDigest(record.path)
+	// Hashed and checked in one read, so the digest the ledger records and the
+	// signature bit beside it are about the same bytes. The check above is
+	// record_open's, about the file as it was when it was opened; this one is
+	// about the file as it is now, and a file changed since is refused.
+	checked, err := disclosureCheckRecordFile(record)
 	if err != nil {
 		return resultAndError(nil, newError("%s: hashing %s: %s", op, record.path, err.Error()))
 	}
+	if checked.signed && !checked.signatureValid {
+		return resultAndError(nil, newError("%s: the record claims a signature that does not verify (%s), so it "+
+			"cannot be shown to be the file that was sealed and is not disclosed. Disclose the case's intact copy",
+			op, checked.signatureNote))
+	}
+	recordSHA, recordBytes := checked.sha256, checked.bytes
 	uid, err := security.RandomDisclosureUID()
 	if err != nil {
 		return resultAndError(nil, newError("%s: %s", op, err.Error()))
@@ -456,6 +476,7 @@ func DiscloseToPassphrase(args ...object.Object) object.Object {
 		record:          record,
 		recordSHA256:    recordSHA,
 		recordBytes:     recordBytes,
+		recordCheck:     &checked,
 		headerSHA256:    ledgerHash(sha256.Sum256(record.headerRaw)),
 		recordClasses:   tallies,
 		runs:            disclosureSegmentRuns(split.granted),
@@ -1335,6 +1356,11 @@ func (v *discloseVerification) checkRecord() {
 	}
 	v.record = session
 	switch {
+	case !session.signed && security.RecordFooterDisagreesWithItself(session.footer):
+		// Refused, not unsigned: the footer names a signer, carries a
+		// signature or says its key was made for this run. Its note says so
+		// and stands alone; "carries no signature" would be false here.
+		v.add("record_signature", false, session.signatureNote)
 	case !session.signed:
 		v.add("record_signature", false, "the record carries no signature: "+session.signatureNote)
 	default:

@@ -592,8 +592,7 @@ func footerMetaBytes(f *RecordFooter) []byte {
 func SignRecordFooter(footer *RecordFooter, header []byte, root [sha256.Size]byte, sign bool) error {
 	footer.SegmentsRoot = hex.EncodeToString(root[:])
 	if !sign {
-		footer.Signed = false
-		footer.SignatureReason = "the record was sealed with sign:false"
+		markRecordFooterUnsigned(footer, "the record was sealed with sign:false")
 		return nil
 	}
 	// The fourth return is the key store's DIRECTORY, and it is dropped here
@@ -609,20 +608,49 @@ func SignRecordFooter(footer *RecordFooter, header []byte, root [sha256.Size]byt
 	// it tells them where to go looking for the key.
 	//
 	// SignatureReason records why a record has NO signature. A signed record
-	// has no reason to give, so the field stays empty and omitempty leaves it
-	// out of the JSON altogether.
+	// has no reason to give, so the field is emptied -- a footer sealed once
+	// with sign:false and again with a key would otherwise keep the old
+	// reason -- and omitempty leaves it out of the JSON altogether.
 	private, public, generated, _, err := EnsureLocalSigningKeyPair()
 	if err != nil {
-		footer.Signed = false
-		footer.SignatureReason = err.Error()
+		markRecordFooterUnsigned(footer, err.Error())
 		return nil
 	}
 	footer.Signed = true
+	footer.SignatureReason = ""
 	footer.KeyCreatedForThisRun = generated
 	footer.PublicKey = hex.EncodeToString(public)
 	footer.Signature = hex.EncodeToString(
 		ed25519.Sign(private, RecordSigningMessage(header, root, footerMetaBytes(footer))))
 	return nil
+}
+
+// markRecordFooterUnsigned records that a footer carries no signature, and why.
+//
+// It clears every field a signature brings with it, not only Signed. A footer
+// sealed once with a key and again without one would otherwise keep the first
+// call's signer, signature and key-age bit beside Signed = false: a document
+// that says it is unsigned and carries a signature anyway, which
+// VerifyRecordSignature refuses (M26-SEC-013). On a fresh footer the clearing
+// changes nothing.
+func markRecordFooterUnsigned(footer *RecordFooter, reason string) {
+	footer.Signed = false
+	footer.SignatureReason = reason
+	footer.PublicKey = ""
+	footer.Signature = ""
+	footer.KeyCreatedForThisRun = false
+}
+
+// RecordFooterDisagreesWithItself reports whether a footer's Signed field is
+// false while it still names a signer, carries a signature or says its signing
+// key was made for this run. VerifyRecordSignature refuses such a footer with
+// signed=false, so a caller that words its own message from signed=false --
+// "the record carries no signature" -- asks this first: such a footer is not
+// one that claims nothing, and its signature, if any, is neither credited nor
+// checked (M26-SEC-013).
+func RecordFooterDisagreesWithItself(footer *RecordFooter) bool {
+	return !footer.Signed && (strings.TrimSpace(footer.Signature) != "" ||
+		strings.TrimSpace(footer.PublicKey) != "" || footer.KeyCreatedForThisRun)
 }
 
 // VerifyRecordSignature reports two bits and not one.
@@ -632,8 +660,22 @@ func SignRecordFooter(footer *RecordFooter, header []byte, root [sha256.Size]byt
 // forged one identically, and those call for opposite responses: one is a
 // record to treat with the care an unsigned document deserves, the other is a
 // record to stop using.
+//
+// signed is the footer's own Signed field and nothing else. A footer whose
+// Signed is false but which still names a signer, carries a signature or says
+// its signing key was made for this run disagrees with itself, and is refused
+// rather than resolved: crediting the signature would report signed for a
+// record its producer disclaimed, and dropping it silently would hide a
+// signature the producer may have made. The refusal is signed=false and
+// valid=false, so it is never read as a valid signature, and its detail is
+// what tells it apart from an ordinary unsigned record.
 func VerifyRecordSignature(footer *RecordFooter, header []byte, root [sha256.Size]byte) (signed, valid bool, detail string) {
-	if !footer.Signed && strings.TrimSpace(footer.Signature) == "" {
+	if RecordFooterDisagreesWithItself(footer) {
+		return false, false, "the footer disagrees with itself: its signed field is false, yet it names a " +
+			"signer, carries a signature or says its signing key was made for this run, so the signature is " +
+			"neither credited nor checked"
+	}
+	if !footer.Signed {
 		reason := footer.SignatureReason
 		if strings.TrimSpace(reason) == "" {
 			reason = "the record carries no signature"
