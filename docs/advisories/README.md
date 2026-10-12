@@ -50,7 +50,7 @@ published version.
 | [MVF-2026-0007](MVF-2026-0007.md) | S1  | 2.3.0 – 2.5.0           | 2.6.0                 | A SQL query the documentation called read-only could modify evidence          |
 | [MVF-2026-0008](MVF-2026-0008.md) | S2  | none released           | 2.6.0                 | A classified buffer put in a report table was rendered to hex and written out |
 | [MVF-2026-0009](MVF-2026-0009.md) | S3  | 2.1.0 – 2.5.0           | 2.6.0                 | An inherited environment variable chose the signing key and the trust anchor  |
-| [MVF-2026-0010](MVF-2026-0010.md) | S3  | extension 0.1.0 - 0.2.0 | extension: unreleased | The editor extension's release task passed the password in the argument list  |
+| [MVF-2026-0010](MVF-2026-0010.md) | S3  | extension 0.1.0 - 0.2.0 | extension 0.3.0       | The editor extension's release task passed the password in the argument list  |
 | [MVF-2026-0011](MVF-2026-0011.md) | S3  | none released           | 2.6.0                 | A ledger redacted by an older build could have lost a withdrawal silently     |
 | [MVF-2026-0012](MVF-2026-0012.md) | S2  | 2.3.0 – 2.5.0           | 2.6.0                 | A header count sized an allocation before the bytes it promised were there    |
 | [MVF-2026-0013](MVF-2026-0013.md) | S2  | 2.3.0 – 2.5.0           | 2.6.0                 | A binary plist sharing its containers expanded exponentially when parsed      |

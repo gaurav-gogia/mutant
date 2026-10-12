@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+Released with mutant 2.6.0, which it requires for the task changes below.
 
 - **Tasks keep working with mutant 2.6.0, which refuses a bare `--password`.**
   A task's `password` field is now passed as `--password-insecure`, the explicit

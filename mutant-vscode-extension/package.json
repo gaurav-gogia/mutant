@@ -2,7 +2,7 @@
     "name": "mutant-language-tools",
     "displayName": "Mutant Language Tools",
     "description": "Language tools for Mutant, powered by a dedicated language server: strict canonical formatting, rich diagnostics (OS-aware platform warnings, unreachable code, unused/undefined/duplicate checks, semicolons), hover with capability categories, completion, semantic highlighting, go-to-definition, references, and rename.",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "mutantLanguageVersion": "2.6.0",
     "publisher": "aoiflux",
     "icon": "images/icon-128.png",
