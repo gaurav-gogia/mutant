@@ -122,8 +122,8 @@ $null = Invoke-Captured -Arguments @("--version") -OutFile "$versionOut.out" -Er
 $version = (Get-Content "$versionOut.out" -ErrorAction SilentlyContinue | Select-Object -First 1)
 Remove-Item -LiteralPath "$versionOut.out", "$versionOut.err" -Force -ErrorAction SilentlyContinue
 Write-Host "  version  : $version"
-if ($version -notlike "*2.6.0*") {
-    Write-Host "             note: the workshop targets v2.6.0, which is what attendees"
+if ($version -notlike "*2.6.1*") {
+    Write-Host "             note: the workshop targets v2.6.1, which is what attendees"
     Write-Host "             will have downloaded. A newer build runs it fine; this is"
     Write-Host "             only a reminder that you are not rehearsing their binary."
 }
@@ -200,8 +200,8 @@ if ($mode -eq "guard") {
 } else {
     if ($haveCase) {
         $files = (Get-ChildItem -LiteralPath $caseDir -Recurse -File -ErrorAction SilentlyContinue).Count
-        Write-Host "  corpus   : $caseDir, $files files (the run sheet says 98)"
-        if ($files -ne 98) {
+        Write-Host "  corpus   : $caseDir, $files files (the run sheet says 100)"
+        if ($files -ne 100) {
             Write-Host "             MISMATCH. Check evidence/README.md before teaching this."
         }
     } else {
@@ -209,8 +209,8 @@ if ($mode -eq "guard") {
     }
     if ($haveBody) {
         $rows = (Get-Content -LiteralPath $body).Count
-        Write-Host "  timeline : $body, $rows rows (the run sheet says 131)"
-        if ($rows -ne 131) {
+        Write-Host "  timeline : $body, $rows rows (the run sheet says 136)"
+        if ($rows -ne 136) {
             Write-Host "             MISMATCH. Check evidence/README.md before teaching this."
         }
     } else {

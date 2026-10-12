@@ -8,7 +8,7 @@ mutant is an open source programming language for security research and digital
 forensics. Programs compile to encrypted bytecode, run in the Mutant VM, and
 can be packed into standalone binaries for other platforms.
 
-Current release: **2.6.0** -- see [CHANGELOG.md](CHANGELOG.md) for what changed
+Current release: **2.6.1** -- see [CHANGELOG.md](CHANGELOG.md) for what changed
 and [docs/advisories](docs/advisories/README.md) for the security advisories.
 
 ## Why mutant

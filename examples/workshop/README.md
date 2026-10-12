@@ -13,15 +13,21 @@ or on yours.
 | Malware hidden in ads | [dfrws/2a_ad_redirects.mut](dfrws/2a_ad_redirects.mut), [dfrws/2b_ad_cookies.mut](dfrws/2b_ad_cookies.mut) |
 | Malicious registry entries | [dfrws/3_run_keys.mut](dfrws/3_run_keys.mut) |
 
+Four shorter versions of the same checks sit in this folder:
+[stomp_two_clocks.mut](stomp_two_clocks.mut),
+[ad_redirects.mut](ad_redirects.mut), [ad_cookies.mut](ad_cookies.mut) and
+[run_keys.mut](run_keys.mut). They use `lib/quilldrop.mut`, so they read only
+the workshop's own evidence; the `dfrws/` programs read yours as well.
+
 ## The story around them
 
 Ten programs, none longer than eighteen lines, take one workstation's files and
 turn them into a signed handover. Read them in order: each one starts where the
 last one stopped.
 
-Everything here targets **Mutant v2.6.0**, the released version. Nothing here
-calls a builtin that shipped after it, so an attendee who downloaded the release
-can run every program.
+Everything here targets **Mutant v2.6.1**, the released version. Nothing here
+calls a builtin that shipped after v2.6.0, so an attendee who downloaded either
+2.6 release can run every program.
 
 ## The story
 
@@ -89,7 +95,7 @@ Use a native shell, or pass `--compat` to downgrade that to a warning.
 
 ### Language gotchas worth knowing before you start
 
-Every row here is true of **v2.6.0**.
+Every row here is true of **v2.6.1**.
 
 | Gotcha | What you see | Fix |
 |---|---|---|

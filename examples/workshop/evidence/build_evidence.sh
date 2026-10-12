@@ -34,7 +34,7 @@
 # obvious and depends on the volume rather than on the operating system: where
 # the file system has no birth time the modelled timeline comes back with every
 # crtime at 0, and beat 6's "older than its own birth" finding cannot fire.
-# Measured on WSL ext4, where it was 0 for all 130 rows; APFS keeps a birth time
+# Measured on WSL ext4, where it was 0 for all 135 rows; APFS keeps a birth time
 # and is unmeasured, so this script does not guess -- it checks the timeline it
 # just wrote and says so. Prefer NTFS, or take the pre-built corpus:
 # evidence/README.md, under "Where the pre-built corpus comes from", says what

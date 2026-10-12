@@ -94,8 +94,8 @@ echo "  mutant   : $MUTANT"
 VERSION=$("$MUTANT" --version 2>&1 | head -n 1)
 echo "  version  : $VERSION"
 case "$VERSION" in
-    *2.6.0*) : ;;
-    *) echo "             note: the workshop targets v2.6.0, which is what attendees"
+    *2.6.1*) : ;;
+    *) echo "             note: the workshop targets v2.6.1, which is what attendees"
        echo "             will have downloaded. A newer build runs it fine; this is"
        echo "             only a reminder that you are not rehearsing their binary." ;;
 esac
@@ -181,8 +181,8 @@ if [ "$MODE" = guard ]; then
 else
     if [ "$HAVE_CASE" -eq 1 ]; then
         FILES=$(find "$CASE_DIR" -type f | wc -l | tr -d ' ')
-        echo "  corpus   : $CASE_DIR, $FILES files (the run sheet says 98)"
-        if [ "$FILES" -ne 98 ]; then
+        echo "  corpus   : $CASE_DIR, $FILES files (the run sheet says 100)"
+        if [ "$FILES" -ne 100 ]; then
             echo "             MISMATCH. Check evidence/README.md before teaching this."
         fi
     else
@@ -190,8 +190,8 @@ else
     fi
     if [ "$HAVE_BODY" -eq 1 ]; then
         ROWS=$(wc -l < "$BODY" | tr -d ' ')
-        echo "  timeline : $BODY, $ROWS rows (the run sheet says 131)"
-        if [ "$ROWS" -ne 131 ]; then
+        echo "  timeline : $BODY, $ROWS rows (the run sheet says 136)"
+        if [ "$ROWS" -ne 136 ]; then
             echo "             MISMATCH. Check evidence/README.md before teaching this."
         fi
     else

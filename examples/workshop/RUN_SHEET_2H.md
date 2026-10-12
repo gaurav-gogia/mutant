@@ -22,7 +22,7 @@ them.
    with no executable outside the image. Hand out one fsagen release to the room: a
    newer generator version writes other bytes for the same seed.
    Confirm it finishes and check the file count against
-   [evidence/README.md](evidence/README.md): **98 files, 131 timeline rows**.
+   [evidence/README.md](evidence/README.md): **100 files, 136 timeline rows**.
    Generate on **NTFS**. On a volume with no birth time the script still
    produces a corpus, but the timeline has no creation times and beat 6's
    central finding cannot fire. Measured on WSL ext4; **APFS is unmeasured and
@@ -36,7 +36,7 @@ them.
    generated PE files and its verdict is not stable across runs; Windows Search
    adds an `OECustomProperty` stream to `.eml` files in indexed folders within
    seconds, which would corrupt beat 3.
-3. Build or download **v2.6.0**. Every program uses only v2.6.0 builtins;
+3. Build or download **v2.6.1**. Every program uses only v2.6.0 builtins;
    running it on a newer build is fine, but the release is what attendees will
    have.
 4. Decide the password story. `--dev` is simplest and is what the README

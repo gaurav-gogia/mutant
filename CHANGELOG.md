@@ -13,6 +13,74 @@ exhaustive lists.
 
 ## [Unreleased]
 
+## [2.6.1] — 2026-10-13
+
+A workshop and documentation patch. The compiler, the VM, the builtins, the
+language server and the CLI are the same code as in 2.6.0; only the version
+they report differs. Every known issue listed under 2.6.0 still applies.
+
+### Added
+
+- **The three DFRWS deep dives are standalone programs** in
+  `examples/workshop/dfrws/`. Each imports nothing and names its input on one
+  line, so it runs on the workshop's evidence or on evidence the room brings.
+  `1_timestomp` finds a file whose `$STANDARD_INFORMATION` creation time is
+  earlier than its `$FILE_NAME` one, on every NTFS partition of an MBR or GPT
+  disk or on a bare volume, and refuses an E01 by name. `2a_ad_redirects`
+  walks each Chrome redirect chain back to the visit that began it and labels
+  server and client redirects. `2b_ad_cookies` marks each cookie whose site
+  the history never visited. `3_run_keys` reads the `Run*` keys of an
+  NTUSER.DAT or SOFTWARE hive, Wow6432Node included. The shorter
+  `stomp_two_clocks`, `ad_redirects`, `ad_cookies` and `run_keys` stay beside
+  the beats and read only the workshop's own evidence.
+- **The workshop evidence builds one topic at a time.**
+  `build_evidence.ps1 -Topic` and `build_evidence.sh --topic` take any of
+  `timestomp`, `case`, `ads` and `registry`; with none they build all four.
+  `evidence/topics/` holds one fsagen playbook per deep dive, each made of steps
+  copied unchanged from `quilldrop.playbook.yaml`, and
+  `sweep/workshop_topics_test.go` fails if a copy drifts. When Defender refuses
+  the case tree's generated PE, the ads and registry topics are still built, so
+  the deep dives keep their input.
+
+### Changed
+
+- **The workshop needs fsagen v0.4.0 or later, and pins no version.** The build
+  scripts ask `fsagen features --json` for the eight features the playbooks use
+  and stop, naming any that is missing. The disk image is now GPT with a change
+  journal, the case playbook turns on `subsecond_jitter`, and Chrome's files sit
+  where a real profile keeps them (`User Data/Default/History` and
+  `User Data/Default/Network/Cookies`).
+- **The workshop's corpus counts are measured again**, on fsagen v0.4.0: 100
+  files and 136 timeline rows on NTFS, and 100 and 135 on ext4, which has no
+  alternate data stream to record and no birth time to set. The run sheet,
+  `evidence/README.md` and both rehearsal scripts said 98 and 131.
+- The workshop names 2.6.1 as the release attendees download, and the
+  rehearsal scripts expect it. Every program still calls only builtins 2.6.0
+  has.
+- **Examples and guides name roles, not people.** `alice`, `bob`, `carol` and
+  the examiners' names became `person_a`, `analyst`, `example examiner` and
+  the like, in the detection, graph, text and workshop examples (their recorded
+  output with them) and in GRAPH_DATABASE.md, MUTANT_LANGUAGE_REFERENCE.md and
+  STRUCTURED_DATA.md.
+- The VS Code extension is 0.3.1. It names Mutant 2.6.1 and takes a
+  development-dependency update (brace-expansion); it behaves as 0.3.0 did.
+
+### Fixed
+
+- **Workshop beats 02, 03, 04, 07 and 09 stopped on a partial corpus** with
+  `index operator not supported: NULL`. Each now checks that the file it reads
+  is there before reading it. Their recorded output is unchanged.
+- **Three of the shorter workshop programs no longer worked on the evidence.**
+  `stomp_two_clocks` stopped with `index operator not supported: NULL` on the
+  GPT image, because it opened the first partition, the EFI system partition,
+  as NTFS; it now reads every partition that opens as NTFS and skips a record
+  with no `$STANDARD_INFORMATION` creation time. `ad_redirects` and
+  `ad_cookies` looked for Chrome's files where the profile no longer keeps
+  them and always reported them missing.
+- `rehearse.sh` reported 2.6.0's once-per-run Linux notice,
+  `[security] process protection measured nothing on linux`, as unexpected
+  output. It now counts the notice and mentions it once at the end.
+
 ## [2.6.0] — 2026-10-12 — "Sage"
 
 Every answer checked, or refused out loud.
@@ -4220,7 +4288,8 @@ Documentation only.
 
 Initial release: the language, the compiler, the VM, and encrypted bytecode.
 
-[Unreleased]: https://github.com/aoiflux/mutant/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/aoiflux/mutant/compare/v2.6.1...HEAD
+[2.6.1]: https://github.com/aoiflux/mutant/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/aoiflux/mutant/compare/v2.5.0...v2.6.0
 [2.5.0]: https://github.com/aoiflux/mutant/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/aoiflux/mutant/compare/v2.3.0...v2.4.0

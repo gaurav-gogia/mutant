@@ -123,12 +123,12 @@ Until the evidence is built, a `dfrws/` program whose input is absent prints its
 Two rules on the bodyfile:
 
 - The `name` column comes out **absolute, with forward slashes**, and that is
-  fine. fsagen v0.1.0 has no flag to make it relative, and
+  fine. fsagen v0.4.0 has no flag to make it relative, and
   `quilldrop.path` joins it on with `str_format("%s/%s", root, name)`, so an
   absolute name becomes `examples/workshop/case//Users/…` — a doubled
-  separator, which Windows and POSIX both collapse. Measured: 131 rows, 12 of
+  separator, which Windows and POSIX both collapse. Measured: 136 rows, 12 of
   them deleted, and step 6 reports exactly those 12 as absent. Were absolute
-  names breaking `fs_exists`, all 131 would have been reported missing.
+  names breaking `fs_exists`, all 136 would have been reported missing.
 - The modelled timeline must carry the deleted staging paths.
 
 ## Two environment hazards, both real
@@ -153,17 +153,19 @@ so beat 6's finding could not fire. **APFS is unmeasured** -- it keeps a birth
 time and fsagen reads one there, so do not assume a Mac loses the beat; the
 build scripts test the timeline they have just written and will say so on the
 day. **Generate on NTFS, or take the pre-built corpus** -- see *Where the
-pre-built corpus comes from*, below. Same seed, same playbook, fsagen v0.1.0
-built with go1.26.6:
+pre-built corpus comes from*, below. Same seed, same playbook, the fsagen
+v0.4.0 release binaries, measured 2026-10-12 on a Windows 11 NTFS volume and on
+WSL ext4. On NTFS the two generated PEs were written under other names, so
+Defender had nothing to refuse; no file or row count depends on the names:
 
 | | NTFS | ext4 |
 |---|---|---|
 | `build_evidence` with no `--on-unsupported` | exit 0 | **exit 1, and no corpus at all** |
-| with `--on-unsupported=skip`, which both scripts now pass | exit 0 | exit 0, 1 skip recorded |
-| files generated | 98 | 98 |
-| rows in the modelled timeline | 131 | 130 |
+| with `--on-unsupported=skip`, which both scripts now pass | exit 0 | exit 0, each skip recorded in `case.fsagen/run-manifest.json` |
+| files generated | 100 | 100 |
+| rows in the modelled timeline | 136 | 135 |
 | the row that is missing | — | `Invoice_88412.pdf.exe:Zone.Identifier` |
-| rows whose `crtime` is 0 | 0 | **130 of 130** |
+| rows whose `crtime` is 0 | 0 | **135 of 135** |
 | rows where `mtime < crtime` — **beat 6's finding** | **1** | **0** |
 | deleted rows in the timeline | 12 | 12 |
 
@@ -181,9 +183,9 @@ filesystem, so it is also right on ReFS, on FAT32 and on a network share.
 It is the same corpus these scripts generate, built once on NTFS and handed out
 so that nobody's machine has to produce it. Three things travel together:
 
-- the case tree, `examples/workshop/case/` -- **98 files**;
+- the case tree, `examples/workshop/case/` -- **100 files**;
 - the modelled timeline the beats read, `examples/workshop/case_quilldrop.body`
-  -- **131 rows**;
+  -- **136 rows**;
 - `SHA256SUMS`, in the format `sha256sum -c` reads, which is the convention
   `case_bundle` writes in this same toolchain.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+Released with mutant 2.6.1. Nothing the extension does has changed.
+
+- The manifest names mutant 2.6.1.
+- Development dependencies: brace-expansion 1.1.21 and 5.0.12.
+
 ## 0.3.0
 
 Released with mutant 2.6.0, which it requires for the task changes below.
