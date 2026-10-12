@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   RUN_SHEET_2H.md tells the instructor to prepare alone before the room
-  arrives. This runs the ten beats in order and then the four deep dives, times
+  arrives. This runs the ten beats in order and then the four dfrws/ programs, times
   each one and says whether it did what the run sheet promises, so a beat that cannot work on this machine is
   found the evening before rather than in front of attendees.
 
@@ -57,7 +57,7 @@ Param(
 
 $beats = @("01_scene", "02_lure", "03_download", "04_binary", "05_timeline",
     "06_lies", "07_inventory", "08_rules", "09_verdict", "10_seal",
-    "stomp_two_clocks", "ad_redirects", "ad_cookies", "run_keys")
+    "dfrws/1_timestomp", "dfrws/2a_ad_redirects", "dfrws/2b_ad_cookies", "dfrws/3_run_keys")
 $ws = "examples/workshop"
 $caseDir = "$ws/case"
 $body = "$ws/case_quilldrop.body"
@@ -219,7 +219,7 @@ if ($mode -eq "guard") {
 }
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("quilldrop-rehearse-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory -Force $tmp | Out-Null
+New-Item -ItemType Directory -Force "$tmp/dfrws" | Out-Null
 $summary = New-Object System.Collections.Generic.List[string]
 $failed = 0
 $ran = 0
@@ -234,7 +234,7 @@ foreach ($b in $beats) {
         continue
     }
     $ran++
-    Write-Host ("{0,-17} " -f $b) -NoNewline
+    Write-Host ("{0,-22} " -f $b) -NoNewline
     $watch = [Diagnostics.Stopwatch]::StartNew()
 
     $genRc = Invoke-Captured -Arguments @("gen", "--src", "$ws/$b.mut", "--dev") `
@@ -245,7 +245,7 @@ foreach ($b in $beats) {
         Write-Host "COMPILE (${elapsed}s) mutant gen refused the source"
         Get-Content "$tmp/$b.gen.out", "$tmp/$b.gen.err" -ErrorAction SilentlyContinue |
             Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
-        $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
+        $summary.Add(("{0,-22} {1,-8} {2,5}s  {3}" -f $b, "COMPILE", $elapsed, "mutant gen refused the source"))
         $failed++
         continue
     }
@@ -310,7 +310,7 @@ foreach ($b in $beats) {
         Write-Host "    unexpected on stderr:"
         $otherErr | Select-Object -First 10 | ForEach-Object { Write-Host "      $_" }
     }
-    $summary.Add(("{0,-17} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
+    $summary.Add(("{0,-22} {1,-8} {2,5}s  {3}" -f $b, $status, $elapsed, $note))
 }
 Write-Host "----------------------------------------------------------------------"
 

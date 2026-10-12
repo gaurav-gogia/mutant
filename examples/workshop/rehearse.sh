@@ -58,7 +58,7 @@ case "$ONLY" in
     [1-9]) ONLY="0$ONLY" ;;
 esac
 
-BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal stomp_two_clocks ad_redirects ad_cookies run_keys"
+BEATS="01_scene 02_lure 03_download 04_binary 05_timeline 06_lies 07_inventory 08_rules 09_verdict 10_seal dfrws/1_timestomp dfrws/2a_ad_redirects dfrws/2b_ad_cookies dfrws/3_run_keys"
 COUNT=$(echo $BEATS | wc -w | tr -d ' ')
 WS="examples/workshop"
 CASE_DIR="$WS/case"
@@ -200,6 +200,7 @@ else
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/quilldrop-rehearse-XXXXXXXX")
+mkdir -p "$TMP/dfrws"
 SUMMARY="$TMP/summary"
 : > "$SUMMARY"
 FAILED=0
@@ -213,7 +214,7 @@ for b in $BEATS; do
     if [ -n "$ONLY" ] && [ "$b" != "$ONLY" ] && [ "${b#*_}" != "$ONLY" ] && [ "${b%%_*}" != "$ONLY" ]; then
         continue
     fi
-    printf '%-17s ' "$b"
+    printf '%-22s ' "$b"
     RAN=$((RAN + 1))
     started=$(date +%s)
 
@@ -225,7 +226,7 @@ for b in $BEATS; do
         elapsed=$(( $(date +%s) - started ))
         echo "COMPILE (${elapsed}s) mutant gen refused the source"
         cat "$TMP/$b.gen.out" "$TMP/$b.gen.err" | sed 's/^/    /' | head -n 20
-        printf '%-17s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
+        printf '%-22s %-8s %4ss  %s\n' "$b" COMPILE "$elapsed" "mutant gen refused the source" >> "$SUMMARY"
         FAILED=$((FAILED + 1))
         continue
     fi
@@ -285,7 +286,7 @@ for b in $BEATS; do
         echo "    unexpected on stderr:"
         sed 's/^/      /' "$TMP/$b.err.other" | head -n 10
     fi
-    printf '%-17s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
+    printf '%-22s %-8s %4ss  %s\n' "$b" "$status" "$elapsed" "$note" >> "$SUMMARY"
 done
 echo "----------------------------------------------------------------------"
 

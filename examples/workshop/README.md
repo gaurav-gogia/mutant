@@ -1,9 +1,23 @@
 # Case QUILLDROP — a two-hour DFIR workshop in Mutant
 
-Ten programs, none longer than eighteen lines, that take one workstation's
-files and turn them into a signed handover. Read them in order: each one starts
-where the last one stopped. Four deep dives then go further into the same
-workstation: its disk, its browser and its registry.
+## Start here: the three DFRWS topics
+
+The DFRWS APAC 2026 outline gives three segments to hands-on detection. Their
+programs are in [dfrws/](dfrws/README.md). Each one stands alone, imports
+nothing, and names its input on one line, so it runs on the workshop's evidence
+or on yours.
+
+| Outline segment | Program |
+|---|---|
+| Detecting timestomping | [dfrws/1_timestomp.mut](dfrws/1_timestomp.mut) |
+| Malware hidden in ads | [dfrws/2a_ad_redirects.mut](dfrws/2a_ad_redirects.mut), [dfrws/2b_ad_cookies.mut](dfrws/2b_ad_cookies.mut) |
+| Malicious registry entries | [dfrws/3_run_keys.mut](dfrws/3_run_keys.mut) |
+
+## The story around them
+
+Ten programs, none longer than eighteen lines, take one workstation's files and
+turn them into a signed handover. Read them in order: each one starts where the
+last one stopped.
 
 Everything here targets **Mutant v2.6.0**, the released version. Nothing here
 calls a builtin that shipped after it, so an attendee who downloaded the release
@@ -24,20 +38,9 @@ can run every program.
 | 9 | [09_verdict.mut](09_verdict.mut) | Can we hand this to a lawyer? |
 | 10 | [10_seal.mut](10_seal.mut) | Can they tell if we changed it afterwards? |
 
-## Four deep dives
-
-One for each hands-on segment of the DFRWS outline that the story does not
-reach on its own.
-
-| Segment | File | The question it answers |
-|---------|------|-------------------------|
-| Detecting timestomping | [stomp_two_clocks.mut](stomp_two_clocks.mut) | Which file says it was created before it was given its name? |
-| Malware hidden in ads | [ad_redirects.mut](ad_redirects.mut) | How did the browser get to the download, and which hops did the user never click? |
-| Malware hidden in ads | [ad_cookies.mut](ad_cookies.mut) | Which sites left a cookie, and which of them was never visited? |
-| Malicious registry entries | [run_keys.mut](run_keys.mut) | What starts at logon, since when, and from where? |
-
-All fourteen share one file: [lib/quilldrop.mut](lib/quilldrop.mut), eighteen
-lines that know where the evidence is and say so when it is missing. The Sigma
+The ten share one file: [lib/quilldrop.mut](lib/quilldrop.mut), eighteen
+lines that know where the evidence is and say so when it is missing. The
+programs in `dfrws/` do not use it. The Sigma
 ruleset that step 8 runs is [quilldrop.sigma.yaml](quilldrop.sigma.yaml).
 
 Read [CASE_QUILLDROP.md](CASE_QUILLDROP.md) for the brief and
@@ -57,8 +60,8 @@ go install github.com/aoiflux/fsagen@latest
 Run it from the repository root. See [evidence/README.md](evidence/README.md)
 for what it produces and which findings need NTFS. Until you run it, each
 program prints one line saying what is missing and exits cleanly — that is what
-the `.golden` files record. The deep dives read a disk image, a registry hive and
-a cookie database as well; the same README lists them.
+the `.golden` files record. The `dfrws/` programs read a disk image, a registry
+hive and a cookie database as well; the same README lists them.
 
 ## Running a file
 

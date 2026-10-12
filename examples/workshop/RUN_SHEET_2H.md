@@ -177,12 +177,15 @@ custody buys you. Put the word back and run it once more.
 
 ---
 
-## The four deep dives
+## The three DFRWS topics — `dfrws/`
 
-Each has the same ten-minute shape as a beat. Use one in place of a beat, run
-them after the seal, or spend the thirty minutes below on them.
+These are the outline's hands-on segments, and they come first when time is
+short. Each program stands alone and names its input on one line, so it can run
+on evidence the room brings as well as on the case. Each has the same
+ten-minute shape as a beat. [dfrws/README.md](dfrws/README.md) says which line
+to change for other evidence.
 
-### The two clocks — `stomp_two_clocks.mut`
+### The two clocks — `dfrws/1_timestomp.mut`
 
 **Ask:** which file says it was created before it was given its name?
 
@@ -196,18 +199,20 @@ file whose `$STANDARD_INFORMATION` creation time is earlier than its
 clocks leaves nothing here to find, so when the script prints no file, say that
 too.
 
-### The redirect chain — `ad_redirects.mut`
+### The redirect chain — `dfrws/2a_ad_redirects.mut`
 
 **Ask:** how did the browser get to the download?
 
-Chrome records each visit with `from_visit`, the visit that led to it. The
-script walks that link back from the last visit.
+Chrome records each visit with `from_visit`, the visit that led to it, and
+marks the visit that ends a redirect chain. The script walks each chain back to
+the visit that started it.
 
 **The twist:** the user clicked one ad. The ad network's own servers then
-redirected the browser on to the download page. `redirect: true` is the high bit of
-`transition`; Mutant has no hex literals, so the script names it in decimal.
+redirected the browser on to the download page. A server redirect is the high
+bit of `transition`; Mutant has no hex literals, so the script names it in
+decimal.
 
-### The cookie jar — `ad_cookies.mut`
+### The cookie jar — `dfrws/2b_ad_cookies.mut`
 
 **Ask:** which sites knew this browser was there?
 
@@ -216,7 +221,7 @@ something embedded in a page the user did visit, such as an ad or a tracker.
 Chrome encrypts cookie values. The host, name and expiry are not encrypted, and
 they are all this question needs.
 
-### The run keys — `run_keys.mut`
+### The run keys — `dfrws/3_run_keys.mut`
 
 **Ask:** what starts when the clerk logs on, and since when?
 

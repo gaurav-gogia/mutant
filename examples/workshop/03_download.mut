@@ -7,7 +7,7 @@ let dropped = quilldrop.path("Users/clerk/Downloads/Invoice_88412.pdf.exe");
 if (quilldrop.ready(quilldrop.root)) {
     let kind, _ = fs_magic(dropped);
     putln("  magic", kind["type"], kind["mime"]);
-    let hist, _ = sqlite_query(quilldrop.path("Users/clerk/AppData/Local/Google/Chrome/History"), "select url from urls");
+    let hist, _ = sqlite_query(quilldrop.path("Users/clerk/AppData/Local/Google/Chrome/User Data/Default/History"), "select url from urls");
     for (r in hist["rows"]) {
         putln("  visited", r["url"]);
     }
